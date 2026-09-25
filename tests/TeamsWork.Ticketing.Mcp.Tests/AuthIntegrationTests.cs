@@ -14,6 +14,7 @@ using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
+using TeamsWork.Ticketing.Mcp.Configuration;
 
 namespace TeamsWork.Ticketing.Mcp.Tests;
 
@@ -28,6 +29,9 @@ public sealed class McpServerFactory : WebApplicationFactory<Program>
     public static readonly string Issuer = $"https://login.microsoftonline.com/{TenantId}/v2.0";
     public static readonly SymmetricSecurityKey SigningKey = new(RandomNumberGenerator.GetBytes(64));
 
+    /// <summary>Extra settings, applied last.</summary>
+    public Dictionary<string, string> Settings { get; init; } = [];
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Production");
@@ -38,6 +42,11 @@ public sealed class McpServerFactory : WebApplicationFactory<Program>
         builder.UseSetting("Ticketing:ServiceAccount:Id", "sa-oid");
         builder.UseSetting("Ticketing:ServiceAccount:Name", "Ticketing Bot");
         builder.UseSetting("Ticketing:ServiceAccount:Email", "bot@example.test");
+
+        foreach ((string key, string value) in Settings)
+        {
+            builder.UseSetting(key, value);
+        }
 
         builder.ConfigureTestServices(services =>
         {
@@ -108,6 +117,20 @@ public sealed class AuthIntegrationTests : IClassFixture<McpServerFactory>
     public AuthIntegrationTests(McpServerFactory factory) => _factory = factory;
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    [Theory]
+    [InlineData("Entra:Instance", "secret-instance")]
+    [InlineData("Entra:PublicBaseUrl", "secret-base")]
+    public async Task Bad_entra_urls_are_reported_as_configuration_problems(string key, string value)
+    {
+        await using var factory = new McpServerFactory { Settings = { [key] = value } };
+
+        Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+
+        Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
+        Assert.Contains(key, report, StringComparison.Ordinal);
+        Assert.DoesNotContain(value, report, StringComparison.Ordinal);
+    }
 
     [Fact]
     public async Task Healthz_is_anonymous()

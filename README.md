@@ -209,7 +209,7 @@ Estimated running cost: Container Apps consumption with scale-to-zero (mostly wi
 | `Ticketing:BaseUrl` | appsettings / env | Ticketing API base URL |
 | `Ticketing:DefaultTimeZoneId` | appsettings / env | IANA zone for the API's required `timezone` offset (default `America/Chicago`) |
 | `Ticketing:ServiceAccount:{Id,Name,Email}` | env / user secrets | Actor for app-only callers; **required** in stdio and `--local` modes |
-| `Auth:Mode` / `--local` | CLI / env (dev only) | `Local` = unauthenticated loopback HTTP on `Local:Port` (default 5188) |
+| `Auth:Mode` / `--local` | CLI / env (dev only) | `Local` = unauthenticated loopback HTTP on `Local:Port` (default 5188). Unset means `Entra`; any other value stops startup |
 | `Entra:TenantId`, `Entra:ClientId` | env | Server app registration (Entra HTTP mode) |
 | `Entra:PublicBaseUrl` | env | Optional custom domain for protected-resource metadata |
 | `KeyVault:Uri` | env (local only) | Load `Ticketing--ApiKey` from Key Vault with `DefaultAzureCredential` |

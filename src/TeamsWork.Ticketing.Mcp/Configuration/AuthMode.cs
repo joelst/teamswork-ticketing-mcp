@@ -26,7 +26,23 @@ public static class AuthModeResolver
             return AuthMode.Local;
         }
 
-        string? configured = configuration[ConfigurationKey];
-        return Enum.TryParse(configured, ignoreCase: true, out AuthMode mode) ? mode : AuthMode.Entra;
+        string? configured = configuration[ConfigurationKey]?.Trim();
+        if (string.IsNullOrEmpty(configured))
+        {
+            return AuthMode.Entra;
+        }
+
+        // Names only: Enum.TryParse would also accept "1", and a typo must not quietly fall back to Entra and then
+        // fail with an unrelated "Entra:TenantId ... must be configured".
+        foreach (AuthMode mode in Enum.GetValues<AuthMode>())
+        {
+            if (string.Equals(configured, mode.ToString(), StringComparison.OrdinalIgnoreCase))
+            {
+                return mode;
+            }
+        }
+
+        throw new StartupConfigurationException(
+            $"{ConfigurationKey} must be {string.Join(" or ", Enum.GetNames<AuthMode>())}. Leave it unset for Entra, or start with {CommandLineFlag}.");
     }
 }

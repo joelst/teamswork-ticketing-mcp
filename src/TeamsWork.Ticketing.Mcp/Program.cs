@@ -26,6 +26,21 @@ using TeamsWork.Ticketing.Mcp.Tools;
 bool useStdio = args.Contains("--stdio", StringComparer.OrdinalIgnoreCase) ||
                 string.Equals(Environment.GetEnvironmentVariable("MCP_TRANSPORT"), "stdio", StringComparison.OrdinalIgnoreCase);
 
+// A configuration problem that ends the process gets a plain explanation on stderr (never stdout, the stdio MCP
+// channel) instead of the runtime's stack trace. Hooking the unhandled-exception event, rather than catching here,
+// leaves the exception untouched for hosts that run this entry point in-process, such as the integration tests.
+AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+{
+    // Only the local modes read user secrets, so only point there when running one of them.
+    if (e.ExceptionObject is Exception ex &&
+        StartupErrorReport.TryFormat(ex, Environment.GetEnvironmentVariables(), Program.UserSecretsLoaded ? UserSecretsFilePath() : null, out string report))
+    {
+        Console.Error.WriteLine(report);
+        Console.Error.Flush();
+        Environment.Exit(1);
+    }
+};
+
 if (useStdio)
 {
     await RunStdioAsync(args);
@@ -47,6 +62,7 @@ static async Task RunStdioAsync(string[] args)
 
     // User secrets are handy for the API key locally; load them in every environment for this transport.
     builder.Configuration.AddUserSecrets(Assembly.GetExecutingAssembly(), optional: true);
+    Program.UserSecretsLoaded = true;
     AddKeyVaultIfConfigured(builder.Configuration);
     AddTicketingServices(builder.Services, builder.Configuration, requireServiceAccount: true);
     builder.Services.AddSingleton<IActingUserProvider, ServiceAccountActingUserProvider>();
@@ -75,6 +91,7 @@ static async Task RunHttpAsync(string[] args)
     if (authMode == AuthMode.Local)
     {
         builder.Configuration.AddUserSecrets(Assembly.GetExecutingAssembly(), optional: true);
+        Program.UserSecretsLoaded = true;
     }
 
     AddKeyVaultIfConfigured(builder.Configuration);
@@ -146,13 +163,13 @@ static int ConfigureLocalMode(WebApplicationBuilder builder)
     // Refuse to run unauthenticated inside Azure Container Apps (the platform sets CONTAINER_APP_NAME).
     if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CONTAINER_APP_NAME")))
     {
-        throw new InvalidOperationException("Auth:Mode=Local is for developer machines only and cannot be used in Azure Container Apps.");
+        throw new StartupConfigurationException("Auth:Mode=Local is for developer machines only and cannot be used in Azure Container Apps.");
     }
 
-    int port = builder.Configuration.GetValue<int?>("Local:Port") ?? 5188;
+    int port = StartupConfigurationException.ReadSetting(() => builder.Configuration.GetValue<int?>("Local:Port"), "Local:Port") ?? 5188;
     if (port is < 1 or > 65535)
     {
-        throw new InvalidOperationException("Local:Port must be between 1 and 65535.");
+        throw new StartupConfigurationException("Local:Port must be between 1 and 65535.");
     }
 
     // Bind to loopback only, regardless of ASPNETCORE_URLS or launch settings.
@@ -224,9 +241,21 @@ static EntraOptions ConfigureEntraMode(WebApplicationBuilder builder)
     EntraOptions entra = builder.Configuration.GetSection(EntraOptions.SectionName).Get<EntraOptions>() ?? new EntraOptions();
     if (!entra.IsConfigured)
     {
-        throw new InvalidOperationException(
+        throw new StartupConfigurationException(
             "Entra:TenantId and Entra:ClientId must be configured. The HTTP endpoint always requires Microsoft Entra ID " +
             "authentication unless you start it with --local (loopback-only developer mode).");
+    }
+
+    // Both only matter once a token arrives, so without these checks a typo would surface as a failed request.
+    if (!Uri.TryCreate(entra.Instance, UriKind.Absolute, out Uri? instance) || instance.Scheme != Uri.UriSchemeHttps)
+    {
+        throw new StartupConfigurationException("Entra:Instance must be an absolute https URL. Leave it unset to use https://login.microsoftonline.com/.");
+    }
+
+    if (!string.IsNullOrWhiteSpace(entra.PublicBaseUrl) &&
+        !(Uri.TryCreate(entra.PublicBaseUrl, UriKind.Absolute, out Uri? publicBase) && publicBase.Scheme is "http" or "https"))
+    {
+        throw new StartupConfigurationException("Entra:PublicBaseUrl must be an absolute http or https URL, or left unset.");
     }
 
     builder.Services.AddOptions<EntraOptions>().Bind(builder.Configuration.GetSection(EntraOptions.SectionName));
@@ -308,32 +337,53 @@ static void ConfigureServerOptions(ModelContextProtocol.Server.McpServerOptions 
         "The upstream API allows 100 requests per minute, so prefer 'select' and sensible page sizes.";
 }
 
+static string? UserSecretsFilePath()
+{
+    string? id = Assembly.GetExecutingAssembly()
+        .GetCustomAttribute<Microsoft.Extensions.Configuration.UserSecrets.UserSecretsIdAttribute>()?.UserSecretsId;
+    try
+    {
+        return id is null ? null : Microsoft.Extensions.Configuration.UserSecrets.PathHelper.GetSecretsPathFromSecretsId(id);
+    }
+    catch (InvalidOperationException)
+    {
+        return null; // no usable profile directory (for example a service account without a home folder)
+    }
+}
+
 static void AddKeyVaultIfConfigured(IConfigurationManager configuration)
 {
     // Used for local runs. In Azure the API key is injected as an environment variable from a
     // Key Vault-backed Container Apps secret, so this block is a no-op there.
     string? vaultUri = configuration["KeyVault:Uri"];
-    if (!string.IsNullOrWhiteSpace(vaultUri))
+    if (string.IsNullOrWhiteSpace(vaultUri))
     {
-        configuration.AddAzureKeyVault(new Uri(vaultUri), new DefaultAzureCredential());
+        return;
     }
+
+    if (!Uri.TryCreate(vaultUri, UriKind.Absolute, out Uri? uri) || uri.Scheme != Uri.UriSchemeHttps)
+    {
+        throw new StartupConfigurationException("KeyVault:Uri must be an absolute https URL, such as https://<vault-name>.vault.azure.net/.");
+    }
+
+    configuration.AddAzureKeyVault(uri, new DefaultAzureCredential());
 }
 
 static void AddTicketingServices(IServiceCollection services, IConfiguration configuration, bool requireServiceAccount)
 {
+    IConfigurationSection section = configuration.GetSection(TicketingOptions.SectionName);
     services.AddOptions<TicketingOptions>()
-        .Bind(configuration.GetSection(TicketingOptions.SectionName))
+        // Bound by hand so a value of the wrong type (Ticketing__MaxPageSize=abc) is reported as a setting to fix.
+        .Configure(o => StartupConfigurationException.ReadSetting(() => { section.Bind(o); return o; }, TicketingOptions.SectionName))
         .ValidateDataAnnotations()
         .Validate(o => !string.IsNullOrWhiteSpace(o.ApiKey),
-            "Ticketing:ApiKey is not configured. Provide it via the Ticketing__ApiKey environment variable, user secrets " +
-            "(dotnet user-secrets set \"Ticketing:ApiKey\" ...), or Key Vault (KeyVault:Uri, secret name Ticketing--ApiKey).")
+            "Ticketing:ApiKey is not set. Use your Ticketing instance's API key (Ticketing app > Settings > API). " +
+            "In Azure it is read from Key Vault (KeyVault:Uri, secret Ticketing--ApiKey).")
         .Validate(o => Uri.TryCreate(o.BaseUrl, UriKind.Absolute, out Uri? u) && u.Scheme == Uri.UriSchemeHttps,
             "Ticketing:BaseUrl must be an absolute https URL.")
-        .Validate(o => o.DefaultPageSize <= o.MaxPageSize, "Ticketing:DefaultPageSize cannot exceed Ticketing:MaxPageSize.")
-        .Validate(o => !requireServiceAccount || o.ServiceAccount?.IsConfigured == true,
-            "Ticketing:ServiceAccount:Id, :Name and :Email are required when running without Entra authentication " +
-            "(stdio or --local). They identify who ticket changes are attributed to. Set them with environment variables " +
-            "(Ticketing__ServiceAccount__Id, ...) or user secrets.")
+        .Validate(o => o.DefaultPageSize <= o.MaxPageSize, "Ticketing:DefaultPageSize cannot exceed Ticketing:MaxPageSize.")        .Validate(o => !requireServiceAccount || o.ServiceAccount?.IsConfigured == true,
+            "Ticketing:ServiceAccount:Id, :Name and :Email must all be set when running with --stdio or --local. " +
+            "Ticket changes are recorded under this account (Id is your Entra object ID).")
         .ValidateOnStart();
 
     services.AddSingleton(TimeProvider.System);
@@ -366,4 +416,9 @@ static ProtectedResourceMetadata BuildResourceMetadata(EntraOptions entra, strin
 /// <summary>Exposed so integration tests can host the HTTP transport with WebApplicationFactory.</summary>
 public partial class Program
 {
+    /// <summary>
+    /// Set once the resolved run mode has added the user-secrets file as a configuration source, so a startup error
+    /// report points there only when the file would actually be read.
+    /// </summary>
+    internal static bool UserSecretsLoaded { get; private set; }
 }
