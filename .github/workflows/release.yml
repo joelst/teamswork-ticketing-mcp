@@ -1,0 +1,173 @@
+# Builds and publishes a GitHub release when a version tag (v1.2.3 or v0.1.0-beta) is pushed.
+# Tags starting with v0. or containing a hyphen are published as pre-releases.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  PROJECT: src/TeamsWork.Ticketing.Mcp/TeamsWork.Ticketing.Mcp.csproj
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test -c Release
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: win-x64
+            os: windows-latest
+            rid: win-x64
+            exe: TeamsWork.Ticketing.Mcp.exe
+            archive: zip
+          - name: linux-x64
+            os: ubuntu-latest
+            rid: linux-x64
+            exe: TeamsWork.Ticketing.Mcp
+            archive: tar.gz
+          - name: osx-arm64
+            os: macos-latest
+            rid: osx-arm64
+            exe: TeamsWork.Ticketing.Mcp
+            archive: tar.gz
+          - name: portable
+            os: ubuntu-latest
+            rid: ""
+            exe: ""
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Publish
+        run: |
+          COMMON="-c Release -p:Version=$VERSION -p:DebugType=none -p:IsTransformWebConfigDisabled=true -o out"
+          if [ -n "${{ matrix.rid }}" ]; then
+            dotnet publish "$PROJECT" $COMMON -r ${{ matrix.rid }} --self-contained \
+              -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
+          else
+            dotnet publish "$PROJECT" $COMMON
+          fi
+
+      - name: Stage files
+        run: |
+          STAGE="teamswork-ticketing-mcp-$VERSION-${{ matrix.name }}"
+          mkdir -p "stage/$STAGE"
+          if [ -n "${{ matrix.exe }}" ]; then
+            cp "out/${{ matrix.exe }}" "stage/$STAGE/"
+          else
+            # Framework-dependent: everything except web-server leftovers.
+            (cd out && cp -R . "../stage/$STAGE/")
+            rm -f "stage/$STAGE"/web.config "stage/$STAGE"/appsettings.Development.json \
+                  "stage/$STAGE"/*.staticwebassets.*.json "stage/$STAGE"/aspnetcorev2_inprocess.dll
+          fi
+          cp LICENSE README.md "stage/$STAGE/"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+          ls -la "stage/$STAGE"
+
+      - name: Smoke test over stdio
+        timeout-minutes: 2
+        env:
+          Ticketing__ApiKey: ci-dummy-key
+          Ticketing__ServiceAccount__Id: ci
+          Ticketing__ServiceAccount__Name: CI
+          Ticketing__ServiceAccount__Email: ci@example.test
+        run: |
+          cd "stage/$STAGE"
+          if [ -n "${{ matrix.exe }}" ]; then CMD="./${{ matrix.exe }}"; else CMD="dotnet TeamsWork.Ticketing.Mcp.dll"; fi
+          INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+          RESPONSE=$( (printf '%s\n' "$INIT"; sleep 8) | $CMD --stdio 2>/dev/null | head -n1 )
+          echo "$RESPONSE"
+          echo "$RESPONSE" | grep -q "\"version\":\"$VERSION\""
+
+      - name: Archive
+        run: |
+          mkdir -p dist
+          cd stage
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            if command -v zip >/dev/null; then zip -qr "../dist/$STAGE.zip" "$STAGE"; else 7z a -tzip "../dist/$STAGE.zip" "$STAGE" >/dev/null; fi
+          else
+            tar -czf "../dist/$STAGE.tar.gz" "$STAGE"
+          fi
+          ls -la ../dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PRERELEASE=""
+          case "$VERSION" in 0.*|*-*) PRERELEASE="--prerelease" ;; esac
+          cat > notes.md <<'EOF'
+          MCP server for the TeamsWork Ticketing API. See the README for configuration and client setup.
+
+          ## Downloads
+
+          | File | Platform | Needs .NET installed |
+          | --- | --- | --- |
+          | `*-win-x64.zip` | Windows x64 | No |
+          | `*-linux-x64.tar.gz` | Linux x64 | No |
+          | `*-osx-arm64.tar.gz` | macOS Apple silicon | No |
+          | `*-portable.zip` | Any OS | Yes, .NET 10 runtime. Run `dotnet TeamsWork.Ticketing.Mcp.dll --stdio` |
+
+          `SHA256SUMS.txt` lists checksums for every file.
+
+          ## First run
+
+          The executables are not code-signed.
+
+          - **Windows:** SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**, or unblock the file with `Unblock-File .\TeamsWork.Ticketing.Mcp.exe`. If your organization blocks unsigned executables, use the portable zip, which runs through Microsoft's signed `dotnet` host.
+          - **macOS:** remove the quarantine flag with `xattr -d com.apple.quarantine ./TeamsWork.Ticketing.Mcp`.
+          - **Linux/macOS:** the tarball keeps the execute bit; if it is lost, run `chmod +x TeamsWork.Ticketing.Mcp`.
+
+          ## Configure
+
+          Set the API key and the account ticket changes are recorded under, as environment variables or in a user-secrets file. See "Configure without the .NET SDK" in the README.
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* $PRERELEASE --title "v$VERSION" --notes-file notes.md --generate-notes

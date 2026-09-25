@@ -53,7 +53,50 @@ The server was built against TeamsWork Ticketing API v1.1.0 (`https://teamswork.
 vendor's OpenAPI document is not redistributed here; obtain it from TeamsWork. If you keep a local copy in
 `docs/openapi/`, it is git-ignored.
 
-## Run it locally
+## Download a release
+
+Pre-built binaries are on the [Releases](https://github.com/joelst/teamswork-ticketing-mcp/releases) page:
+single-file executables for Windows x64, Linux x64, and macOS Apple silicon that need no .NET install, plus a
+portable build that runs anywhere .NET 10 is installed (`dotnet TeamsWork.Ticketing.Mcp.dll --stdio`). The
+executables are not code-signed; the release notes explain the first-run prompts. Extract the archive, then follow
+[Configure without the .NET SDK](#configure-without-the-net-sdk) and [Connect an MCP client](#4-connect-an-mcp-client).
+
+### Configure without the .NET SDK
+
+The server needs the API key and the account ticket changes are recorded under. Without the SDK, provide them in
+one of two ways.
+
+**Environment variables** (use `__` where the setting name has `:`):
+
+| Variable | Value |
+| --- | --- |
+| `Ticketing__ApiKey` | Ticketing instance API key |
+| `Ticketing__ServiceAccount__Id` | Your Entra object ID |
+| `Ticketing__ServiceAccount__Name` | Your display name |
+| `Ticketing__ServiceAccount__Email` | Your email |
+
+Pass them from the MCP client config (for example `claude mcp add ... --env Ticketing__ServiceAccount__Id=...`).
+Keep the API key out of client config files where you can, because they are stored as plain text.
+
+**A user-secrets file**, which keeps the key out of client configs. Create this file:
+
+- Windows: `%APPDATA%\Microsoft\UserSecrets\teamswork-taas-mcp\secrets.json`
+- macOS/Linux: `~/.microsoft/usersecrets/teamswork-taas-mcp/secrets.json`
+
+```json
+{
+  "Ticketing:ApiKey": "<api key>",
+  "Ticketing:ServiceAccount:Id": "<your Entra object id>",
+  "Ticketing:ServiceAccount:Name": "<your name>",
+  "Ticketing:ServiceAccount:Email": "<your email>"
+}
+```
+
+This is the same file `dotnet user-secrets set` writes, so both approaches below end up in the same place. Don't
+edit the `appsettings.json` shipped next to the executable: it is read from the current directory, which MCP
+clients don't set to the install folder, and every value in it already has a built-in default.
+
+## Run it locally from source
 
 You need the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) and your Ticketing instance's API key
 (Ticketing app → Settings → API). Locally no Entra setup is required.
