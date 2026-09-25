@@ -166,7 +166,7 @@ static int ConfigureLocalMode(WebApplicationBuilder builder)
         throw new StartupConfigurationException("Auth:Mode=Local is for developer machines only and cannot be used in Azure Container Apps.");
     }
 
-    int port = builder.Configuration.GetValue<int?>("Local:Port") ?? 5188;
+    int port = StartupConfigurationException.ReadSetting(() => builder.Configuration.GetValue<int?>("Local:Port"), "Local:Port") ?? 5188;
     if (port is < 1 or > 65535)
     {
         throw new StartupConfigurationException("Local:Port must be between 1 and 65535.");
@@ -244,6 +244,18 @@ static EntraOptions ConfigureEntraMode(WebApplicationBuilder builder)
         throw new StartupConfigurationException(
             "Entra:TenantId and Entra:ClientId must be configured. The HTTP endpoint always requires Microsoft Entra ID " +
             "authentication unless you start it with --local (loopback-only developer mode).");
+    }
+
+    // Both only matter once a token arrives, so without these checks a typo would surface as a failed request.
+    if (!Uri.TryCreate(entra.Instance, UriKind.Absolute, out Uri? instance) || instance.Scheme != Uri.UriSchemeHttps)
+    {
+        throw new StartupConfigurationException("Entra:Instance must be an absolute https URL. Leave it unset to use https://login.microsoftonline.com/.");
+    }
+
+    if (!string.IsNullOrWhiteSpace(entra.PublicBaseUrl) &&
+        !(Uri.TryCreate(entra.PublicBaseUrl, UriKind.Absolute, out Uri? publicBase) && publicBase.Scheme is "http" or "https"))
+    {
+        throw new StartupConfigurationException("Entra:PublicBaseUrl must be an absolute http or https URL, or left unset.");
     }
 
     builder.Services.AddOptions<EntraOptions>().Bind(builder.Configuration.GetSection(EntraOptions.SectionName));
@@ -344,24 +356,32 @@ static void AddKeyVaultIfConfigured(IConfigurationManager configuration)
     // Used for local runs. In Azure the API key is injected as an environment variable from a
     // Key Vault-backed Container Apps secret, so this block is a no-op there.
     string? vaultUri = configuration["KeyVault:Uri"];
-    if (!string.IsNullOrWhiteSpace(vaultUri))
+    if (string.IsNullOrWhiteSpace(vaultUri))
     {
-        configuration.AddAzureKeyVault(new Uri(vaultUri), new DefaultAzureCredential());
+        return;
     }
+
+    if (!Uri.TryCreate(vaultUri, UriKind.Absolute, out Uri? uri) || uri.Scheme != Uri.UriSchemeHttps)
+    {
+        throw new StartupConfigurationException("KeyVault:Uri must be an absolute https URL, such as https://<vault-name>.vault.azure.net/.");
+    }
+
+    configuration.AddAzureKeyVault(uri, new DefaultAzureCredential());
 }
 
 static void AddTicketingServices(IServiceCollection services, IConfiguration configuration, bool requireServiceAccount)
 {
+    IConfigurationSection section = configuration.GetSection(TicketingOptions.SectionName);
     services.AddOptions<TicketingOptions>()
-        .Bind(configuration.GetSection(TicketingOptions.SectionName))
+        // Bound by hand so a value of the wrong type (Ticketing__MaxPageSize=abc) is reported as a setting to fix.
+        .Configure(o => StartupConfigurationException.ReadSetting(() => { section.Bind(o); return o; }, TicketingOptions.SectionName))
         .ValidateDataAnnotations()
         .Validate(o => !string.IsNullOrWhiteSpace(o.ApiKey),
             "Ticketing:ApiKey is not set. Use your Ticketing instance's API key (Ticketing app > Settings > API). " +
             "In Azure it is read from Key Vault (KeyVault:Uri, secret Ticketing--ApiKey).")
         .Validate(o => Uri.TryCreate(o.BaseUrl, UriKind.Absolute, out Uri? u) && u.Scheme == Uri.UriSchemeHttps,
             "Ticketing:BaseUrl must be an absolute https URL.")
-        .Validate(o => o.DefaultPageSize <= o.MaxPageSize, "Ticketing:DefaultPageSize cannot exceed Ticketing:MaxPageSize.")
-        .Validate(o => !requireServiceAccount || o.ServiceAccount?.IsConfigured == true,
+        .Validate(o => o.DefaultPageSize <= o.MaxPageSize, "Ticketing:DefaultPageSize cannot exceed Ticketing:MaxPageSize.")        .Validate(o => !requireServiceAccount || o.ServiceAccount?.IsConfigured == true,
             "Ticketing:ServiceAccount:Id, :Name and :Email must all be set when running with --stdio or --local. " +
             "Ticket changes are recorded under this account (Id is your Entra object ID).")
         .ValidateOnStart();

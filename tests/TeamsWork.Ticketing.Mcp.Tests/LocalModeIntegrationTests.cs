@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
+using TeamsWork.Ticketing.Mcp.Configuration;
 
 namespace TeamsWork.Ticketing.Mcp.Tests;
 
@@ -11,6 +12,9 @@ public sealed class LocalModeFactory : WebApplicationFactory<Program>
 {
     public bool IncludeServiceAccount { get; init; } = true;
 
+    /// <summary>Extra settings, applied last.</summary>
+    public Dictionary<string, string> Settings { get; init; } = [];
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Production");
@@ -18,11 +22,14 @@ public sealed class LocalModeFactory : WebApplicationFactory<Program>
         builder.UseSetting("Ticketing:ApiKey", "local-test-key");
         builder.UseSetting("Ticketing:BaseUrl", "https://ticketing.invalid/v1");
 
-        if (IncludeServiceAccount)
+        // Set even when excluded, so Ticketing__ServiceAccount__* variables on a developer machine cannot fill them in.
+        builder.UseSetting("Ticketing:ServiceAccount:Id", IncludeServiceAccount ? "local-oid" : "");
+        builder.UseSetting("Ticketing:ServiceAccount:Name", IncludeServiceAccount ? "Local Dev" : "");
+        builder.UseSetting("Ticketing:ServiceAccount:Email", IncludeServiceAccount ? "dev@example.test" : "");
+
+        foreach ((string key, string value) in Settings)
         {
-            builder.UseSetting("Ticketing:ServiceAccount:Id", "local-oid");
-            builder.UseSetting("Ticketing:ServiceAccount:Name", "Local Dev");
-            builder.UseSetting("Ticketing:ServiceAccount:Email", "dev@example.test");
+            builder.UseSetting(key, value);
         }
     }
 }
@@ -130,5 +137,23 @@ public sealed class LocalModeIntegrationTests
         Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
 
         Assert.Contains("ServiceAccount", ex.ToString(), StringComparison.Ordinal);
+    }
+
+    // Each bad value must reach the entry point as a configuration failure (reported without a stack trace) that
+    // names the setting but never repeats the value.
+    [Theory]
+    [InlineData("Local:Port", "secret-port")]
+    [InlineData("Ticketing:MaxPageSize", "secret-size")]
+    [InlineData("KeyVault:Uri", "secret-vault")]
+    [InlineData("Auth:Mode", "secret-mode")]
+    public async Task Bad_setting_values_are_reported_as_configuration_problems(string key, string value)
+    {
+        await using var factory = new LocalModeFactory { Settings = { [key] = value } };
+
+        Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+
+        Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
+        Assert.Contains(key, report, StringComparison.Ordinal);
+        Assert.DoesNotContain(value, report, StringComparison.Ordinal);
     }
 }

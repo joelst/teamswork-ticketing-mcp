@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Reflection;
 using System.Text;
 using Microsoft.Extensions.Options;
 
@@ -12,20 +13,15 @@ public static class StartupErrorReport
 {
     public const string SetupGuideUrl = "https://github.com/joelst/teamswork-ticketing-mcp#configure-without-the-net-sdk";
 
-    // Settings people commonly set by environment variable, used to spot names .NET will not bind.
-    private static readonly string[] KnownSettings =
+    // Every setting the server reads, used to spot environment variables .NET will not bind. The options classes are
+    // walked so a new property is covered automatically; the settings read directly from configuration are listed.
+    internal static readonly string[] KnownSettings =
     [
-        "Ticketing:ApiKey",
-        "Ticketing:ServiceAccount:Id",
-        "Ticketing:ServiceAccount:Name",
-        "Ticketing:ServiceAccount:Email",
-        "Ticketing:BaseUrl",
-        "Ticketing:DefaultTimeZoneId",
-        "KeyVault:Uri",
-        "Entra:TenantId",
-        "Entra:ClientId",
-        "Auth:Mode",
+        .. SettingPaths(TicketingOptions.SectionName, typeof(TicketingOptions)),
+        .. SettingPaths(EntraOptions.SectionName, typeof(EntraOptions)),
+        AuthModeResolver.ConfigurationKey,
         "Local:Port",
+        "KeyVault:Uri",
     ];
 
     /// <summary>
@@ -42,7 +38,7 @@ public static class StartupErrorReport
         }
 
         var text = new StringBuilder();
-        text.AppendLine("The TeamsWork Ticketing MCP server cannot start because its configuration is incomplete:");
+        text.AppendLine("The TeamsWork Ticketing MCP server cannot start until these settings are fixed:");
         text.AppendLine();
         foreach (string problem in problems)
         {
@@ -78,8 +74,10 @@ public static class StartupErrorReport
     }
 
     /// <summary>
-    /// Environment variables whose name matches a known setting once separators are ignored but lacks the
-    /// <c>__</c> separator, such as <c>TICKETING_APIKEY</c> or <c>TICKETING_API_KEY</c> for <c>Ticketing__ApiKey</c>.
+    /// Environment variables that match a known setting once separators are ignored, but that the environment
+    /// provider would bind to some other key. Examples: <c>TICKETING_APIKEY</c> or <c>TICKETING_API_KEY</c> for
+    /// <c>Ticketing__ApiKey</c>, and <c>Ticketing__ServiceAccount_Email</c>, which binds to
+    /// <c>Ticketing:ServiceAccount_Email</c>.
     /// </summary>
     public static List<(string Found, string Expected)> FindMisnamedVariables(IDictionary environment)
     {
@@ -88,7 +86,11 @@ public static class StartupErrorReport
 
         foreach (string name in environment.Keys.OfType<string>().Order(StringComparer.OrdinalIgnoreCase))
         {
-            if (!name.Contains("__", StringComparison.Ordinal) && known.TryGetValue(Normalize(name), out string? expected))
+            // The environment provider turns "__" into ':' and matches keys case-insensitively.
+            string boundKey = name.Replace("__", ":", StringComparison.Ordinal);
+            bool bindsCorrectly = KnownSettings.Contains(boundKey, StringComparer.OrdinalIgnoreCase);
+
+            if (!bindsCorrectly && known.TryGetValue(Normalize(name), out string? expected))
             {
                 result.Add((name, expected));
             }
@@ -96,6 +98,17 @@ public static class StartupErrorReport
 
         return result;
     }
+
+    /// <summary>Configuration paths of the settable properties of <paramref name="type"/>, nested classes included.</summary>
+    private static IEnumerable<string> SettingPaths(string prefix, Type type) =>
+        type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.CanWrite)
+            .SelectMany(p =>
+            {
+                Type t = Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType;
+                string path = $"{prefix}:{p.Name}";
+                return t.IsPrimitive || t.IsEnum || t == typeof(string) ? [path] : SettingPaths(path, t);
+            });
 
     private static string Normalize(string name) =>
         name.Replace("_", string.Empty, StringComparison.Ordinal).Replace(":", string.Empty, StringComparison.Ordinal).ToLowerInvariant();
