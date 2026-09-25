@@ -1,0 +1,41 @@
+# Builds and tests every pull request and every push to main. Warnings are errors and NuGetAudit fails restore on
+# known-vulnerable packages (see Directory.Build.props), so a green run means clean build, clean dependencies, and
+# passing tests. Needs no secrets.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+jobs:
+  build-test:
+    name: build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both platforms the release builds on.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - run: dotnet restore
+      - run: dotnet build -c Release --no-restore -p:ContinuousIntegrationBuild=true
+      - run: dotnet test -c Release --no-build
