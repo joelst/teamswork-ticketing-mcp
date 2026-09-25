@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>TeamsWork.Ticketing.Mcp</RootNamespace>
+    <AssemblyName>TeamsWork.Ticketing.Mcp</AssemblyName>
+    <UserSecretsId>teamswork-taas-mcp</UserSecretsId>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+
+    <!-- Container image produced by `dotnet publish /t:PublishContainer` (no Dockerfile / Docker daemon required). -->
+    <ContainerRepository>teamswork-taas-mcp</ContainerRepository>
+    <ContainerBaseImage>mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled</ContainerBaseImage>
+    <ContainerRuntimeIdentifier>linux-x64</ContainerRuntimeIdentifier>
+    <ContainerUser>app</ContainerUser>
+    <ContainerFamily>noble-chiseled</ContainerFamily>
+    <EnableSdkContainerSupport>true</EnableSdkContainerSupport>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ContainerPort Include="8080" Type="tcp" />
+    <ContainerEnvironmentVariable Include="ASPNETCORE_HTTP_PORTS" Value="8080" />
+    <ContainerEnvironmentVariable Include="DOTNET_EnableDiagnostics" Value="0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
+    <PackageReference Include="Microsoft.Identity.Web" />
+    <PackageReference Include="Azure.Identity" />
+    <PackageReference Include="Azure.Extensions.AspNetCore.Configuration.Secrets" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TeamsWork.Ticketing.Mcp.Tests" />
+  </ItemGroup>
+
+</Project>

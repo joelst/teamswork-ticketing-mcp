@@ -1,0 +1,260 @@
+# ---------------------------------------------------------------------------------------------------------------
+# TeamsWork Ticketing MCP server - build, test, and deploy to Azure Container Apps.
+#
+# Stages
+#   1. Build      restore/build/test, dependency vulnerability audit, publish test results   (PRs and main)
+#   2. Core       deploy infra/core.bicep (ACR, Key Vault, identity, Container Apps env)       (main only)
+#   3. Image      build the container image with the .NET SDK and push it to ACR              (main only)
+#   4. Deploy     deploy infra/app.bicep with the new image, then smoke-test the endpoint      (main only, approval)
+#
+# Required in Azure DevOps
+#   * Service connection (Azure Resource Manager, workload identity federation) named in $(azureServiceConnection)
+#     with Contributor + User Access Administrator (or Role Based Access Control Administrator) on the resource group.
+#   * Variable group "taas-mcp-prod" with:
+#       azureServiceConnection, azureResourceGroup, azureLocation,
+#       namePrefix (e.g. taasmcp), environmentName (e.g. prod),
+#       entraTenantId, entraClientId (from infra/scripts/New-EntraAppRegistrations.ps1),
+#       serviceAccountId, serviceAccountName, serviceAccountEmail (optional, for app-only callers),
+#       publicBaseUrl (optional custom domain)
+#     Optional secret variable: ticketingApiKey (only if you want the pipeline to seed Key Vault; otherwise
+#     run infra/scripts/Set-TicketingApiKey.ps1 once).
+#   * Environment "taas-mcp-prod" with an approval check on it.
+# ---------------------------------------------------------------------------------------------------------------
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - docs/**
+      - README.md
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  - group: taas-mcp-prod
+  - name: buildConfiguration
+    value: Release
+  - name: dotnetVersion
+    value: 10.0.x
+  - name: imageRepository
+    value: teamswork-taas-mcp
+  - name: imageTag
+    value: $(Build.BuildNumber)
+  - name: isMain
+    value: $[ and(eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest')) ]
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  # ---------------------------------------------------------------------------------------------------------------
+  - stage: Build
+    displayName: Build and test
+    jobs:
+      - job: BuildTest
+        displayName: dotnet build / test / audit
+        steps:
+          - task: UseDotNet@2
+            displayName: Use .NET SDK
+            inputs:
+              packageType: sdk
+              version: $(dotnetVersion)
+              includePreviewVersions: false
+
+          - script: dotnet restore --locked-mode || dotnet restore
+            displayName: Restore
+
+          # NuGetAudit is enabled in Directory.Build.props (level: low, warnings as errors), so restore already
+          # fails on known-vulnerable packages. This step reports the transitive graph for the build log.
+          - script: dotnet list TeamsWork.Ticketing.Mcp.slnx package --vulnerable --include-transitive
+            displayName: Vulnerable package report
+
+          - script: dotnet build --configuration $(buildConfiguration) --no-restore
+            displayName: Build
+
+          - script: >
+              dotnet test --configuration $(buildConfiguration) --no-build
+              --report-trx --results-directory $(Agent.TempDirectory)/TestResults
+            displayName: Test
+
+          - task: PublishTestResults@2
+            displayName: Publish test results
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: VSTest
+              testResultsFiles: '**/*.trx'
+              searchFolder: $(Agent.TempDirectory)/TestResults
+              failTaskOnFailedTests: true
+
+          - task: AzureCLI@2
+            displayName: Lint Bicep
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                az bicep build --file infra/core.bicep --stdout > /dev/null
+                az bicep build --file infra/app.bicep --stdout > /dev/null
+                echo "Bicep templates compile."
+
+  # ---------------------------------------------------------------------------------------------------------------
+  - stage: Core
+    displayName: Deploy core infrastructure
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables.isMain, 'true'))
+    jobs:
+      - job: CoreInfra
+        displayName: core.bicep
+        steps:
+          - task: AzureCLI@2
+            displayName: az deployment group create (core)
+            name: core
+            env:
+              TICKETING_API_KEY: $(ticketingApiKey)
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                az group create --name "$(azureResourceGroup)" --location "$(azureLocation)" --output none
+
+                EXTRA=""
+                if [ -n "${TICKETING_API_KEY:-}" ] && [ "${TICKETING_API_KEY}" != '$(ticketingApiKey)' ]; then
+                  EXTRA="ticketingApiKey=${TICKETING_API_KEY}"
+                fi
+
+                OUT=$(az deployment group create \
+                  --name "core-$(Build.BuildNumber)" \
+                  --resource-group "$(azureResourceGroup)" \
+                  --template-file infra/core.bicep \
+                  --parameters namePrefix="$(namePrefix)" environmentName="$(environmentName)" $EXTRA \
+                  --query properties.outputs -o json)
+
+                for key in registryName registryLoginServer keyVaultName apiKeySecretUri identityId containerAppsEnvironmentName; do
+                  val=$(echo "$OUT" | jq -r ".${key}.value")
+                  echo "##vso[task.setvariable variable=${key};isOutput=true]${val}"
+                  echo "${key}=${val}"
+                done
+
+  # ---------------------------------------------------------------------------------------------------------------
+  - stage: Image
+    displayName: Build and push image
+    dependsOn: Core
+    condition: and(succeeded(), eq(variables.isMain, 'true'))
+    variables:
+      registryName: $[ stageDependencies.Core.CoreInfra.outputs['core.registryName'] ]
+      registryLoginServer: $[ stageDependencies.Core.CoreInfra.outputs['core.registryLoginServer'] ]
+    jobs:
+      - job: PublishContainer
+        displayName: dotnet publish /t:PublishContainer
+        steps:
+          - task: UseDotNet@2
+            inputs:
+              packageType: sdk
+              version: $(dotnetVersion)
+
+          - task: AzureCLI@2
+            displayName: Push image to ACR (no Docker daemon needed)
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                TOKEN=$(az acr login --name "$(registryName)" --expose-token --query accessToken -o tsv)
+                export SDK_CONTAINER_REGISTRY_UNAME=00000000-0000-0000-0000-000000000000
+                export SDK_CONTAINER_REGISTRY_PWORD="$TOKEN"
+
+                dotnet publish src/TeamsWork.Ticketing.Mcp/TeamsWork.Ticketing.Mcp.csproj \
+                  --configuration $(buildConfiguration) \
+                  --os linux --arch x64 \
+                  /t:PublishContainer \
+                  -p:ContainerRegistry="$(registryLoginServer)" \
+                  -p:ContainerRepository="$(imageRepository)" \
+                  -p:ContainerImageTags='"$(imageTag);latest"' \
+                  -p:InformationalVersion="$(imageTag)+$(Build.SourceVersion)"
+
+                echo "Pushed $(registryLoginServer)/$(imageRepository):$(imageTag)"
+
+  # ---------------------------------------------------------------------------------------------------------------
+  - stage: Deploy
+    displayName: Deploy container app
+    dependsOn:
+      - Core
+      - Image
+    condition: and(succeeded(), eq(variables.isMain, 'true'))
+    variables:
+      registryLoginServer: $[ stageDependencies.Core.CoreInfra.outputs['core.registryLoginServer'] ]
+      apiKeySecretUri: $[ stageDependencies.Core.CoreInfra.outputs['core.apiKeySecretUri'] ]
+      identityId: $[ stageDependencies.Core.CoreInfra.outputs['core.identityId'] ]
+      containerAppsEnvironmentName: $[ stageDependencies.Core.CoreInfra.outputs['core.containerAppsEnvironmentName'] ]
+    jobs:
+      - deployment: DeployApp
+        displayName: app.bicep
+        environment: taas-mcp-prod
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: AzureCLI@2
+                  displayName: az deployment group create (app)
+                  name: app
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      OUT=$(az deployment group create \
+                        --name "app-$(Build.BuildNumber)" \
+                        --resource-group "$(azureResourceGroup)" \
+                        --template-file infra/app.bicep \
+                        --parameters \
+                          namePrefix="$(namePrefix)" \
+                          environmentName="$(environmentName)" \
+                          containerImage="$(registryLoginServer)/$(imageRepository):$(imageTag)" \
+                          containerAppsEnvironmentName="$(containerAppsEnvironmentName)" \
+                          identityId="$(identityId)" \
+                          registryLoginServer="$(registryLoginServer)" \
+                          apiKeySecretUri="$(apiKeySecretUri)" \
+                          entraTenantId="$(entraTenantId)" \
+                          entraClientId="$(entraClientId)" \
+                          publicBaseUrl="$(publicBaseUrl)" \
+                          serviceAccountId="$(serviceAccountId)" \
+                          serviceAccountName="$(serviceAccountName)" \
+                          serviceAccountEmail="$(serviceAccountEmail)" \
+                        --query properties.outputs -o json)
+
+                      FQDN=$(echo "$OUT" | jq -r '.containerAppFqdn.value')
+                      echo "##vso[task.setvariable variable=fqdn;isOutput=true]${FQDN}"
+                      echo "MCP endpoint: https://${FQDN}/mcp"
+
+                - script: |
+                    set -euo pipefail
+                    BASE="https://$(app.fqdn)"
+
+                    echo "Waiting for /healthz ..."
+                    for i in $(seq 1 30); do
+                      code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/healthz" || true)
+                      if [ "$code" = "200" ]; then echo "healthz OK"; break; fi
+                      sleep 5
+                      if [ "$i" = "30" ]; then echo "healthz did not become healthy"; exit 1; fi
+                    done
+
+                    echo "Checking that /mcp requires Entra authentication ..."
+                    headers=$(curl -s -D - -o /dev/null -X POST "$BASE/mcp" \
+                      -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+                      --data '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
+                    echo "$headers" | grep -qi '^HTTP/.* 401' || { echo "Expected 401 from unauthenticated /mcp"; echo "$headers"; exit 1; }
+                    echo "$headers" | grep -qi 'resource_metadata=' || { echo "Expected WWW-Authenticate with resource_metadata"; echo "$headers"; exit 1; }
+                    echo "Unauthenticated /mcp -> 401 with protected resource metadata challenge. Deployment verified."
+                  displayName: Smoke test

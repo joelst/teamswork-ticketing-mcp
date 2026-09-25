@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TeamsWork.Ticketing.Mcp/TeamsWork.Ticketing.Mcp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TeamsWork.Ticketing.Mcp.Tests/TeamsWork.Ticketing.Mcp.Tests.csproj" />
+  </Folder>
+</Solution>
