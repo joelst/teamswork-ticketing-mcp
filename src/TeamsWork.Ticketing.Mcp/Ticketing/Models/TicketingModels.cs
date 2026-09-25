@@ -168,21 +168,21 @@ public sealed class CustomField
 {
     [JsonPropertyName("id")] public string? Id { get; init; }
     [JsonPropertyName("title")] public string? Title { get; init; }
-    [JsonPropertyName("type")] public CustomFieldType? Type { get; init; }
+
+    /// <summary>
+    /// An object (<c>{"key","text","data"}</c>) on custom fields but a plain string on optional fields, so it is
+    /// passed through as-is.
+    /// </summary>
+    [JsonPropertyName("type")] public JsonElement? Type { get; init; }
+
     [JsonPropertyName("isMandatory")] public bool? IsMandatory { get; init; }
     [JsonPropertyName("status")] public string? Status { get; init; }
     [JsonPropertyName("defaultValue")] public JsonElement? DefaultValue { get; init; }
-    [JsonPropertyName("options")] public IReadOnlyList<CustomFieldOption>? Options { get; init; }
+    [JsonPropertyName("options")] public JsonElement? Options { get; init; }
     [JsonPropertyName("isMultiple")] public bool? IsMultiple { get; init; }
+
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
 }
-
-public sealed record CustomFieldType(
-    [property: JsonPropertyName("key")] string? Key,
-    [property: JsonPropertyName("text")] string? Text);
-
-public sealed record CustomFieldOption(
-    [property: JsonPropertyName("key")] string? Key,
-    [property: JsonPropertyName("text")] string? Text);
 
 public sealed class AssigneeConfig
 {
@@ -192,8 +192,8 @@ public sealed class AssigneeConfig
 
 public sealed record Persona(
     [property: JsonPropertyName("id")] string? Id,
-    [property: JsonPropertyName("text")] string? Text,
-    [property: JsonPropertyName("secondaryText")] string? SecondaryText);
+    [property: JsonPropertyName("name")] string? Name,
+    [property: JsonPropertyName("email")] string? Email);
 
 // ---- Envelopes -------------------------------------------------------------------------------------------------
 

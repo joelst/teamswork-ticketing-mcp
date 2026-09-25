@@ -181,6 +181,28 @@ public sealed class TicketingClientTests
     }
 
     [Fact]
+    public async Task Instance_parses_both_field_type_shapes_and_assignee_names()
+    {
+        // Shape observed from the live API: custom fields carry an object "type", optional fields a string one.
+        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, """
+            {"item":{"id":"i",
+              "customFields":[{"id":"cf","type":{"key":"text","text":"Text","data":{"icon":"x"}},"choosePeopleFrom":"all","options":[]}],
+              "optionalFieldsLeft":[{"id":"of","type":"people","choosePeopleFrom":"all"}],
+              "assignees":{"type":"specific","peoples":[{"id":"u1","name":"Agent One","email":"agent1@example.com"}]}},
+             "error":false,"message":""}
+            """);
+        TicketingClient client = TestFactory.Client(handler);
+
+        Instance i = await client.GetInstanceAsync(null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(JsonValueKind.Object, i.CustomFields![0].Type!.Value.ValueKind);
+        Assert.Equal("people", i.OptionalFieldsLeft![0].Type!.Value.GetString());
+        Assert.True(i.CustomFields[0].Extra!.ContainsKey("choosePeopleFrom"));
+        Assert.Equal("Agent One", i.Assignees!.Peoples![0].Name);
+        Assert.Equal("agent1@example.com", i.Assignees.Peoples[0].Email);
+    }
+
+    [Fact]
     public async Task Post_is_not_retried_on_gateway_errors_to_avoid_duplicates()
     {
         var handler = new FakeHttpHandler()
