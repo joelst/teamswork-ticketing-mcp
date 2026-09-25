@@ -32,10 +32,8 @@ bool useStdio = args.Contains("--stdio", StringComparer.OrdinalIgnoreCase) ||
 AppDomain.CurrentDomain.UnhandledException += (_, e) =>
 {
     // Only the local modes read user secrets, so only point there when running one of them.
-    bool readsUserSecrets = useStdio || args.Contains(AuthModeResolver.CommandLineFlag, StringComparer.OrdinalIgnoreCase) ||
-                            string.Equals(Environment.GetEnvironmentVariable("Auth__Mode"), nameof(AuthMode.Local), StringComparison.OrdinalIgnoreCase);
     if (e.ExceptionObject is Exception ex &&
-        StartupErrorReport.TryFormat(ex, Environment.GetEnvironmentVariables(), readsUserSecrets ? UserSecretsFilePath() : null, out string report))
+        StartupErrorReport.TryFormat(ex, Environment.GetEnvironmentVariables(), Program.UserSecretsLoaded ? UserSecretsFilePath() : null, out string report))
     {
         Console.Error.WriteLine(report);
         Console.Error.Flush();
@@ -64,6 +62,7 @@ static async Task RunStdioAsync(string[] args)
 
     // User secrets are handy for the API key locally; load them in every environment for this transport.
     builder.Configuration.AddUserSecrets(Assembly.GetExecutingAssembly(), optional: true);
+    Program.UserSecretsLoaded = true;
     AddKeyVaultIfConfigured(builder.Configuration);
     AddTicketingServices(builder.Services, builder.Configuration, requireServiceAccount: true);
     builder.Services.AddSingleton<IActingUserProvider, ServiceAccountActingUserProvider>();
@@ -92,6 +91,7 @@ static async Task RunHttpAsync(string[] args)
     if (authMode == AuthMode.Local)
     {
         builder.Configuration.AddUserSecrets(Assembly.GetExecutingAssembly(), optional: true);
+        Program.UserSecretsLoaded = true;
     }
 
     AddKeyVaultIfConfigured(builder.Configuration);
@@ -396,4 +396,9 @@ static ProtectedResourceMetadata BuildResourceMetadata(EntraOptions entra, strin
 /// <summary>Exposed so integration tests can host the HTTP transport with WebApplicationFactory.</summary>
 public partial class Program
 {
+    /// <summary>
+    /// Set once the resolved run mode has added the user-secrets file as a configuration source, so a startup error
+    /// report points there only when the file would actually be read.
+    /// </summary>
+    internal static bool UserSecretsLoaded { get; private set; }
 }
