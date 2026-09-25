@@ -58,7 +58,8 @@ vendor's OpenAPI document is not redistributed here; obtain it from TeamsWork. I
 Pre-built binaries are on the [Releases](https://github.com/joelst/teamswork-ticketing-mcp/releases) page:
 single-file executables for Windows x64, Linux x64, and macOS Apple silicon that need no .NET install, plus a
 portable build that runs anywhere .NET 10 is installed (`dotnet TeamsWork.Ticketing.Mcp.dll --stdio`). The
-executables are not code-signed; the release notes explain the first-run prompts. Extract the archive, then follow
+Windows executable and the portable build's own DLL are code-signed; the Linux and macOS executables are not, and
+the release notes explain the first-run prompts. Extract the archive, then follow
 [Configure without the .NET SDK](#configure-without-the-net-sdk) and [Connect an MCP client](#4-connect-an-mcp-client).
 
 ### Configure without the .NET SDK

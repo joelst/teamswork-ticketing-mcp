@@ -27,6 +27,12 @@ jobs:
 
   build:
     needs: test
+    # The environment fixes the OIDC subject (repo:joelst/teamswork-ticketing-mcp:environment:release) that the
+    # Azure federated credential used for Windows code signing trusts.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: true
       matrix:
@@ -46,8 +52,9 @@ jobs:
             rid: osx-arm64
             exe: TeamsWork.Ticketing.Mcp
             archive: tar.gz
+          # Built on Windows so its assembly can be Authenticode-signed; no apphost, it runs through `dotnet`.
           - name: portable
-            os: ubuntu-latest
+            os: windows-latest
             rid: ""
             exe: ""
             archive: zip
@@ -71,8 +78,47 @@ jobs:
             dotnet publish "$PROJECT" $COMMON -r ${{ matrix.rid }} --self-contained \
               -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
           else
-            dotnet publish "$PROJECT" $COMMON
+            dotnet publish "$PROJECT" $COMMON -p:UseAppHost=false
           fi
+
+      # Windows only: Azure Artifact Signing issues Authenticode signatures, which Linux and macOS don't use.
+      # Only this project's own binary is signed; the Microsoft and third-party DLLs keep their publishers' signatures.
+      - name: Azure login for code signing
+        if: runner.os == 'Windows'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ vars.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          SIGN_FILE: out/${{ matrix.exe || 'TeamsWork.Ticketing.Mcp.dll' }}
+        run: |
+          $missing = 'AZURE_TRUSTED_SIGNING_ENDPOINT', 'AZURE_TRUSTED_SIGNING_ACCOUNT_NAME', 'AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME' |
+            Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) }
+          if ($missing) { throw "Code signing is not configured. Missing variables: $($missing -join ', ')" }
+
+          Install-Module -Name ArtifactSigning -RequiredVersion 0.1.8 -Scope CurrentUser -Force -Repository PSGallery
+          Invoke-ArtifactSigning `
+            -Endpoint $env:AZURE_TRUSTED_SIGNING_ENDPOINT `
+            -CodeSigningAccountName $env:AZURE_TRUSTED_SIGNING_ACCOUNT_NAME `
+            -CertificateProfileName $env:AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME `
+            -Files (Resolve-Path $env:SIGN_FILE).Path `
+            -FileDigest SHA256 `
+            -TimestampRfc3161 'http://timestamp.acs.microsoft.com' `
+            -TimestampDigest SHA256 `
+            -Description 'TeamsWork Ticketing MCP' `
+            -DescriptionUrl 'https://github.com/joelst/teamswork-ticketing-mcp'
+
+          $sig = Get-AuthenticodeSignature $env:SIGN_FILE
+          Write-Host "$($env:SIGN_FILE): $($sig.Status) - $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw "Signature on $($env:SIGN_FILE) is $($sig.Status): $($sig.StatusMessage)" }
 
       - name: Stage files
         run: |
@@ -160,9 +206,9 @@ jobs:
 
           ## First run
 
-          The executables are not code-signed.
+          The Windows executable and the portable build's `TeamsWork.Ticketing.Mcp.dll` are Authenticode-signed. The Linux and macOS executables are not signed.
 
-          - **Windows:** SmartScreen may show "Windows protected your PC". Choose **More info**, then **Run anyway**, or unblock the file with `Unblock-File .\TeamsWork.Ticketing.Mcp.exe`. If your organization blocks unsigned executables, use the portable zip, which runs through Microsoft's signed `dotnet` host.
+          - **Windows:** SmartScreen may still warn about a newly released file until it builds reputation. Choose **More info**, then **Run anyway**, or unblock the file with `Unblock-File .\TeamsWork.Ticketing.Mcp.exe`. The portable zip is an alternative; it runs through Microsoft's signed `dotnet` host.
           - **macOS:** remove the quarantine flag with `xattr -d com.apple.quarantine ./TeamsWork.Ticketing.Mcp`.
           - **Linux/macOS:** the tarball keeps the execute bit; if it is lost, run `chmod +x TeamsWork.Ticketing.Mcp`.
 
