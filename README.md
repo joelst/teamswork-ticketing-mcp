@@ -53,36 +53,96 @@ The server was built against TeamsWork Ticketing API v1.1.0 (`https://teamswork.
 vendor's OpenAPI document is not redistributed here; obtain it from TeamsWork. If you keep a local copy in
 `docs/openapi/`, it is git-ignored.
 
-## Quick start (local)
+## Run it locally
 
-Prerequisites: .NET 10 SDK, Azure CLI (for stdio identity), the Ticketing instance API key.
+You need the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) and your Ticketing instance's API key
+(Ticketing app → Settings → API). Locally no Entra setup is required.
+
+### 1. Get the code and build it
 
 ```powershell
-# never commit the key; user secrets are loaded automatically in stdio and --local modes
-dotnet user-secrets set "Ticketing:ApiKey" "<api key>" --project src/TeamsWork.Ticketing.Mcp
-dotnet user-secrets set "Ticketing:ServiceAccount:Id" "<your Entra object id>" --project src/TeamsWork.Ticketing.Mcp
-dotnet user-secrets set "Ticketing:ServiceAccount:Name" "<your name>" --project src/TeamsWork.Ticketing.Mcp
-dotnet user-secrets set "Ticketing:ServiceAccount:Email" "<your email>" --project src/TeamsWork.Ticketing.Mcp
-
-# stdio (Claude Code / VS Code)
-dotnet run --project src/TeamsWork.Ticketing.Mcp -- --stdio
-
-# loopback HTTP without Entra: http://127.0.0.1:5188/mcp
-dotnet run --project src/TeamsWork.Ticketing.Mcp -- --local
-
-# HTTP with Entra (requires Entra settings; see docs/setup-entra.md)
-dotnet run --project src/TeamsWork.Ticketing.Mcp
+git clone https://github.com/joelst/teamswork-ticketing-mcp.git
+cd teamswork-ticketing-mcp
+dotnet test                                                    # optional: 59 tests, no network needed
+dotnet publish src/TeamsWork.Ticketing.Mcp -c Release -o ./publish
 ```
 
-See [docs/stdio.md](docs/stdio.md) for client configuration, [docs/setup-entra.md](docs/setup-entra.md) for the app
-registrations, [docs/copilot-studio.md](docs/copilot-studio.md) and [docs/foundry.md](docs/foundry.md) for connecting
-agents, and [docs/security.md](docs/security.md) for the security model.
+`./publish` now contains the server. On Windows run `publish\TeamsWork.Ticketing.Mcp.exe`; on macOS/Linux run
+`dotnet publish/TeamsWork.Ticketing.Mcp.dll`. The folder can be moved anywhere; it needs the .NET 10 runtime.
+
+### 2. Configure it
+
+Two things are required: the API key, and the account that ticket changes are recorded under (there is no sign-in
+locally, so you say who you are). Store them with .NET user secrets, which live in your user profile, outside the
+repo and outside any MCP client config file. The published build finds them automatically.
+
+```powershell
+$p = "src/TeamsWork.Ticketing.Mcp"
+dotnet user-secrets set "Ticketing:ApiKey"               "<api key>"              --project $p
+dotnet user-secrets set "Ticketing:ServiceAccount:Id"    "<your Entra object id>" --project $p
+dotnet user-secrets set "Ticketing:ServiceAccount:Name"  "<your name>"            --project $p
+dotnet user-secrets set "Ticketing:ServiceAccount:Email" "<your email>"           --project $p
+```
+
+Your Entra object ID is shown in the Entra admin center under your user profile, or by
+`az ad signed-in-user show --query id -o tsv`. Any value in the table under [Configuration](#configuration) can
+instead be set as an environment variable, with `__` in place of `:` (for example `Ticketing__ApiKey`).
+
+Optional: if your help desk is not on US Central time, set `Ticketing:DefaultTimeZoneId` (for example
+`America/New_York`) the same way. The server uses it to fill in the `timezone` offset the API requires.
+
+### 3. Check that it starts
+
+```powershell
+./publish/TeamsWork.Ticketing.Mcp.exe --local
+# LOCAL MODE: no authentication. Listening on http://127.0.0.1:5188/mcp (loopback only).
+# Ticket changes are attributed to <your name> <<your email>>.
+```
+
+If the API key or account is missing, it exits with a message naming the missing setting. Press Ctrl+C to stop.
+
+### 4. Connect an MCP client
+
+**Claude Code** (stdio; Claude Code starts and stops the server itself):
+
+```powershell
+claude mcp add --transport stdio --scope user teamswork-ticketing -- "<full path>\publish\TeamsWork.Ticketing.Mcp.exe" --stdio
+```
+
+Restart Claude Code and run `/mcp`. It should list `teamswork-ticketing` with 12 tools. Try
+"list my five most recent open tickets".
+
+**VS Code** (`.vscode/mcp.json`):
+
+```json
+{
+  "servers": {
+    "teamswork-ticketing": {
+      "type": "stdio",
+      "command": "<full path>/publish/TeamsWork.Ticketing.Mcp.exe",
+      "args": ["--stdio"]
+    }
+  }
+}
+```
+
+**Any HTTP MCP client**: start `TeamsWork.Ticketing.Mcp.exe --local` and point the client at
+`http://127.0.0.1:5188/mcp` with no auth. Local mode accepts only loopback connections addressed to
+`127.0.0.1`/`localhost`, so other machines and web pages cannot reach it. Change the port with `Local:Port`.
+
+Use the published build rather than `dotnet run` for stdio clients: it starts faster and never writes build output
+to stdout, which is the MCP channel.
+
+More client examples are in [docs/stdio.md](docs/stdio.md). For the Entra-protected remote deployment see
+[docs/setup-entra.md](docs/setup-entra.md), [docs/copilot-studio.md](docs/copilot-studio.md),
+[docs/foundry.md](docs/foundry.md), and [docs/security.md](docs/security.md).
 
 ## Build and test
 
 ```powershell
 dotnet build
 dotnet test            # uses the .NET 10 Microsoft.Testing.Platform runner (see global.json)
+dotnet run --project src/TeamsWork.Ticketing.Mcp -- --local    # run from source
 ```
 
 ## Deploy

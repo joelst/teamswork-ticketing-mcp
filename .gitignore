@@ -494,3 +494,7 @@ secrets/
 # Vendor API spec: third-party documentation, obtain it from TeamsWork
 docs/openapi/
 
+
+# Local publish output (see README)
+publish/
+
