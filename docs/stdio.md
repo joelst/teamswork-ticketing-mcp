@@ -23,14 +23,17 @@ The install script is the quickest way to set up one machine. It:
 1. Downloads the executable for your platform from the newest release that has one (pre-releases included), and
    checks it against the release's `SHA256SUMS.txt`. The checksum file comes from the same release, so it only
    proves the download is intact. On Windows the script also requires a valid Authenticode signature, which proves
-   the file was signed with a trusted code-signing certificate and not changed since, and prints the signer.
+   the file was signed with a trusted code-signing certificate and not changed since, and prints the signer. When it
+   replaces an installed copy, it warns if the new copy's publisher (the certificate subject) differs from the old
+   one's, or if the old copy's signature is no longer valid, so an unexpected change of publisher is noticed.
 2. Puts the executable at a fixed per-user path, so client configurations keep working across upgrades:
    - Windows: `%LOCALAPPDATA%\Programs\teamswork-ticketing-mcp\TeamsWork.Ticketing.Mcp.exe`
    - macOS/Linux: `~/.local/share/teamswork-ticketing-mcp/TeamsWork.Ticketing.Mcp`
 3. Asks for the Ticketing API key (hidden input) and the account that ticket changes are attributed to, and saves
    them to the [user-secrets file](#settings). If the Azure CLI is signed in, your Entra object ID, name, and email are
    offered as defaults. Press Enter at any prompt to keep the current value.
-4. Starts the server once over stdio to check that it comes up.
+4. Starts the server once over stdio to check that it comes up. It also lists, by name only, any `Ticketing__*`
+   environment variables that are set, since those override what was just saved (see [Settings](#settings)).
 5. Registers it as `teamswork-ticketing` with every supported client it finds on `PATH`: Claude Code (`claude`),
    Codex CLI (`codex`), GitHub Copilot CLI (`copilot`), and VS Code / GitHub Copilot Chat (`code`). Visual Studio
    has no command line for this; see [Visual Studio](#github-copilot-in-visual-studio). Under WSL, clients that
@@ -93,12 +96,10 @@ run **MCP: Open User Configuration** and delete the `teamswork-ticketing` entry.
 ## Settings
 
 The server needs the Ticketing API key and the account that ticket changes are attributed to. It reads them from
-these sources in turn, and **a later source overrides an earlier one** for any setting both contain:
+these sources in turn, the usual .NET order, and **a later source overrides an earlier one** for any setting both
+contain:
 
-1. Environment variables, with `__` in place of `:`: `Ticketing__ApiKey`, `Ticketing__ServiceAccount__Id`,
-   `Ticketing__ServiceAccount__Name`, `Ticketing__ServiceAccount__Email`.
-2. The .NET user-secrets file, which the install script writes and `dotnet user-secrets` edits. A value here wins
-   over the same environment variable, including one set in a client config:
+1. The .NET user-secrets file, which the install script writes and `dotnet user-secrets` edits:
    - Windows: `%APPDATA%\Microsoft\UserSecrets\teamswork-taas-mcp\secrets.json`
    - macOS/Linux: `~/.microsoft/usersecrets/teamswork-taas-mcp/secrets.json`
 
@@ -111,16 +112,22 @@ these sources in turn, and **a later source overrides an earlier one** for any s
    }
    ```
 
-3. `KeyVault:Uri` (set in either of the above), which loads secret `Ticketing--ApiKey` with `DefaultAzureCredential`
-   (needs *Key Vault Secrets User* on the vault). It overrides the API key from both.
+2. Environment variables, with `__` in place of `:`: `Ticketing__ApiKey`, `Ticketing__ServiceAccount__Id`,
+   `Ticketing__ServiceAccount__Name`, `Ticketing__ServiceAccount__Email`. These override the secrets file, including
+   ones set in a client config or inherited from the shell the client was started from.
+3. Command-line arguments, such as `--Ticketing:DefaultTimeZoneId=America/New_York` after `--stdio`.
+4. `KeyVault:Uri` (set in any of the above), which loads secret `Ticketing--ApiKey` with `DefaultAzureCredential`
+   (needs *Key Vault Secrets User* on the vault). It overrides the API key from all of them.
 
 Prefer the secrets file. Client configurations are plain text and are often synced or shared, so keep the API key
-out of them; the manual examples below pass no settings for that reason. If you do use environment variables in a
-client config, put only the service-account values there, and leave those keys out of the secrets file, since its
-values would win.
+out of them; the manual examples below pass no settings for that reason. Because environment variables win, a
+client config can still override one value for that client only, for example a different
+`Ticketing__ServiceAccount__Email`. A leftover `Ticketing__*` variable in your shell profile overrides the secrets
+file too, which is why the install script lists any it finds.
 
 Optional: `Ticketing:DefaultTimeZoneId` (for example `America/New_York`) if your help desk is not on US Central time.
-Add it to the secrets file; the install script keeps it when you run it again.
+Add it to the secrets file; the install script keeps it when you run it again. The server checks it at startup and
+refuses to start with a zone the machine doesn't know.
 
 `install.sh` updates the file without a JSON parser, so it only edits the form `dotnet user-secrets` writes: one
 `"key": "value"` setting per line. It stops, without changing anything, if the file looks different, and keeps the
@@ -270,9 +277,14 @@ or wrong, it prints what to fix and where the secrets file is, then exits. If it
 attributed to and keeps running, it started; press Ctrl+C. The startup check doesn't call the Ticketing API, so a
 wrong API key only shows up when a tool is used.
 
-**Linux: `Couldn't find a valid ICU package`.** The Linux executable needs ICU. Install it with your package
-manager, for example `sudo apt install libicu-dev` on Debian/Ubuntu (or the versioned `libicuNN` package) or
-`sudo dnf install libicu` on Fedora. Minimal images, including some WSL distributions, don't include it.
+**Linux: `Couldn't find a valid ICU package`.** Linux executables from releases after v0.1.2-beta don't need ICU;
+install a newer release. v0.1.2-beta and earlier need it: install it with your package manager, for example
+`sudo apt install libicu-dev` on Debian/Ubuntu (or the versioned `libicuNN` package) or `sudo dnf install libicu` on
+Fedora.
+
+**Linux: `Ticketing:DefaultTimeZoneId is not a time zone this machine knows`.** On Linux, time zone names come from
+the tzdata package, which some minimal images leave out. Install it (`sudo apt install tzdata`), or check the zone
+name for a typo.
 
 **Windows: SmartScreen or "blocked" warnings.** The Windows executable is code-signed, and the install script
 unblocks it. For a manually downloaded file, run `Unblock-File <exe>`.

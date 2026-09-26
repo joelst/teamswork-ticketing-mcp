@@ -72,8 +72,22 @@
     if (-not $InstallDir) { $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\teamswork-ticketing-mcp' }
     $ExePath = Join-Path $InstallDir $ExeName
     $VersionPath = Join-Path $InstallDir 'TeamsWork.Ticketing.Mcp.version'
+    # The only other files the installer creates, so cleanup in a shared -InstallDir never matches anyone else's
+    # (such as a TeamsWork.Ticketing.Mcp.exe.config): the staged copy, and old copies renamed aside during upgrades.
+    $OwnedFilePattern = '^' + [regex]::Escape($ExeName) + '\.(new|[0-9a-f]{32}\.old)$'
+    # Warnings repeated at the end, where they won't scroll out of sight.
+    $Notices = [Collections.Generic.List[string]]::new()
 
     function Write-Step([string] $Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
+
+    function Add-Notice([string] $Message) {
+        Write-Warning $Message
+        $Notices.Add($Message)
+    }
+
+    function Get-OwnedFiles {
+        Get-ChildItem -Path $InstallDir -File -ErrorAction SilentlyContinue | Where-Object Name -Match $OwnedFilePattern
+    }
 
     # The client's executable or .cmd wrapper. npm also installs a .ps1 shim for its CLIs, which PowerShell would
     # otherwise prefer and which the execution policy blocks on a default Windows PowerShell 5.1 (Restricted).
@@ -228,14 +242,28 @@
             if ($signature.Status -ne 'Valid') {
                 throw "The executable's Authenticode signature is $($signature.Status): $($signature.StatusMessage) Not installing it."
             }
-            Write-Host "    checksum and signature OK ($($signature.SignerCertificate.Subject))"
+            $signer = $signature.SignerCertificate.Subject
+            Write-Host "    checksum and signature OK ($signer)"
+
+            # An upgrade should come from the same publisher as the copy it replaces. Signing certificates are
+            # reissued often, so the subject is compared, not the thumbprint.
+            if (Test-Path $ExePath) {
+                $previous = Get-AuthenticodeSignature $ExePath
+                if ($previous.Status -eq 'Valid' -and $previous.SignerCertificate.Subject -ne $signer) {
+                    Add-Notice ("The new executable is signed by a different publisher than the one it replaces.`n" +
+                        "    before: $($previous.SignerCertificate.Subject)`n    now:    $signer`n" +
+                        "Check that this change is expected, for example in the release notes at https://github.com/$Repo/releases.")
+                }
+                elseif ($previous.Status -notin 'Valid', 'NotSigned') {
+                    Add-Notice "The installed executable's signature is $($previous.Status), so its publisher couldn't be compared with the new one ($signer)."
+                }
+            }
 
             New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
             # A running executable can't be overwritten or deleted, but it can be renamed. Stage the new file next to
             # the old one, move the old one aside, and move the new one in, so clients don't have to be closed first.
             # They keep running the old version until they restart; its renamed file is deleted on a later run.
-            Get-ChildItem -Path $InstallDir -Filter "$ExeName.*.old" -ErrorAction SilentlyContinue |
-                Remove-Item -Force -ErrorAction SilentlyContinue
+            Get-OwnedFiles | Remove-Item -Force -ErrorAction SilentlyContinue
             $staged = "$ExePath.new"
             Copy-Item -Force $extracted.FullName $staged
             Unblock-File -Path $staged
@@ -375,10 +403,10 @@
             try { Remove-Item -Force $ExePath }
             catch { throw "Couldn't delete $ExePath because a client is still running the server. Quit the MCP clients, then run the uninstall again." }
         }
-        Get-ChildItem -Path $InstallDir -Filter "$ExeName.*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        Get-OwnedFiles | Remove-Item -Force -ErrorAction SilentlyContinue
         Remove-Item -Force $VersionPath -ErrorAction SilentlyContinue
         # After an upgrade, a client that hasn't restarted is running the renamed old copy, which can't be deleted yet.
-        $locked = @(Get-ChildItem -Path $InstallDir -Filter "$ExeName.*" -ErrorAction SilentlyContinue)
+        $locked = @(Get-OwnedFiles)
         if ($locked) {
             throw "Couldn't delete $($locked.FullName -join ', ') because a client is still running it. Quit the MCP clients, then run the uninstall again."
         }
@@ -394,6 +422,12 @@
     Install-Binary
     if (-not $SkipSecrets) { Set-Secrets }
     elseif (-not (Test-Path $SecretsPath)) { Write-Warning "No secrets file at $SecretsPath; the server needs its settings in environment variables instead." }
+    # Environment variables override the secrets file, so any set here (and inherited by MCP clients started from
+    # this session) win over what was just saved. Names only: the values may be secrets.
+    $overrides = @(Get-ChildItem Env: | Where-Object Name -Like 'Ticketing__*' | ForEach-Object Name | Sort-Object)
+    if ($overrides) {
+        Add-Notice "These environment variables override the secrets file: $($overrides -join ', '). Remove them if the secrets file should be used."
+    }
     $started = Test-Server
 
     if ($targets) {
@@ -402,6 +436,7 @@
     }
 
     Write-Host ''
+    foreach ($notice in $Notices) { Write-Warning $notice }
     if (-not $started) {
         Write-Host "Installed, but the server can't start yet. Fix the settings above (or run the installer again without"
         Write-Host '-SkipSecrets), then restart your MCP client.'

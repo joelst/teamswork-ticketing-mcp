@@ -61,7 +61,7 @@ static async Task RunStdioAsync(string[] args)
     builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
 
     // User secrets are handy for the API key locally; load them in every environment for this transport.
-    builder.Configuration.AddUserSecrets(Assembly.GetExecutingAssembly(), optional: true);
+    UserSecretsConfiguration.Add(builder.Configuration, Assembly.GetExecutingAssembly());
     Program.UserSecretsLoaded = true;
     AddKeyVaultIfConfigured(builder.Configuration);
     AddTicketingServices(builder.Services, builder.Configuration, requireServiceAccount: true);
@@ -90,7 +90,7 @@ static async Task RunHttpAsync(string[] args)
 
     if (authMode == AuthMode.Local)
     {
-        builder.Configuration.AddUserSecrets(Assembly.GetExecutingAssembly(), optional: true);
+        UserSecretsConfiguration.Add(builder.Configuration, Assembly.GetExecutingAssembly());
         Program.UserSecretsLoaded = true;
     }
 
@@ -381,9 +381,15 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
             "In Azure it is read from Key Vault (KeyVault:Uri, secret Ticketing--ApiKey).")
         .Validate(o => Uri.TryCreate(o.BaseUrl, UriKind.Absolute, out Uri? u) && u.Scheme == Uri.UriSchemeHttps,
             "Ticketing:BaseUrl must be an absolute https URL.")
-        .Validate(o => o.DefaultPageSize <= o.MaxPageSize, "Ticketing:DefaultPageSize cannot exceed Ticketing:MaxPageSize.")        .Validate(o => !requireServiceAccount || o.ServiceAccount?.IsConfigured == true,
+        .Validate(o => o.DefaultPageSize <= o.MaxPageSize, "Ticketing:DefaultPageSize cannot exceed Ticketing:MaxPageSize.")
+        // Checked at startup rather than on the first tool call, so a bad zone, or a Linux machine without tzdata,
+        // fails where the startup error report and the installer's startup check can show it.
+        .Validate(o => TimeZoneInfo.TryFindSystemTimeZoneById(o.DefaultTimeZoneId, out _),
+            "Ticketing:DefaultTimeZoneId is not a time zone this machine knows. Use an IANA name such as America/Chicago " +
+            "(on Linux, the tzdata package provides them).")
+        .Validate(o => !requireServiceAccount || o.ServiceAccount?.IsConfigured == true,
             "Ticketing:ServiceAccount:Id, :Name and :Email must all be set when running with --stdio or --local. " +
-            "Ticket changes are recorded under this account (Id is your Entra object ID).")
+            "Ticket changes are attributed to this account (Id is your Entra object ID).")
         .ValidateOnStart();
 
     services.AddSingleton(TimeProvider.System);

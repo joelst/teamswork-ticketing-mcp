@@ -108,3 +108,32 @@ jobs:
           test -x "$dir/TeamsWork.Ticketing.Mcp"
           sh scripts/install.sh --uninstall --clients none --install-dir "$dir"
           test ! -e "$dir"
+
+  # The Linux executable must start on systems without ICU (minimal images, some WSL distributions). The stock
+  # ubuntu image has no libicu; the runner's time zone data is mounted in, since the server checks
+  # Ticketing:DefaultTimeZoneId at startup.
+  linux-without-icu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish the Linux executable as the release does
+        run: |
+          dotnet publish src/TeamsWork.Ticketing.Mcp -c Release -r linux-x64 --self-contained \
+            -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -o out
+
+      - name: Start it in a container without ICU
+        run: |
+          INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+          RESPONSE=$( (printf '%s\n' "$INIT"; sleep 8) | docker run --rm -i \
+            -v "$PWD/out:/app:ro" -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro \
+            -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=ci \
+            -e Ticketing__ServiceAccount__Name=CI -e Ticketing__ServiceAccount__Email=ci@example.test \
+            ubuntu:24.04 sh -c 'if ls /usr/lib/*/libicu* >/dev/null 2>&1; then echo "image has ICU" >&2; exit 1; fi; exec /app/TeamsWork.Ticketing.Mcp --stdio' \
+            | head -n1 )
+          echo "$RESPONSE"
+          echo "$RESPONSE" | grep -q '"serverInfo"'

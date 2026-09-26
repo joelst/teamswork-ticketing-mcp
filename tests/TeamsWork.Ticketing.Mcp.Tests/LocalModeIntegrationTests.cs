@@ -139,6 +139,16 @@ public sealed class LocalModeIntegrationTests
         Assert.Contains("ServiceAccount", ex.ToString(), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Local_mode_refuses_to_start_with_an_unknown_time_zone()
+    {
+        await using var factory = new LocalModeFactory { Settings = { ["Ticketing:DefaultTimeZoneId"] = "Not/A_Zone" } };
+
+        Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+
+        Assert.Contains("Ticketing:DefaultTimeZoneId", ex.ToString(), StringComparison.Ordinal);
+    }
+
     // Each bad value must reach the entry point as a configuration failure (reported without a stack trace) that
     // names the setting but never repeats the value.
     [Theory]

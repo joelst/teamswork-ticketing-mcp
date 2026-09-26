@@ -247,6 +247,6 @@ jobs:
 
           ## Configure
 
-          Set the API key and the account ticket changes are recorded under, as environment variables or in a user-secrets file. See "Configure without the .NET SDK" in the README.
+          Set the API key and the account that ticket changes are attributed to, as environment variables or in a user-secrets file. See "Configure without the .NET SDK" in the README.
           EOF
           gh release create "$TAG" dist/* $PRERELEASE --title "v$VERSION" --notes-file notes.md --generate-notes

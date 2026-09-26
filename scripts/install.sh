@@ -201,7 +201,10 @@ find_release() {
         # Newest first. /releases/latest would skip pre-releases, and 0.x versions are published as pre-releases.
         json=$(github_api "$api?per_page=20") || die "Couldn't list the releases of $REPO."
     fi
-    urls=$(printf '%s\n' "$json" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    # The API sometimes pretty-prints and sometimes returns everything on one line, so first split at the characters
+    # a key can follow (',', '{', '['): each "key": "value" pair then starts a line. Download URLs contain none of them.
+    urls=$(printf '%s\n' "$json" | tr ',' '\n' | tr '{' '\n' | tr '[' '\n' |
+        sed -n 's/^[[:space:]]*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     # The first release whose files include this platform's archive and the checksums. A release is published some
     # minutes before the workflow attaches its files.
     for url in $urls; do
@@ -307,8 +310,10 @@ set_secrets() {
     else key_prompt='Ticketing API key (Ticketing app > Settings > API): '; fi
     while :; do
         printf '%s' "$key_prompt" >/dev/tty
-        # Restore echo even if the prompt is interrupted with Ctrl+C.
-        trap 'stty echo </dev/tty' INT TERM
+        # If the prompt is interrupted, restore echo and stop with the usual status for the signal. A trap that only
+        # restored echo would return into this loop, which would ask again instead of letting Ctrl+C end the script.
+        trap 'stty echo </dev/tty; exit 130' INT
+        trap 'stty echo </dev/tty; exit 143' TERM
         stty -echo </dev/tty
         IFS= read -r value </dev/tty || value=""
         stty echo </dev/tty
@@ -378,7 +383,8 @@ test_server() {
         warn "The server did not start. Its output:"
         cat "$dir/err" >&2
         if grep -q 'libicu' "$dir/err"; then
-            warn "Install ICU with your package manager, for example 'sudo apt install libicu-dev' (Debian/Ubuntu) or 'sudo dnf install libicu' (Fedora), then run the installer again."
+            # Only releases up to v0.1.2-beta need ICU; later Linux builds run without it.
+            warn "This release needs ICU. Install a newer release, or install ICU with your package manager, for example 'sudo apt install libicu-dev' (Debian/Ubuntu) or 'sudo dnf install libicu' (Fedora), then run the installer again."
         fi
     fi
     rm -rf "$dir"
@@ -414,6 +420,14 @@ if [ "$SKIP_SECRETS" = 0 ]; then
 elif [ ! -f "$SECRETS_PATH" ]; then
     warn "No secrets file at $SECRETS_PATH; the server needs its settings in environment variables instead."
 fi
+# Environment variables override the secrets file, so any set here (and inherited by MCP clients started from this
+# shell) win over what was just saved. Names only: the values may be secrets.
+overrides=$(env | sed -n 's/^\([Tt][Ii][Cc][Kk][Ee][Tt][Ii][Nn][Gg]__[^=]*\)=.*/\1/p' | sort | tr '\n' ' ')
+NOTICE=""
+if [ -n "$overrides" ]; then
+    NOTICE="These environment variables override the secrets file: ${overrides% }. Unset them if the secrets file should be used."
+    warn "$NOTICE"
+fi
 started=1
 test_server || started=0
 
@@ -423,6 +437,8 @@ if [ -n "$(echo "$TARGETS" | tr -d ' ')" ]; then
 fi
 
 echo
+# Repeated here, where it won't have scrolled out of sight.
+if [ -n "$NOTICE" ]; then warn "$NOTICE"; fi
 if [ "$started" = 0 ]; then
     echo "Installed, but the server can't start yet. Fix the settings above (or run the installer again without"
     echo '--skip-secrets), then restart your MCP client.'
