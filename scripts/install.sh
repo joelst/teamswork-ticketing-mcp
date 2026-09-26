@@ -3,10 +3,11 @@
 #
 # Downloads a release from GitHub, checks it against the release's SHA256SUMS.txt, and puts the executable at a
 # fixed per-user path (default ~/.local/share/teamswork-ticketing-mcp), so client configurations keep working across
-# upgrades. Run it again to upgrade.
+# upgrades. Run it again to upgrade; running clients keep the old version until they restart.
 #
-# The API key and the account ticket changes are recorded under go in the .NET user-secrets file the server reads
-# (~/.microsoft/usersecrets/teamswork-taas-mcp/secrets.json). They are never written to a client config.
+# The server needs the Ticketing API key and the account that ticket changes are attributed to. Both are stored in
+# the .NET user-secrets file the server reads (~/.microsoft/usersecrets/teamswork-taas-mcp/secrets.json), never in a
+# client config.
 #
 # The server is then registered, over stdio, with every supported client found on PATH (or the ones named by
 # --clients): Claude Code, Codex CLI, GitHub Copilot CLI, and VS Code (GitHub Copilot Chat).
@@ -15,6 +16,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.sh | sh -s -- --clients claude,vscode
 #   sh install.sh --uninstall
 set -eu
+
+# The release workflow sets this in the copy attached to each release, so that copy installs its own release.
+PINNED_TAG=""
 
 REPO=joelst/teamswork-ticketing-mcp
 SERVER_NAME=teamswork-ticketing
@@ -33,7 +37,8 @@ usage() {
     cat <<EOF
 Usage: install.sh [options]
 
-  --version <tag>       Release to install, for example v0.2.0 (default: newest, including pre-releases)
+  --version <tag>       Release to install, for example v0.2.0, or 'latest' (default: the release this copy was
+                        attached to, or for the copy on main, the newest release, pre-releases included)
   --clients <list>      Comma-separated: claude, codex, copilot, vscode, all, or none (default: those on PATH)
   --install-dir <dir>   Where to put the executable (default: $INSTALL_DIR)
   --skip-secrets        Don't prompt for the API key and account; keep what the secrets file already has
@@ -66,12 +71,30 @@ client_command() {
     case "$1" in vscode) echo code ;; *) echo "$1" ;; esac
 }
 
+is_wsl() { grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; }
+
+# Prints why a client can't be registered from here, or nothing if it can.
+client_problem() {
+    cmd=$(client_command "$1")
+    have "$cmd" || { echo "'$cmd' is not on PATH"; return; }
+    # WSL puts Windows programs on PATH. Those run on Windows and would be given a Linux path they can't start;
+    # install with scripts/install.ps1 on Windows for them instead.
+    if is_wsl; then
+        case "$(command -v "$cmd")" in /mnt/*) echo "'$cmd' is the Windows program; use install.ps1 on Windows for it" ;; esac
+    fi
+}
+
 # Sets TARGETS. Not run in a subshell, so die() ends the script.
 resolve_clients() {
     TARGETS=""
     if [ -z "$CLIENTS" ]; then
         for c in $ALL_CLIENTS; do
-            if have "$(client_command "$c")"; then TARGETS="$TARGETS $c"; fi
+            problem=$(client_problem "$c")
+            if [ -z "$problem" ]; then
+                TARGETS="$TARGETS $c"
+            elif have "$(client_command "$c")"; then
+                echo "Skipping $c: $problem."
+            fi
         done
         [ -n "$TARGETS" ] || echo 'No supported MCP client found on PATH; skipping registration.'
         return 0
@@ -96,13 +119,14 @@ unregister_client() {
     esac
 }
 
-json_string() {
-    printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+# Escapes text for use inside a JSON string.
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
 register_client() {
-    cmd=$(client_command "$1")
-    if ! have "$cmd"; then warn "$1: '$cmd' is not on PATH; skipped."; return; fi
+    problem=$(client_problem "$1")
+    if [ -n "$problem" ]; then warn "$1: $problem; skipped."; return; fi
     unregister_client "$1"
     log=$(mktemp)
     ok=1
@@ -113,7 +137,7 @@ register_client() {
         vscode)
             # code exits 0 even when it rejects the argument, so success is read from its output.
             # Re-adding replaces the entry.
-            json="{\"name\":\"$SERVER_NAME\",\"type\":\"stdio\",\"command\":$(json_string "$EXE_PATH"),\"args\":[\"--stdio\"]}"
+            json="{\"name\":\"$SERVER_NAME\",\"type\":\"stdio\",\"command\":\"$(json_escape "$EXE_PATH")\",\"args\":[\"--stdio\"]}"
             code --add-mcp "$json" >"$log" 2>&1 || true
             grep -q 'Added MCP servers' "$log" || ok=0
             ;;
@@ -149,32 +173,52 @@ sha256() {
     if have sha256sum; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
+# Sets TAG, ARCHIVE_URL, and SUMS_URL from the GitHub releases API.
+find_release() {
+    rid="$1"
+    api="https://api.github.com/repos/$REPO/releases"
+    # Unauthenticated API calls are limited to 60 an hour per IP address, which shared networks and CI runners hit.
+    set -- -fsSL -H 'Accept: application/vnd.github+json'
+    if [ -n "${GITHUB_TOKEN:-}" ]; then set -- "$@" -H "Authorization: Bearer $GITHUB_TOKEN"; fi
+    tag="$VERSION"
+    [ -n "$tag" ] || tag="$PINNED_TAG"
+    [ "$tag" != latest ] || tag=""
+    if [ -n "$tag" ]; then
+        case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+        json=$(curl "$@" "$api/tags/$tag") ||
+            die "Couldn't get release $tag of $REPO. Check the tag on https://github.com/$REPO/releases."
+    else
+        # Newest first. /releases/latest would skip pre-releases, and 0.x versions are published as pre-releases.
+        json=$(curl "$@" "$api?per_page=20") || die "Couldn't list the releases of $REPO."
+    fi
+    urls=$(printf '%s\n' "$json" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    # The first release whose files include this platform's archive and the checksums. A release is published some
+    # minutes before the workflow attaches its files.
+    for url in $urls; do
+        release_tag=${url%/*}
+        release_tag=${release_tag##*/}
+        [ "${url##*/}" = "teamswork-ticketing-mcp-${release_tag#v}-$rid.tar.gz" ] || continue
+        if printf '%s\n' "$urls" | grep -qxF "${url%/*}/SHA256SUMS.txt"; then
+            TAG="$release_tag"
+            ARCHIVE_URL="$url"
+            SUMS_URL="${url%/*}/SHA256SUMS.txt"
+            return 0
+        fi
+    done
+    if [ -n "$tag" ]; then die "Release $tag has no $rid build or SHA256SUMS.txt (yet)."; fi
+    die "No release of $REPO has a $rid build yet."
+}
+
 install_binary() {
     rid=$(detect_rid)
-    api="https://api.github.com/repos/$REPO/releases"
-    if [ -n "$VERSION" ]; then
-        case "$VERSION" in v*) tag="$VERSION" ;; *) tag="v$VERSION" ;; esac
-        release=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$api/tags/$tag") || die "Release $tag not found."
-    else
-        # /releases/latest skips pre-releases, and 0.x versions are published as pre-releases.
-        release=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$api?per_page=1") || die "Could not list releases of $REPO."
-    fi
-    tag=$(printf '%s' "$release" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
-    [ -n "$tag" ] || die "No releases found for $REPO."
-    archive_name="teamswork-ticketing-mcp-${tag#v}-$rid.tar.gz"
-    url_of() {
-        printf '%s' "$release" | sed -n "s|.*\"browser_download_url\"[[:space:]]*:[[:space:]]*\"\([^\"]*/$1\)\".*|\1|p" | head -n1
-    }
-    archive_url=$(url_of "$archive_name")
-    sums_url=$(url_of SHA256SUMS.txt)
-    [ -n "$archive_url" ] || die "Release $tag has no file named $archive_name."
-    [ -n "$sums_url" ] || die "Release $tag has no SHA256SUMS.txt."
+    find_release "$rid"
+    archive_name="${ARCHIVE_URL##*/}"
 
-    step "Downloading $archive_name ($tag)"
+    step "Downloading $archive_name ($TAG)"
     temp=$(mktemp -d)
     trap 'rm -rf "$temp"' EXIT
-    curl -fsSL -o "$temp/$archive_name" "$archive_url"
-    curl -fsSL -o "$temp/SHA256SUMS.txt" "$sums_url"
+    curl -fsSL -o "$temp/$archive_name" "$ARCHIVE_URL"
+    curl -fsSL -o "$temp/SHA256SUMS.txt" "$SUMS_URL"
     expected=$(awk -v f="$archive_name" '$2 == f || $2 == "*" f { print $1; exit }' "$temp/SHA256SUMS.txt")
     [ -n "$expected" ] || die "SHA256SUMS.txt has no entry for $archive_name."
     actual=$(sha256 "$temp/$archive_name")
@@ -191,29 +235,36 @@ install_binary() {
     chmod +x "$EXE_PATH.new"
     mv -f "$EXE_PATH.new" "$EXE_PATH"
     for f in LICENSE README.md; do
-        [ -f "$(dirname "$extracted")/$f" ] && cp "$(dirname "$extracted")/$f" "$INSTALL_DIR/"
+        if [ -f "$(dirname "$extracted")/$f" ]; then cp "$(dirname "$extracted")/$f" "$INSTALL_DIR/"; fi
     done
-    echo "$tag" >"$INSTALL_DIR/version.txt"
+    echo "$TAG" >"$INSTALL_DIR/version.txt"
     if [ "$(uname -s)" = Darwin ]; then xattr -d com.apple.quarantine "$EXE_PATH" 2>/dev/null || true; fi
     echo "    installed $EXE_PATH"
 }
 
-# Reads a simple "key": "value" pair from the secrets file, as dotnet user-secrets writes it.
-secret_get() {
-    [ -f "$SECRETS_PATH" ] || return 0
-    sed -n "s/^[[:space:]]*\"$1\"[[:space:]]*:[[:space:]]*\"\(.*\)\"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p" "$SECRETS_PATH" |
-        head -n1 | sed 's/\\"/"/g; s/\\\\/\\/g'
+# The secrets file can only be updated safely without a JSON parser when it is a flat object with one
+# "key": "string" pair per line, which is how dotnet user-secrets and this script write it.
+secrets_file_editable() {
+    ! grep -vqE '^[[:space:]]*([{}]|\{[[:space:]]*\}|"[^"]+"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?)?[[:space:]]*$' "$SECRETS_PATH"
 }
 
-# Prompts on the terminal, since stdin is the script itself under `curl | sh`.
+# Prints a value from the secrets file still JSON-escaped, so an unchanged value is written back exactly as it was
+# (dotnet user-secrets writes non-ASCII characters as \uXXXX escapes).
+secret_get() {
+    [ -f "$SECRETS_PATH" ] || return 0
+    sed -n "s/^[[:space:]]*\"$1\"[[:space:]]*:[[:space:]]*\"\(.*\)\"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p" "$SECRETS_PATH" | head -n1
+}
+
+# Prompts on the terminal, since stdin is the script itself under `curl | sh`. $2 is the current value, JSON-escaped;
+# prints the answer JSON-escaped.
 ask() {
     prompt="$1"; current="$2"
     while :; do
         if [ -n "$current" ]; then printf '%s [%s]: ' "$prompt" "$current" >/dev/tty; else printf '%s: ' "$prompt" >/dev/tty; fi
         IFS= read -r value </dev/tty || value=""
         value=$(printf '%s' "$value" | tr -d '\r')
-        if [ -n "$value" ]; then echo "$value"; return; fi
-        if [ -n "$current" ]; then echo "$current"; return; fi
+        if [ -n "$value" ]; then json_escape "$value"; return; fi
+        if [ -n "$current" ]; then printf '%s' "$current"; return; fi
     done
 }
 
@@ -221,7 +272,11 @@ set_secrets() {
     step "Configuring $SECRETS_PATH"
     # In a subshell: dash exits the whole shell when a redirect on a builtin fails.
     (: </dev/tty) 2>/dev/null || die "No terminal to prompt on. Run again with --skip-secrets and write $SECRETS_PATH yourself."
+    if [ -f "$SECRETS_PATH" ] && ! secrets_file_editable; then
+        die "$SECRETS_PATH isn't in the one-setting-per-line form this script can update safely. Edit it by hand (see docs/stdio.md), or run again with --skip-secrets."
+    fi
 
+    # All values below are held JSON-escaped.
     key=$(secret_get 'Ticketing:ApiKey')
     id=$(secret_get 'Ticketing:ServiceAccount:Id')
     name=$(secret_get 'Ticketing:ServiceAccount:Name')
@@ -231,9 +286,9 @@ set_secrets() {
     if [ -z "$id" ] && have az; then
         # One value per line. Strip CRs, which the Windows az prints when it is reached from WSL.
         if me=$(az ad signed-in-user show --query '[id, displayName, mail || userPrincipalName]' -o tsv 2>/dev/null | tr -d '\r'); then
-            id=$(printf '%s\n' "$me" | sed -n 1p)
-            name=${name:-$(printf '%s\n' "$me" | sed -n 2p)}
-            email=${email:-$(printf '%s\n' "$me" | sed -n 3p)}
+            id=$(json_escape "$(printf '%s\n' "$me" | sed -n 1p)")
+            [ -n "$name" ] || name=$(json_escape "$(printf '%s\n' "$me" | sed -n 2p)")
+            [ -n "$email" ] || email=$(json_escape "$(printf '%s\n' "$me" | sed -n 3p)")
         fi
     fi
 
@@ -246,32 +301,36 @@ set_secrets() {
         stty echo </dev/tty
         printf '\n' >/dev/tty
         value=$(printf '%s' "$value" | tr -d '\r')
-        if [ -n "$value" ]; then key="$value"; break; fi
+        if [ -n "$value" ]; then key=$(json_escape "$value"); break; fi
         if [ -n "$key" ]; then break; fi
     done
 
-    echo 'Ticket changes are recorded under this account (use your own):' >/dev/tty
+    echo 'Ticket changes are attributed to this account (use your own):' >/dev/tty
     id=$(ask '  Entra object ID' "$id")
     name=$(ask '  Display name' "$name")
     email=$(ask '  Email' "$email")
 
     mkdir -p "$(dirname "$SECRETS_PATH")"
     new="$SECRETS_PATH.new"
-    umask 077
-    {
-        echo '{'
-        printf '  "Ticketing:ApiKey": %s,\n' "$(json_string "$key")"
-        printf '  "Ticketing:ServiceAccount:Id": %s,\n' "$(json_string "$id")"
-        printf '  "Ticketing:ServiceAccount:Name": %s,\n' "$(json_string "$name")"
-        printf '  "Ticketing:ServiceAccount:Email": %s' "$(json_string "$email")"
-        # Keep any other settings already in the file, such as Ticketing:DefaultTimeZoneId.
-        if [ -f "$SECRETS_PATH" ]; then
-            grep -E '^[[:space:]]*"[^"]+"[[:space:]]*:' "$SECRETS_PATH" |
-                grep -vE '"Ticketing:(ApiKey|ServiceAccount:Id|ServiceAccount:Name|ServiceAccount:Email)"' |
-                sed 's/,[[:space:]]*$//' | while IFS= read -r line; do printf ',\n  %s' "$(echo "$line" | sed 's/^[[:space:]]*//')"; done
-        fi
-        printf '\n}\n'
-    } >"$new"
+    (
+        umask 077
+        {
+            echo '{'
+            printf '  "Ticketing:ApiKey": "%s",\n' "$key"
+            printf '  "Ticketing:ServiceAccount:Id": "%s",\n' "$id"
+            printf '  "Ticketing:ServiceAccount:Name": "%s",\n' "$name"
+            printf '  "Ticketing:ServiceAccount:Email": "%s"' "$email"
+            # Keep any other settings already in the file, such as Ticketing:DefaultTimeZoneId.
+            if [ -f "$SECRETS_PATH" ]; then
+                grep -E '^[[:space:]]*"[^"]+"[[:space:]]*:' "$SECRETS_PATH" |
+                    grep -vE '"Ticketing:(ApiKey|ServiceAccount:Id|ServiceAccount:Name|ServiceAccount:Email)"' |
+                    sed 's/^[[:space:]]*//; s/[[:space:]]*,\{0,1\}[[:space:]]*$//' |
+                    while IFS= read -r line; do printf ',\n  %s' "$line"; done
+            fi
+            printf '\n}\n'
+        } >"$new"
+        if [ -f "$SECRETS_PATH" ]; then cp -p "$SECRETS_PATH" "$SECRETS_PATH.bak"; fi
+    )
     chmod 600 "$new"
     mv -f "$new" "$SECRETS_PATH"
     echo '    saved (the API key is stored only in this file)'
@@ -302,6 +361,9 @@ test_server() {
     else
         warn "The server did not start. Its output:"
         cat "$dir/err" >&2
+        if grep -q 'libicu' "$dir/err"; then
+            warn "Install ICU with your package manager, for example 'sudo apt install libicu-dev' (Debian/Ubuntu) or 'sudo dnf install libicu' (Fedora), then run the installer again."
+        fi
     fi
     rm -rf "$dir"
     [ "$started" = 1 ]
@@ -314,7 +376,7 @@ if [ "$UNINSTALL" = 1 ]; then
     for c in $TARGETS; do
         if [ "$c" = vscode ]; then
             echo "    vscode: run 'MCP: Open User Configuration' and delete the '$SERVER_NAME' entry"
-        elif have "$(client_command "$c")"; then
+        elif [ -z "$(client_problem "$c")" ]; then
             unregister_client "$c"
             echo "    removed from $c"
         fi
@@ -322,7 +384,7 @@ if [ "$UNINSTALL" = 1 ]; then
     rm -rf "$INSTALL_DIR"
     echo "    deleted $INSTALL_DIR"
     if [ "$REMOVE_SECRETS" = 1 ]; then
-        rm -f "$SECRETS_PATH"
+        rm -f "$SECRETS_PATH" "$SECRETS_PATH.bak"
         echo "    deleted $SECRETS_PATH"
     fi
     exit 0

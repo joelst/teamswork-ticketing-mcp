@@ -40,8 +40,7 @@ jobs:
       - run: dotnet build -c Release --no-restore -p:ContinuousIntegrationBuild=true
       - run: dotnet test -c Release --no-build
 
-  # The install scripts run on end users' machines, which CI can't reproduce; this catches syntax errors and the
-  # portability mistakes shellcheck knows about (install.sh must run under dash and macOS sh, not only bash).
+  # install.sh must run under dash and macOS sh, not only bash; shellcheck knows those portability mistakes.
   install-scripts:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -56,3 +55,54 @@ jobs:
           $null = [System.Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/install.ps1", [ref]$null, [ref]$errors)
           $errors | ForEach-Object { Write-Host "::error file=scripts/install.ps1,line=$($_.Extent.StartLineNumber)::$($_.Message)" }
           if ($errors) { exit 1 }
+
+  # Runs each installer against the newest published release: download, checksum (and signature on Windows),
+  # install, startup check, a second install over the first (the upgrade path), and uninstall. Client registration
+  # isn't covered: the runners have no MCP clients.
+  installer-e2e:
+    name: installer end to end (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows pwsh, os: windows-latest, shell: pwsh }
+          - { name: windows powershell 5.1, os: windows-latest, shell: powershell }
+          - { name: linux, os: ubuntu-latest, shell: sh }
+          - { name: macos, os: macos-latest, shell: sh }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      Ticketing__ApiKey: ci-dummy-key
+      Ticketing__ServiceAccount__Id: ci
+      Ticketing__ServiceAccount__Name: CI
+      Ticketing__ServiceAccount__Email: ci@example.test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install, reinstall, uninstall (PowerShell)
+        if: matrix.shell != 'sh'
+        shell: ${{ matrix.shell }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'tw-mcp'
+          foreach ($pass in 1, 2) {
+            $out = & ./scripts/install.ps1 -SkipSecrets -Clients none -InstallDir $dir *>&1 | Out-String
+            Write-Host $out
+            if ($out -notmatch 'Done\.') { throw "Install pass $pass did not finish" }
+          }
+          if (-not (Test-Path "$dir/TeamsWork.Ticketing.Mcp.exe")) { throw 'Executable missing' }
+          & ./scripts/install.ps1 -Uninstall -Clients none -InstallDir $dir
+          if (Test-Path $dir) { throw 'Uninstall left the install folder' }
+
+      - name: Install, reinstall, uninstall (sh)
+        if: matrix.shell == 'sh'
+        shell: sh
+        run: |
+          dir="$RUNNER_TEMP/tw-mcp"
+          for pass in 1 2; do
+            sh scripts/install.sh --skip-secrets --clients none --install-dir "$dir" </dev/null | tee out.txt
+            grep -q '^Done\.' out.txt || { echo "::error::Install pass $pass did not finish"; exit 1; }
+          done
+          test -x "$dir/TeamsWork.Ticketing.Mcp"
+          sh scripts/install.sh --uninstall --clients none --install-dir "$dir"
+          test ! -e "$dir"

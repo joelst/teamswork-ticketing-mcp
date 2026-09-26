@@ -195,8 +195,16 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The scripts come from the commit this workflow runs from, not the tag: a manual rebuild of an older tag may
+      # predate them. Each copy is pinned to this release, so a script downloaded from the release page installs the
+      # release it came with (the copy on main installs the newest).
       - name: Add install scripts
-        run: cp scripts/install.ps1 scripts/install.sh dist/
+        run: |
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git show "$GITHUB_SHA:scripts/install.ps1" | sed "s/^    \$PinnedTag = ''\$/    \$PinnedTag = '$TAG'/" > dist/install.ps1
+          git show "$GITHUB_SHA:scripts/install.sh" | sed "s/^PINNED_TAG=\"\"\$/PINNED_TAG=\"$TAG\"/" > dist/install.sh
+          grep -qxF "    \$PinnedTag = '$TAG'" dist/install.ps1 || { echo "::error::Could not pin install.ps1 to $TAG"; exit 1; }
+          grep -qxF "PINNED_TAG=\"$TAG\"" dist/install.sh || { echo "::error::Could not pin install.sh to $TAG"; exit 1; }
 
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
@@ -227,7 +235,7 @@ jobs:
 
           `SHA256SUMS.txt` lists checksums for every file.
 
-          `install.ps1` (Windows) and `install.sh` (macOS/Linux) download the executable for your platform, check it against `SHA256SUMS.txt`, store your settings, and register the server with Claude Code, Codex, GitHub Copilot CLI, and VS Code. See [docs/stdio.md](https://github.com/joelst/teamswork-ticketing-mcp/blob/main/docs/stdio.md).
+          `install.ps1` (Windows) and `install.sh` (macOS/Linux) install this release: they download the executable for your platform, check it against `SHA256SUMS.txt` (and on Windows its signature), store your settings, and register the server with Claude Code, Codex, GitHub Copilot CLI, and VS Code. See [docs/stdio.md](https://github.com/joelst/teamswork-ticketing-mcp/blob/main/docs/stdio.md).
 
           ## First run
 

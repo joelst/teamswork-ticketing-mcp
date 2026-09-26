@@ -20,18 +20,20 @@ client at it.
 
 The install script is the quickest way to set up one machine. It:
 
-1. Downloads the newest release for your platform (pre-releases included) and checks it against the release's
-   `SHA256SUMS.txt`.
+1. Downloads the executable for your platform from the newest release that has one (pre-releases included), and
+   checks it against the release's `SHA256SUMS.txt`. On Windows it also requires a valid Authenticode signature:
+   the checksum file comes from the same release, so on its own it only proves the download is intact.
 2. Puts the executable at a fixed per-user path, so client configurations keep working across upgrades:
    - Windows: `%LOCALAPPDATA%\Programs\teamswork-ticketing-mcp\TeamsWork.Ticketing.Mcp.exe`
    - macOS/Linux: `~/.local/share/teamswork-ticketing-mcp/TeamsWork.Ticketing.Mcp`
-3. Asks for the Ticketing API key (hidden input) and the account ticket changes are recorded under, and saves them
-   to the [user-secrets file](#settings). If the Azure CLI is signed in, your Entra object ID, name, and email are
+3. Asks for the Ticketing API key (hidden input) and the account that ticket changes are attributed to, and saves
+   them to the [user-secrets file](#settings). If the Azure CLI is signed in, your Entra object ID, name, and email are
    offered as defaults. Press Enter at any prompt to keep the current value.
 4. Starts the server once over stdio to check that it comes up.
 5. Registers it as `teamswork-ticketing` with every supported client it finds on `PATH`: Claude Code (`claude`),
    Codex CLI (`codex`), GitHub Copilot CLI (`copilot`), and VS Code / GitHub Copilot Chat (`code`). Visual Studio
-   has no command line for this; see [Visual Studio](#github-copilot-in-visual-studio).
+   has no command line for this; see [Visual Studio](#github-copilot-in-visual-studio). Under WSL, clients that
+   are Windows programs (such as `code`) are skipped: run `install.ps1` on Windows for those.
 
 No client configuration contains the API key: clients get only the executable path and `--stdio`.
 
@@ -47,15 +49,19 @@ irm https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/script
 curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.sh | sh
 ```
 
-Both scripts are also attached to each [release](https://github.com/joelst/teamswork-ticketing-mcp/releases). Read a
-script before piping it to a shell if you haven't seen it before.
+Both scripts are also attached to each [release](https://github.com/joelst/teamswork-ticketing-mcp/releases); a copy
+downloaded from a release installs that release rather than the newest. Read a script before piping it to a shell if
+you haven't seen it before.
+
+The scripts call the GitHub API, which allows 60 unauthenticated requests an hour per IP address. If a shared network
+hits that limit, set `GITHUB_TOKEN` to any GitHub token and the scripts will use it.
 
 ### Options
 
 | PowerShell | sh | Meaning |
 | --- | --- | --- |
 | `-Clients claude,vscode` | `--clients claude,vscode` | Register only with these: `claude`, `codex`, `copilot`, `vscode`, `all`, or `none`. Default: every client found on `PATH` |
-| `-Version v0.2.0` | `--version v0.2.0` | Install a specific release |
+| `-Version v0.2.0` | `--version v0.2.0` | Install a specific release, or `latest` for the newest |
 | `-InstallDir <dir>` | `--install-dir <dir>` | Install somewhere else |
 | `-SkipSecrets` | `--skip-secrets` | Don't prompt; keep the secrets file as it is (or use environment variables) |
 | `-Uninstall` | `--uninstall` | Unregister from the clients and delete the install folder |
@@ -73,16 +79,18 @@ curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main
 
 ### Upgrade and uninstall
 
-Run the same command again to upgrade. The executable is replaced in place and the clients are re-registered with
-the same path. On Windows a running executable can't be replaced, so close the MCP clients first; the script stops
-with a message if the file is in use. On macOS and Linux, running clients keep the old version until they restart.
+Run the same command again to upgrade. The new executable replaces the old one at the same path, so the clients'
+registrations stay valid, and you don't need to close the clients first: ones that are running keep the old version
+until they restart. (On Windows the old file is renamed aside, because a running executable can't be overwritten,
+and deleted on a later run.)
 
-To uninstall, run the script with `-Uninstall` / `--uninstall`. VS Code has no command to remove a server: run
-**MCP: Open User Configuration** and delete the `teamswork-ticketing` entry.
+To uninstall, run the script with `-Uninstall` / `--uninstall`. Quit the MCP clients first on Windows, where a running
+executable can't be deleted. VS Code has no command to remove a server: run **MCP: Open User Configuration** and
+delete the `teamswork-ticketing` entry.
 
 ## Settings
 
-The server needs the Ticketing API key and the account that ticket changes are recorded under. It reads them from, in
+The server needs the Ticketing API key and the account that ticket changes are attributed to. It reads them from, in
 order of precedence:
 
 1. Environment variables, with `__` in place of `:`: `Ticketing__ApiKey`, `Ticketing__ServiceAccount__Id`,
@@ -110,20 +118,23 @@ client config, put only the service-account values there.
 Optional: `Ticketing:DefaultTimeZoneId` (for example `America/New_York`) if your help desk is not on US Central time.
 Add it to the secrets file; the install script keeps it when you run it again.
 
+`install.sh` updates the file without a JSON parser, so it only edits the form `dotnet user-secrets` writes: one
+`"key": "value"` setting per line. It stops, without changing anything, if the file looks different, and keeps the
+previous version as `secrets.json.bak`.
+
 ## Connect a client manually
 
 Use these if you installed without the script, built from source, or want to see what the script did. In each
 example, replace `<exe>` with the full path to the executable:
 
-| Installed with | `<exe>` |
-| --- | --- |
-| Install script, Windows | `C:\Users\<you>\AppData\Local\Programs\teamswork-ticketing-mcp\TeamsWork.Ticketing.Mcp.exe` |
-| Install script, macOS/Linux | `/home/<you>/.local/share/teamswork-ticketing-mcp/TeamsWork.Ticketing.Mcp` (`/Users/<you>/…` on macOS) |
-| Release archive | wherever you extracted it |
-| From source | `<repo>/publish/TeamsWork.Ticketing.Mcp.exe` after `dotnet publish src/TeamsWork.Ticketing.Mcp -c Release -o publish` |
+| Installed with | Windows | macOS / Linux |
+| --- | --- | --- |
+| Install script | `C:\Users\<you>\AppData\Local\Programs\teamswork-ticketing-mcp\TeamsWork.Ticketing.Mcp.exe` | `/Users/<you>/.local/share/teamswork-ticketing-mcp/TeamsWork.Ticketing.Mcp` (macOS), `/home/<you>/…` (Linux) |
+| Release archive | `<folder>\TeamsWork.Ticketing.Mcp.exe` | `<folder>/TeamsWork.Ticketing.Mcp` |
+| From source (`dotnet publish src/TeamsWork.Ticketing.Mcp -c Release -o publish`) | `<repo>\publish\TeamsWork.Ticketing.Mcp.exe` | `<repo>/publish/TeamsWork.Ticketing.Mcp` (needs the .NET 10 runtime) |
 
-Clients don't expand `~` or `%LOCALAPPDATA%` in the command, so write the path out in full. For the portable build,
-the command is `dotnet` and the arguments are `<path>/TeamsWork.Ticketing.Mcp.dll --stdio`.
+Write the path out in full: not every client expands `~` or environment variables in the command. For the portable
+build, the command is `dotnet` and the arguments are `<folder>/TeamsWork.Ticketing.Mcp.dll --stdio`.
 
 Every client should then list `teamswork-ticketing` with 12 tools. Try "list my five most recent open tickets".
 
@@ -251,8 +262,9 @@ one to the organization's MCP allow list, before any Copilot client will use it.
 ## Troubleshooting
 
 **The client lists the server but it fails to start.** Run `<exe> --stdio` in a terminal. If a setting is missing
-or wrong, it prints what to fix and where the secrets file is, then exits. If it waits silently, it started; press
-Ctrl+C.
+or wrong, it prints what to fix and where the secrets file is, then exits. If it prints who ticket changes will be
+attributed to and keeps running, it started; press Ctrl+C. The startup check doesn't call the Ticketing API, so a
+wrong API key only shows up when a tool is used.
 
 **Linux: `Couldn't find a valid ICU package`.** The Linux executable needs ICU. Install it with your package
 manager, for example `sudo apt install libicu-dev` on Debian/Ubuntu (or the versioned `libicuNN` package) or
@@ -261,8 +273,11 @@ manager, for example `sudo apt install libicu-dev` on Debian/Ubuntu (or the vers
 **Windows: SmartScreen or "blocked" warnings.** The Windows executable is code-signed, and the install script
 unblocks it. For a manually downloaded file, run `Unblock-File <exe>`.
 
-**Windows: the install script stops with "in use".** A client is running the server. Quit Claude Code, Codex, Copilot
-CLI, VS Code, and Visual Studio (or stop the `teamswork-ticketing` server from the client), then run the script again.
+**Windows: uninstall stops with "still running".** A client is running the server. Quit Claude Code, Codex, Copilot
+CLI, VS Code, and Visual Studio (or stop the `teamswork-ticketing` server from the client), then run it again.
+
+**`install.sh` stops because it can't update the secrets file safely.** The file isn't in the one-setting-per-line
+form. Edit it by hand to match the example under [Settings](#settings), or run the script with `--skip-secrets`.
 
 **Windows: `irm … | iex` is blocked.** Some managed devices run PowerShell in Constrained Language mode, which stops
 the script. Download the release zip instead, extract the executable to the path above, write the secrets file by

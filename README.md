@@ -56,9 +56,9 @@ vendor's OpenAPI document is not redistributed here; obtain it from TeamsWork. I
 
 ## Install for Claude Code, Codex, or GitHub Copilot
 
-The install script downloads the newest release and checks its checksum. It installs the executable at a fixed
-per-user path and asks for your API key and account, which it stores in the user-secrets file, never in a client
-config. Then it registers the server over stdio with every client it finds on your machine: Claude Code, Codex
+The install script downloads the newest release and verifies it (checksum, plus the signature on Windows). It
+installs the executable at a fixed per-user path and asks for your API key and account, which it stores in the
+user-secrets file, never in a client config. Then it registers the server over stdio with every client it finds on your machine: Claude Code, Codex
 CLI, GitHub Copilot CLI, and VS Code (Copilot Chat).
 
 ```powershell
@@ -87,8 +87,8 @@ them by hand, extract the archive, then follow [Configure without the .NET SDK](
 
 ### Configure without the .NET SDK
 
-The server needs the API key and the account ticket changes are recorded under. Without the SDK, provide them in
-one of two ways.
+The server needs the API key and the account that ticket changes are attributed to. Without the SDK, provide them
+in one of two ways.
 
 **Environment variables** (use `__` where the setting name has `:`):
 
@@ -139,7 +139,7 @@ dotnet publish src/TeamsWork.Ticketing.Mcp -c Release -o ./publish
 
 ### 2. Configure it
 
-Two things are required: the API key, and the account that ticket changes are recorded under (there is no sign-in
+Two things are required: the API key, and the account that ticket changes are attributed to (there is no sign-in
 locally, so you say who you are). Store them with .NET user secrets, which live in your user profile, outside the
 repo and outside any MCP client config file. The published build finds them automatically.
 
@@ -193,9 +193,13 @@ Restart Claude Code and run `/mcp`. It should list `teamswork-ticketing` with 12
 }
 ```
 
-**Codex CLI**: `codex mcp add teamswork-ticketing -- "<full path>\publish\TeamsWork.Ticketing.Mcp.exe" --stdio`
+**Codex CLI** and **GitHub Copilot CLI** take the same form as Claude Code. The executable is
+`publish\TeamsWork.Ticketing.Mcp.exe` on Windows and `publish/TeamsWork.Ticketing.Mcp` on macOS/Linux:
 
-**GitHub Copilot CLI**: `copilot mcp add teamswork-ticketing -- "<full path>\publish\TeamsWork.Ticketing.Mcp.exe" --stdio`
+```sh
+codex mcp add teamswork-ticketing -- "<full path to the executable>" --stdio
+copilot mcp add teamswork-ticketing -- "<full path to the executable>" --stdio
+```
 
 **Any HTTP MCP client**: start `TeamsWork.Ticketing.Mcp.exe --local` and point the client at
 `http://127.0.0.1:5188/mcp` with no auth. Local mode accepts only loopback connections addressed to
