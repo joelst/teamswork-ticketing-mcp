@@ -60,6 +60,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Clients start the server from their own working directory, so they must be given an absolute path.
+case "$INSTALL_DIR" in
+    /*) ;;
+    *) INSTALL_DIR="$(pwd)/${INSTALL_DIR#./}" ;;
+esac
 EXE_PATH="$INSTALL_DIR/$EXE_NAME"
 VERSION_PATH="$INSTALL_DIR/$EXE_NAME.version"
 
@@ -120,9 +125,14 @@ unregister_client() {
     esac
 }
 
-# Escapes text for use inside a JSON string.
+# Escapes text for use inside a JSON string, including control characters such as a pasted tab, which JSON doesn't
+# allow unescaped.
 json_escape() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+    printf '%s' "$1" | awk '
+        BEGIN { for (i = 1; i < 32; i++) esc[sprintf("%c", i)] = sprintf("\\u%04x", i)
+                esc["\t"] = "\\t"; esc["\\"] = "\\\\"; esc["\""] = "\\\"" }
+        NR > 1 { printf "\\n" }
+        { n = length($0); for (i = 1; i <= n; i++) { c = substr($0, i, 1); printf "%s", (c in esc) ? esc[c] : c } }'
 }
 
 register_client() {
@@ -203,7 +213,16 @@ find_release() {
     fi
     # The API sometimes pretty-prints and sometimes returns everything on one line, so first split at the characters
     # a key can follow (',', '{', '['): each "key": "value" pair then starts a line. Download URLs contain none of them.
+    # A quote inside a string value is escaped, so text such as release notes can't start a line with a key.
+    # With a token that has push access the list includes drafts, whose files can't be downloaded without it, so
+    # drop the files of any release marked as a draft. Each release starts with its "url", .../releases/<id>.
     urls=$(printf '%s\n' "$json" | tr ',' '\n' | tr '{' '\n' | tr '[' '\n' |
+        awk '
+            function flush() { if (!draft) printf "%s", files; files = ""; draft = 0 }
+            /^[[:space:]]*"url"[[:space:]]*:[[:space:]]*"[^"]*\/releases\/[0-9]+"/ { flush() }
+            /^[[:space:]]*"draft"[[:space:]]*:[[:space:]]*true/ { draft = 1 }
+            /^[[:space:]]*"browser_download_url"/ { files = files $0 "\n" }
+            END { flush() }' |
         sed -n 's/^[[:space:]]*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     # The first release whose files include this platform's archive and the checksums. A release is published some
     # minutes before the workflow attaches its files.
