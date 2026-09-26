@@ -71,6 +71,10 @@ jobs:
           - { name: macos, os: macos-latest, shell: sh }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    # A step's own `shell` can't use the matrix context; the job default can.
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
     env:
       GITHUB_TOKEN: ${{ github.token }}
       Ticketing__ApiKey: ci-dummy-key
@@ -82,7 +86,6 @@ jobs:
 
       - name: Install, reinstall, uninstall (PowerShell)
         if: matrix.shell != 'sh'
-        shell: ${{ matrix.shell }}
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'tw-mcp'
           foreach ($pass in 1, 2) {
@@ -96,7 +99,6 @@ jobs:
 
       - name: Install, reinstall, uninstall (sh)
         if: matrix.shell == 'sh'
-        shell: sh
         run: |
           dir="$RUNNER_TEMP/tw-mcp"
           for pass in 1 2; do
