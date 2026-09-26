@@ -404,8 +404,10 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
             "Ticketing:BaseUrl must be an absolute https URL.")
         .Validate(o => o.DefaultPageSize <= o.MaxPageSize, "Ticketing:DefaultPageSize cannot exceed Ticketing:MaxPageSize.")
         // Checked at startup rather than on the first tool call, so a bad zone, or a Linux machine without tzdata,
-        // fails where the startup error report and the installer's startup check can show it.
-        .Validate(o => TimeZoneInfo.TryFindSystemTimeZoneById(o.DefaultTimeZoneId, out _),
+        // fails where the startup error report and the installer's startup check can show it. Every validator runs, so
+        // [Required] doesn't keep an explicit JSON null (which .NET 10 binds) away from TryFindSystemTimeZoneById, which
+        // throws on null. docs/stdio.md and the linux-without-icu CI job quote this message; keep them in step.
+        .Validate(o => !string.IsNullOrWhiteSpace(o.DefaultTimeZoneId) && TimeZoneInfo.TryFindSystemTimeZoneById(o.DefaultTimeZoneId, out _),
             "Ticketing:DefaultTimeZoneId is not a time zone this machine knows. Use an IANA name such as America/Chicago " +
             "(on Linux, the tzdata package provides them).")
         .Validate(o => !requireServiceAccount || o.ServiceAccount?.IsConfigured == true,

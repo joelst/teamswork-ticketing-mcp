@@ -82,6 +82,11 @@ To pass options to the one-liner:
 curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.sh | sh -s -- --clients claude,copilot
 ```
 
+After installing, the scripts start the server once to check its settings. If it can't start, they still register it
+with the clients, but they end with an error (a non-zero exit status), so a scripted install can tell. The check sees
+only the settings in the secrets file and in the installer's own environment. If you use `--skip-secrets` and keep the
+settings in each client's MCP config, set the same `Ticketing__*` variables in the shell that runs the installer too.
+
 ### Upgrade and uninstall
 
 Run the same command again to upgrade. The new executable replaces the old one at the same path, so the clients'

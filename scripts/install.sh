@@ -459,10 +459,9 @@ fi
 echo
 # Repeated here, where it won't have scrolled out of sight.
 if [ -n "$NOTICE" ]; then warn "$NOTICE"; fi
+# A failing status, so scripted installs can tell. The executable and client registrations stay in place.
 if [ "$started" = 0 ]; then
-    echo "Installed, but the server can't start yet. Fix the settings above (or run the installer again without"
-    echo '--skip-secrets), then restart your MCP client.'
-    exit 0
+    die "Installed, but the server can't start yet. Fix the settings above (or run the installer again without --skip-secrets), then restart your MCP client."
 fi
 echo "Done. Restart your MCP client and look for '$SERVER_NAME' (12 tools)."
 echo 'Run the installer again to upgrade; client configurations do not need to change.'

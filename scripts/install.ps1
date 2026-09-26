@@ -443,10 +443,11 @@
 
     Write-Host ''
     foreach ($notice in $Notices) { Write-Warning $notice }
+    # A failure, so scripted installs can tell. throw rather than exit, which would close the shell under irm | iex.
+    # The executable and client registrations stay in place.
     if (-not $started) {
-        Write-Host "Installed, but the server can't start yet. Fix the settings above (or run the installer again without"
-        Write-Host '-SkipSecrets), then restart your MCP client.'
-        return
+        throw ("Installed, but the server can't start yet. Fix the settings above (or run the installer again without " +
+            '-SkipSecrets), then restart your MCP client.')
     }
     Write-Host "Done. Restart your MCP client and look for '$ServerName' (12 tools)."
     Write-Host 'Run the installer again to upgrade; client configurations do not need to change.'
