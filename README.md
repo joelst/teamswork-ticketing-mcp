@@ -1,5 +1,8 @@
 # TeamsWork Ticketing MCP server
 
+> This is an independent project. It is not affiliated with, endorsed by, or supported by TeamsWork. It is provided
+> as is, without warranty, under the [MIT License](LICENSE); use it at your own risk.
+
 A Model Context Protocol (MCP) server that exposes the TeamsWork **Ticketing as a Service** REST API as tools for
 AI agents. It is built for three consumers:
 
