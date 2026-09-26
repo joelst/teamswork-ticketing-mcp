@@ -94,6 +94,11 @@ registrations stay valid, and you don't need to close the clients first: ones th
 until they restart. (On Windows the old file is renamed aside, because a running executable can't be overwritten,
 and deleted on a later run.)
 
+A client registration that already runs the installed executable is left as it is, so anything you added to it in
+the client's config, such as `env` settings, survives an upgrade. A registration that runs some other path is
+replaced. For VS Code the scripts check only the default profile's user `mcp.json`, and re-add the entry if they don't
+find it there. If a registration fails, the scripts end with an error that names the client.
+
 To uninstall, run the script with `-Uninstall` / `--uninstall`. It deletes only the files it installed (the
 executable and a `.version` file beside it), so an `-InstallDir` shared with other programs is safe. Quit the MCP
 clients first on Windows, where a running executable can't be deleted. VS Code has no command to remove a server:

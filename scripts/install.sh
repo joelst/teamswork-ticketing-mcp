@@ -32,6 +32,7 @@ INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/teamswork-ticketing-mcp"
 SKIP_SECRETS=0
 UNINSTALL=0
 REMOVE_SECRETS=0
+FAILED=""
 
 usage() {
     cat <<EOF
@@ -135,9 +136,32 @@ json_escape() {
         { n = length($0); for (i = 1; i <= n; i++) { c = substr($0, i, 1); printf "%s", (c in esc) ? esc[c] : c } }'
 }
 
+# Prints the client's current entry for this server, or nothing if it has none. VS Code has no command for this, so
+# its user mcp.json is read instead (the default profile only).
+registration() {
+    if [ "$1" = vscode ]; then
+        if [ "$(uname -s)" = Darwin ]; then f="$HOME/Library/Application Support/Code/User/mcp.json"
+        else f="${XDG_CONFIG_HOME:-$HOME/.config}/Code/User/mcp.json"; fi
+        if [ -f "$f" ] && grep -qF "\"$SERVER_NAME\"" "$f"; then cat "$f"; fi
+        return 0
+    fi
+    out=$("$1" mcp get "$SERVER_NAME" 2>/dev/null) && printf '%s\n' "$out"
+    return 0
+}
+
+# Returns non-zero if the client ends up unregistered.
 register_client() {
     problem=$(client_problem "$1")
-    if [ -n "$problem" ]; then warn "$1: $problem; skipped."; return; fi
+    if [ -n "$problem" ]; then warn "$1: $problem; skipped."; return 0; fi
+    # An entry that already runs this executable is kept, so settings added to it in the client's config (such as env,
+    # with --skip-secrets) survive upgrades. The path doesn't change between versions, so there's nothing to update.
+    existing=$(registration "$1")
+    path="$EXE_PATH"
+    [ "$1" != vscode ] || path=$(json_escape "$EXE_PATH")
+    if [ -n "$existing" ] && printf '%s\n' "$existing" | grep -qF -- "$path"; then
+        echo "    already registered with $1; kept its settings"
+        return 0
+    fi
     unregister_client "$1"
     log=$(mktemp)
     ok=1
@@ -157,9 +181,14 @@ register_client() {
         echo "    registered with $1"
     else
         sed 's/^/    /' "$log"
-        warn "$1: registration failed (output above)."
+        if [ -n "$existing" ] && [ "$1" != vscode ]; then
+            warn "$1: registration failed (output above), and its previous registration was removed."
+        else
+            warn "$1: registration failed (output above)."
+        fi
     fi
     rm -f "$log"
+    [ "$ok" = 1 ]
 }
 
 detect_rid() {
@@ -453,7 +482,7 @@ test_server || started=0
 
 if [ -n "$(echo "$TARGETS" | tr -d ' ')" ]; then
     step 'Registering with MCP clients'
-    for c in $TARGETS; do register_client "$c"; done
+    for c in $TARGETS; do register_client "$c" || FAILED="$FAILED $c"; done
 fi
 
 echo
@@ -462,6 +491,9 @@ if [ -n "$NOTICE" ]; then warn "$NOTICE"; fi
 # A failing status, so scripted installs can tell. The executable and client registrations stay in place.
 if [ "$started" = 0 ]; then
     die "Installed, but the server can't start yet. Fix the settings above (or run the installer again without --skip-secrets), then restart your MCP client."
+fi
+if [ -n "$FAILED" ]; then
+    die "Installed, but registering with$FAILED failed (see above). Fix the problem, then run the installer again with --clients $(echo $FAILED | tr ' ' ',')."
 fi
 echo "Done. Restart your MCP client and look for '$SERVER_NAME' (12 tools)."
 echo 'Run the installer again to upgrade; client configurations do not need to change.'

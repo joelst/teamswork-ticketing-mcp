@@ -143,10 +143,34 @@
         }
     }
 
+    # The client's current entry for this server as text, or nothing if it has none. VS Code has no command for this,
+    # so its user mcp.json is read instead (the default profile only).
+    function Get-Registration([string] $Client) {
+        if ($Client -eq 'vscode') {
+            $path = Join-Path $env:APPDATA 'Code\User\mcp.json'
+            if (Test-Path $path) {
+                $text = Get-Content -Raw $path
+                if ($text -and $text.Contains("`"$ServerName`"")) { $text }
+            }
+            return
+        }
+        $result = Invoke-Client $Client @('mcp', 'get', $ServerName)
+        if ($result.ExitCode -eq 0) { $result.Output -join "`n" }
+    }
+
+    # Returns whether the client ends up registered.
     function Register-Client([string] $Client) {
         if (-not (Find-Client $Client)) {
             Write-Warning "$Client`: '$($ClientCommand[$Client])' is not on PATH; skipped."
-            return
+            return $true
+        }
+        # An entry that already runs this executable is kept, so settings added to it in the client's config (such as
+        # env, with -SkipSecrets) survive upgrades. The path doesn't change between versions, so there's nothing to update.
+        $existing = Get-Registration $Client
+        $path = if ($Client -eq 'vscode') { $ExePath.Replace('\', '\\') } else { $ExePath }
+        if ($existing -and $existing.IndexOf($path, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            Write-Host "    already registered with $Client; kept its settings"
+            return $true
         }
         Unregister-Client $Client
         $result = switch ($Client) {
@@ -163,11 +187,16 @@
         $ok = if ($Client -eq 'vscode') { ($result.Output -join "`n") -match 'Added MCP servers' } else { $result.ExitCode -eq 0 }
         if ($ok) {
             Write-Host "    registered with $Client"
+            return $true
+        }
+        $result.Output | ForEach-Object { Write-Host "    $_" }
+        if ($existing -and $Client -ne 'vscode') {
+            Write-Warning "$Client`: registration failed (output above), and its previous registration was removed."
         }
         else {
-            $result.Output | ForEach-Object { Write-Host "    $_" }
             Write-Warning "$Client`: registration failed (output above)."
         }
+        return $false
     }
 
     function Get-Asset($Release, [string] $Name) {
@@ -436,9 +465,10 @@
     }
     $started = Test-Server
 
+    $failedClients = @()
     if ($targets) {
         Write-Step 'Registering with MCP clients'
-        foreach ($client in $targets) { Register-Client $client }
+        $failedClients = @($targets | Where-Object { -not (Register-Client $_) })
     }
 
     Write-Host ''
@@ -448,6 +478,10 @@
     if (-not $started) {
         throw ("Installed, but the server can't start yet. Fix the settings above (or run the installer again without " +
             '-SkipSecrets), then restart your MCP client.')
+    }
+    if ($failedClients) {
+        throw ("Installed, but registering with $($failedClients -join ', ') failed (see above). Fix the problem, then run " +
+            "the installer again with -Clients $($failedClients -join ',').")
     }
     Write-Host "Done. Restart your MCP client and look for '$ServerName' (12 tools)."
     Write-Host 'Run the installer again to upgrade; client configurations do not need to change.'
