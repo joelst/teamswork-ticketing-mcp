@@ -60,6 +60,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Clients start the server from their own working directory, so they must be given an absolute path.
+case "$INSTALL_DIR" in
+    /*) ;;
+    *) INSTALL_DIR="$(pwd)/${INSTALL_DIR#./}" ;;
+esac
 EXE_PATH="$INSTALL_DIR/$EXE_NAME"
 VERSION_PATH="$INSTALL_DIR/$EXE_NAME.version"
 

@@ -70,6 +70,9 @@
     $AllClients = 'claude', 'codex', 'copilot', 'vscode'
     $ClientCommand = @{ claude = 'claude'; codex = 'codex'; copilot = 'copilot'; vscode = 'code' }
     if (-not $InstallDir) { $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\teamswork-ticketing-mcp' }
+    # Clients start the server from their own working directory, so they must be given an absolute path. Resolved
+    # against PowerShell's current location, which can differ from the process's working directory.
+    $InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir)
     $ExePath = Join-Path $InstallDir $ExeName
     $VersionPath = Join-Path $InstallDir 'TeamsWork.Ticketing.Mcp.version'
     # The only other files the installer creates, so cleanup in a shared -InstallDir never matches anyone else's
