@@ -1,6 +1,7 @@
 using System.Net;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using TeamsWork.Ticketing.Mcp.Configuration;
@@ -15,8 +16,16 @@ public sealed class LocalModeFactory : WebApplicationFactory<Program>
     /// <summary>Extra settings, applied last.</summary>
     public Dictionary<string, string> Settings { get; init; } = [];
 
+    /// <summary>A JSON settings file, added last, for values only JSON can express (such as null).</summary>
+    public string? Json { get; init; }
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        if (Json is not null)
+        {
+            builder.ConfigureAppConfiguration(c => c.AddJsonStream(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(Json))));
+        }
+
         builder.UseEnvironment("Production");
         builder.UseSetting("Auth:Mode", "Local");
         builder.UseSetting("Ticketing:ApiKey", "local-test-key");
@@ -147,6 +156,19 @@ public sealed class LocalModeIntegrationTests
         Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
 
         Assert.Contains("Ticketing:DefaultTimeZoneId", ex.ToString(), StringComparison.Ordinal);
+    }
+
+    // .NET 10 binds an explicit JSON null, so a user-secrets file with "Ticketing:DefaultTimeZoneId": null reaches the
+    // validators as null.
+    [Fact]
+    public async Task A_null_time_zone_is_reported_as_a_configuration_problem()
+    {
+        await using var factory = new LocalModeFactory { Json = """{ "Ticketing": { "DefaultTimeZoneId": null } }""" };
+
+        Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+
+        Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
+        Assert.Contains("Ticketing:DefaultTimeZoneId", report, StringComparison.Ordinal);
     }
 
     // Each bad value must reach the entry point as a configuration failure (reported without a stack trace) that
