@@ -112,6 +112,45 @@ public sealed class HttpHardeningTests
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, r.StatusCode);
     }
 
+    // A chunked body declares no length, so only the server's MaxRequestBodySize stops it, and the in-process test host
+    // doesn't enforce that. This runs the real Kestrel server.
+    [Fact]
+    public async Task Oversized_chunked_request_bodies_are_refused_by_kestrel()
+    {
+        await using var factory = new McpServerFactory();
+        factory.UseKestrel(0);
+        factory.StartServer();
+        // A plain client, so nothing in the factory's handler chain can buffer the body and give it a length.
+        using HttpClient factoryClient = factory.CreateClient();
+        using var http = new HttpClient { BaseAddress = factoryClient.BaseAddress };
+        using HttpRequestMessage request = ToolsList(TokenFor("alice-oid"));
+        request.Headers.TransferEncodingChunked = true;
+        request.Content = new UnsizedContent("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"pad\":\"", new string('x', 2 * 1024 * 1024), "\"}}");
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+
+        using HttpResponseMessage r = await http.SendAsync(request, Ct);
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, r.StatusCode);
+    }
+
+    /// <summary>Content that reports no length, so HttpClient sends it with chunked transfer encoding.</summary>
+    private sealed class UnsizedContent(params string[] parts) : HttpContent
+    {
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            foreach (string part in parts)
+            {
+                await stream.WriteAsync(Encoding.UTF8.GetBytes(part));
+            }
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+    }
+
     [Fact]
     public async Task Normal_sized_requests_still_work()
     {
