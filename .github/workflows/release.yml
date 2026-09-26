@@ -1,11 +1,19 @@
 # Builds and publishes a GitHub release when a version tag (v1.2.3 or v0.1.0-beta) is pushed.
 # Tags starting with v0. or containing a hyphen are published as pre-releases.
+# If the release already exists (for example, it was published from the GitHub UI, which pushes the tag),
+# the binaries are attached to it and its title and notes are left alone.
+# Run it manually with a tag to rebuild an existing tag using this version of the workflow.
 name: release
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build and release, e.g. v0.1.2-beta
+        required: true
 
 permissions:
   contents: read
@@ -14,12 +22,15 @@ env:
   DOTNET_NOLOGO: "true"
   DOTNET_CLI_TELEMETRY_OPTOUT: "true"
   PROJECT: src/TeamsWork.Ticketing.Mcp/TeamsWork.Ticketing.Mcp.csproj
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
@@ -64,12 +75,14 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
 
       - name: Version from tag
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+        run: echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
 
       - name: Publish
         run: |
@@ -175,6 +188,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -187,7 +202,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; attaching files."
+            gh release upload "$TAG" dist/* --clobber
+            exit 0
+          fi
+          VERSION="${TAG#v}"
           PRERELEASE=""
           case "$VERSION" in 0.*|*-*) PRERELEASE="--prerelease" ;; esac
           cat > notes.md <<'EOF'
@@ -216,4 +236,4 @@ jobs:
 
           Set the API key and the account ticket changes are recorded under, as environment variables or in a user-secrets file. See "Configure without the .NET SDK" in the README.
           EOF
-          gh release create "$GITHUB_REF_NAME" dist/* $PRERELEASE --title "v$VERSION" --notes-file notes.md --generate-notes
+          gh release create "$TAG" dist/* $PRERELEASE --title "v$VERSION" --notes-file notes.md --generate-notes
