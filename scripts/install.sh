@@ -493,7 +493,7 @@ if [ "$started" = 0 ]; then
     die "Installed, but the server can't start yet. Fix the settings above (or run the installer again without --skip-secrets), then restart your MCP client."
 fi
 if [ -n "$FAILED" ]; then
-    die "Installed, but registering with$FAILED failed (see above). Fix the problem, then run the installer again with --clients $(echo $FAILED | tr ' ' ',')."
+    die "Installed, but registering with$FAILED failed (see above). Fix the problem, then run the installer again with --clients $(printf '%s' "${FAILED# }" | tr ' ' ',')."
 fi
 echo "Done. Restart your MCP client and look for '$SERVER_NAME' (12 tools)."
 echo 'Run the installer again to upgrade; client configurations do not need to change.'
