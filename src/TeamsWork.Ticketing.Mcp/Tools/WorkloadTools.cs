@@ -86,7 +86,8 @@ public sealed class WorkloadTools
                 _ => IsPerson(t.Assignee, me),
             };
 
-            TicketScan.Result scan = await TicketScan.RunAsync(_client, query, Mine, _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
+            TicketScan.Result<TicketSummary> scan = await TicketScan.RunAsync(
+                _client, query, t => Mine(t) ? TicketSummary.From(t) : null, _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
             return Summaries(scan, max);
         });
     }
@@ -131,7 +132,8 @@ public sealed class WorkloadTools
             }
 
             int pageSize = escalatedOnly ? TicketScan.MaxApiPageSize : FullTicketPageSize;
-            TicketScan.Result scan = await TicketScan.RunAsync(_client, query, AtRisk, _options.MaxScanTickets, pageSize, cancellationToken);
+            TicketScan.Result<TicketSummary> scan = await TicketScan.RunAsync(
+                _client, query, t => AtRisk(t) ? TicketSummary.From(t) : null, _options.MaxScanTickets, pageSize, cancellationToken);
             return Summaries(scan, max);
         });
     }
@@ -166,18 +168,14 @@ public sealed class WorkloadTools
                 TimezoneOffset = timezoneOffset,
             };
 
-            TicketScan.Result scan = await TicketScan.RunAsync(_client, query, _ => true, _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
-
-            string KeyOf(Ticket t) => by switch
-            {
-                "priority" => string.IsNullOrWhiteSpace(t.Priority) ? "(none)" : t.Priority,
-                "assignee" => t.Assignee is { Email: { Length: > 0 } email } a ? $"{a.Name} <{email}>" : "(unassigned)",
-                _ => string.IsNullOrWhiteSpace(t.Status) ? "(none)" : t.Status,
-            };
+            // Only each ticket's group is kept. A person is grouped by email (or ID when there is none), so one
+            // person under two display names is one group, and shown with the first name seen.
+            TicketScan.Result<GroupKey> scan = await TicketScan.RunAsync(
+                _client, query, t => GroupOf(t, by), _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
 
             List<CountGroup> groups = scan.Matches
-                .GroupBy(KeyOf, StringComparer.OrdinalIgnoreCase)
-                .Select(g => new CountGroup(g.Key, g.Count()))
+                .GroupBy(k => k.Identity, StringComparer.OrdinalIgnoreCase)
+                .Select(g => new CountGroup(g.First().Label, g.Count()))
                 .OrderByDescending(g => g.Count)
                 .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -186,16 +184,34 @@ public sealed class WorkloadTools
         });
     }
 
+    private static GroupKey GroupOf(Ticket t, string by)
+    {
+        if (by == "assignee")
+        {
+            string? identity = Blank(t.Assignee?.Email) ?? Blank(t.Assignee?.Id);
+            return identity is null
+                ? new GroupKey("", "(unassigned)")
+                : new GroupKey(identity, Blank(t.Assignee?.Email) is string email ? $"{Blank(t.Assignee?.Name) ?? email} <{email}>" : Blank(t.Assignee?.Name) ?? identity);
+        }
+
+        string? value = Blank(by == "priority" ? t.Priority : t.Status);
+        return new GroupKey(value ?? "", value ?? "(none)");
+    }
+
+    private static string? Blank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private sealed record GroupKey(string Identity, string Label);
+
     private static bool IsPerson(TicketUser? user, ActingUser me) =>
         user is not null &&
         ((!string.IsNullOrWhiteSpace(user.Email) && string.Equals(user.Email.Trim(), me.Email.Trim(), StringComparison.OrdinalIgnoreCase)) ||
          (!string.IsNullOrWhiteSpace(user.Id) && string.Equals(user.Id.Trim(), me.Id.Trim(), StringComparison.OrdinalIgnoreCase)));
 
-    private static ScanResult<TicketSummary> Summaries(TicketScan.Result scan, int max)
+    private static ScanResult<TicketSummary> Summaries(TicketScan.Result<TicketSummary> scan, int max)
     {
-        List<TicketSummary> items = scan.Matches.Take(max).Select(TicketSummary.From).ToList();
-        string? hint = TicketScan.TruncationHint(scan)
-                       ?? (scan.Matches.Count > max ? $"{scan.Matches.Count} tickets matched; raise 'limit' or add filters to see more." : null);
+        List<TicketSummary> items = scan.Matches.Take(max).ToList();
+        string? more = scan.Matches.Count > max ? $"{scan.Matches.Count} tickets matched; raise 'limit' or add filters to see more." : null;
+        string? hint = string.Join(" ", new[] { TicketScan.TruncationHint(scan), more }.OfType<string>()) is { Length: > 0 } both ? both : null;
         return new ScanResult<TicketSummary>(items, items.Count, scan.Matches.Count, scan.Scanned, scan.Total, scan.Truncated, hint);
     }
 

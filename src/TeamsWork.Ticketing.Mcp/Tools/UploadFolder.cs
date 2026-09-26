@@ -14,8 +14,13 @@ public sealed class UploadFolder
 {
     private const int MaxFiles = 10;
 
-    private static readonly StringComparison PathComparison =
-        OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+    // Whether paths differing only in case name the same item depends on the volume (a case-sensitive APFS volume, a
+    // Windows folder with case sensitivity turned on), not on the operating system, so neither comparison can be right
+    // everywhere. Each check uses the one that fails closed instead: a path is inside the folder only if it matches
+    // exactly (a different spelling is refused), and a folder counts as overlapping a protected location if it matches
+    // in any case (a possible overlap is refused).
+    private const StringComparison InsideComparison = StringComparison.Ordinal;
+    private const StringComparison OverlapComparison = StringComparison.OrdinalIgnoreCase;
 
     private static readonly Dictionary<string, string> ContentTypes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -40,39 +45,54 @@ public sealed class UploadFolder
     public string Root { get; }
 
     /// <summary>
-    /// Checks the configured folder at startup: it must exist, must not be a drive root or the user's home folder, and
-    /// must not contain the user-secrets file.
+    /// Checks the configured folder at startup. Its real location (links resolved, names as stored) must exist, must not
+    /// be a drive root, and must not contain the home folder, the application data or configuration folders (where MCP
+    /// client configs can hold the API key), or the user-secrets file.
     /// </summary>
     public static UploadFolder Create(TicketingOptions options, string? userSecretsPath)
     {
         string configured = options.UploadRoot?.Trim() ?? throw new StartupConfigurationException("Ticketing:UploadRoot is not set.");
-        string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(configured));
+        string root = Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(configured)));
 
         if (!Directory.Exists(root))
         {
             throw new StartupConfigurationException($"Ticketing:UploadRoot '{root}' does not exist. Create the folder, or unset the setting to turn uploads off.");
         }
 
-        // If the folder is itself a link, check and use where it really is.
-        if (new DirectoryInfo(root).ResolveLinkTarget(returnFinalTarget: true) is FileSystemInfo target)
+        if (Path.GetPathRoot(root) is string drive && string.Equals(Path.TrimEndingDirectorySeparator(drive), root, OverlapComparison))
         {
-            root = Path.TrimEndingDirectorySeparator(target.FullName);
+            throw new StartupConfigurationException("Ticketing:UploadRoot must be a dedicated folder, not a drive root.");
         }
 
-        string home = Path.TrimEndingDirectorySeparator(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
-        if ((Path.GetPathRoot(root) is string drive && string.Equals(Path.TrimEndingDirectorySeparator(drive), root, PathComparison)) ||
-            (home.Length > 0 && string.Equals(home, root, PathComparison)))
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var guarded = new List<(string Path, string What)>
         {
-            throw new StartupConfigurationException("Ticketing:UploadRoot must be a dedicated folder, not a drive root or your home folder.");
+            (home, "your home folder"),
+            (Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "the application data folder"),
+            (Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "the local application data folder"),
+        };
+        if (home.Length > 0)
+        {
+            guarded.Add((Path.Combine(home, ".config"), "the configuration folder"));
+            guarded.Add((Path.Combine(home, ".microsoft"), "the .NET user-secrets folder"));
         }
 
-        var folder = new UploadFolder(root + Path.DirectorySeparatorChar, options.MaxUploadBytes);
-        if (userSecretsPath is not null && folder.Contains(Path.GetFullPath(userSecretsPath)))
+        if (userSecretsPath is not null)
         {
-            throw new StartupConfigurationException("Ticketing:UploadRoot contains the user-secrets file, which holds the API key. Choose a folder that doesn't.");
+            guarded.Add((userSecretsPath, "the user-secrets file, which holds the API key"));
         }
 
-        return folder;
+        foreach ((string path, string what) in guarded.Where(g => g.Path.Length > 0))
+        {
+            string protectedPath = Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(path)));
+            if (string.Equals(protectedPath, root, OverlapComparison) ||
+                protectedPath.StartsWith(root + Path.DirectorySeparatorChar, OverlapComparison))
+            {
+                throw new StartupConfigurationException($"Ticketing:UploadRoot must be a dedicated folder that doesn't contain {what}. Choose a folder of its own.");
+            }
+        }
+
+        return new UploadFolder(root + Path.DirectorySeparatorChar, options.MaxUploadBytes);
     }
 
     /// <summary>Reads the files for an upload, after checking every path and the total size.</summary>
@@ -88,28 +108,63 @@ public sealed class UploadFolder
             throw new McpException($"At most {MaxFiles} files can be uploaded in one call.");
         }
 
-        var files = new List<FileInfo>();
-        long total = 0;
-        foreach ((string path, int i) in paths.Select((p, i) => (p, i)))
-        {
-            FileInfo file = Resolve(ToolValidation.RequireText(path, $"paths[{i}]", 1024), $"paths[{i}]");
-            total += file.Length;
-            if (total > _maxBytes)
-            {
-                throw new McpException($"The files add up to more than the upload limit of {_maxBytes / (1024 * 1024.0):0.#} MB (Ticketing:MaxUploadBytes).");
-            }
+        // Every path is checked before any file is read, so a bad path costs no reads.
+        List<(string Path, string Param, FileInfo File)> files = paths
+            .Select((p, i) => (ToolValidation.RequireText(p, $"paths[{i}]", 1024), $"paths[{i}]"))
+            .Select(x => (x.Item1, x.Item2, Resolve(x.Item1, x.Item2)))
+            .ToList();
 
-            files.Add(file);
+        // Sizes on disk only give an early answer; the limit is enforced on the bytes actually read, since a file can
+        // grow between the check and the read.
+        if (files.Sum(f => f.File.Length) > _maxBytes)
+        {
+            throw TooLarge();
         }
 
-        return files.Select(f => new UploadFile(SafeFileName(f.Name), ContentTypeOf(f.Name), ReadCapped(f))).ToList();
+        var uploads = new List<UploadFile>();
+        long remaining = _maxBytes;
+        foreach ((string path, string param, FileInfo file) in files)
+        {
+            byte[] content = ReadChecked(path, param, file, remaining);
+            remaining -= content.Length;
+            uploads.Add(new UploadFile(SafeFileName(file.Name), ContentTypeOf(file.Name), content));
+        }
+
+        return uploads;
     }
 
-    private byte[] ReadCapped(FileInfo file)
+    private McpException TooLarge() =>
+        new($"The files add up to more than the upload limit of {_maxBytes / (1024 * 1024.0):0.#} MB (Ticketing:MaxUploadBytes).");
+
+    /// <summary>
+    /// Opens the file, checks its path again now that it is open, and reads from that same handle, refusing more than
+    /// <paramref name="budget"/> bytes. A path swapped for a link after the first check is caught by the second; the
+    /// bytes read always come from the file that was open when the path was last checked.
+    /// </summary>
+    private byte[] ReadChecked(string path, string param, FileInfo file, long budget)
     {
         try
         {
-            return ReadCappedCore(file);
+            using FileStream stream = new(file.FullName, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (!string.Equals(Resolve(path, param).FullName, file.FullName, InsideComparison))
+            {
+                throw new McpException($"'{param}' changed while it was being read. Try again.");
+            }
+
+            using var buffer = new MemoryStream();
+            byte[] chunk = new byte[81920];
+            int read;
+            while ((read = stream.Read(chunk, 0, chunk.Length)) > 0)
+            {
+                if (buffer.Length + read > budget)
+                {
+                    throw TooLarge();
+                }
+
+                buffer.Write(chunk, 0, read);
+            }
+
+            return buffer.ToArray();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -118,8 +173,10 @@ public sealed class UploadFolder
     }
 
     /// <summary>
-    /// Resolves a path (relative paths are taken from the upload folder) and checks it stays inside, with no hidden or
-    /// linked segment on the way.
+    /// Resolves a path (relative paths are taken from the upload folder) to a file inside it. Each segment below the
+    /// folder must name an entry exactly as the file system stores it: an 8.3 short name (ENV~1 for .env) or another
+    /// spelling finds nothing, so the text that was checked is the item that is read. No segment may be hidden (start
+    /// with '.'), be a symbolic link or junction, or use wildcard or alternate-stream syntax.
     /// </summary>
     internal FileInfo Resolve(string path, string paramName)
     {
@@ -133,49 +190,101 @@ public sealed class UploadFolder
             throw new McpException($"'{paramName}' is not a valid file path.");
         }
 
-        if (!Contains(full))
+        if (!(full.Length > Root.Length && full.StartsWith(Root, InsideComparison)))
         {
-            throw new McpException($"'{paramName}' is outside the upload folder. Only files in {Root} can be uploaded; copy the file there first.");
+            throw new McpException(
+                $"'{paramName}' is outside the upload folder. Only files in {Root} can be uploaded; copy the file there first. " +
+                "Give the path relative to that folder (an absolute path must match its spelling exactly, including letter case).");
         }
 
-        // Every segment below the root, including the file: no dot names, and no links that could point elsewhere.
-        string current = Root.TrimEnd(Path.DirectorySeparatorChar);
-        foreach (string segment in full[Root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        string[] segments = full[Root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+        var current = new DirectoryInfo(Root);
+        FileSystemInfo? entry = null;
+        for (int i = 0; i < segments.Length; i++)
         {
+            string segment = segments[i];
+            if (segment.IndexOfAny(ForbiddenNameChars) >= 0)
+            {
+                throw new McpException($"'{paramName}' has a character that can't be part of an upload path in '{segment}'.");
+            }
+
             if (segment.StartsWith('.'))
             {
                 throw new McpException($"'{paramName}' is in or names a hidden item ('{segment}'), which can't be uploaded.");
             }
 
-            current = Path.Combine(current, segment);
-            FileSystemInfo info = Directory.Exists(current) ? new DirectoryInfo(current) : new FileInfo(current);
-            if (info.Exists && (info.LinkTarget is not null || info.Attributes.HasFlag(FileAttributes.ReparsePoint)))
+            entry = FindEntry(current, segment, ignoreCase: false)
+                    ?? throw new McpException($"'{paramName}' doesn't exist in the upload folder ({Root}). Names must match exactly, including letter case.");
+
+            // LinkTarget is set for symbolic links and junctions, the reparse points that redirect a path. The reparse
+            // attribute alone isn't a link: OneDrive's cloud files and deduplicated files carry it. Windows hides it on
+            // cloud files from most processes, but a host that exposes placeholders would otherwise see every file in a
+            // OneDrive folder (where Known Folder Move puts Documents and Desktop) refused.
+            if (entry.LinkTarget is not null)
             {
                 throw new McpException($"'{paramName}' goes through a link ('{segment}'), which can't be uploaded.");
             }
+
+            bool last = i == segments.Length - 1;
+            if (!last)
+            {
+                current = entry as DirectoryInfo
+                          ?? throw new McpException($"'{paramName}' doesn't exist in the upload folder ({Root}).");
+            }
         }
 
-        var file = new FileInfo(full);
-        return file.Exists
-            ? file
-            : throw new McpException($"'{paramName}' doesn't exist in the upload folder ({Root}).");
+        return entry as FileInfo ?? throw new McpException($"'{paramName}' is not a file.");
     }
 
-    private bool Contains(string fullPath) =>
-        fullPath.Length > Root.Length && fullPath.StartsWith(Root, PathComparison);
+    // Wildcards would make the directory lookup match other names; ':' reaches an alternate data stream on Windows.
+    private static readonly char[] ForbiddenNameChars =
+        OperatingSystem.IsWindows() ? ['*', '?', '<', '>', '"', '|', ':'] : ['*', '?', '[', ']', '\\'];
 
-    /// <summary>Reads at most the upload limit, so a file that grew after the size check can't exceed it.</summary>
-    private byte[] ReadCappedCore(FileInfo file)
+    /// <summary>The entry in <paramref name="directory"/> whose stored name is <paramref name="name"/>, or null.</summary>
+    private static FileSystemInfo? FindEntry(DirectoryInfo directory, string name, bool ignoreCase)
     {
-        using FileStream stream = file.OpenRead();
-        if (stream.Length > _maxBytes)
+        if (name.IndexOfAny(ForbiddenNameChars) >= 0 || !directory.Exists)
         {
-            throw new McpException($"'{file.Name}' is larger than the upload limit (Ticketing:MaxUploadBytes).");
+            return null;
         }
 
-        byte[] buffer = new byte[stream.Length];
-        stream.ReadExactly(buffer);
-        return buffer;
+        var options = new EnumerationOptions
+        {
+            MatchType = MatchType.Simple,
+            MatchCasing = ignoreCase ? MatchCasing.CaseInsensitive : MatchCasing.CaseSensitive,
+            AttributesToSkip = 0,
+            IgnoreInaccessible = true,
+            RecurseSubdirectories = false,
+        };
+
+        StringComparison comparison = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return directory.EnumerateFileSystemInfos(name, options).FirstOrDefault(e => string.Equals(e.Name, name, comparison));
+    }
+
+    /// <summary>
+    /// The path with each existing segment spelled as the file system stores it and any symbolic link or junction
+    /// replaced by its target, so a short name, a different spelling, or a linked parent can't disguise where a folder
+    /// is. Segments that don't exist are kept as written.
+    /// </summary>
+    internal static string Canonical(string fullPath)
+    {
+        string root = Path.GetPathRoot(fullPath) ?? "";
+        string current = root;
+        foreach (string segment in fullPath[root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            FileSystemInfo? entry = FindEntry(new DirectoryInfo(current), segment, ignoreCase: true);
+            if (entry is null)
+            {
+                current = Path.Combine(current, segment);
+                continue;
+            }
+
+            current = entry.LinkTarget is not null
+                ? entry.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? entry.FullName
+                : entry.FullName;
+        }
+
+        return current;
     }
 
     private static string ContentTypeOf(string fileName) =>

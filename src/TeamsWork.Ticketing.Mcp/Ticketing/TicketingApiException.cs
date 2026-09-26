@@ -35,4 +35,21 @@ public sealed class TicketingApiException : Exception
     }
 
     public HttpStatusCode? StatusCode { get; }
+
+    /// <summary>
+    /// True when a non-idempotent request (a POST that creates something) failed after it may have reached the API:
+    /// a timeout, a dropped connection, a 5xx, or a success response without the created item. The API may have
+    /// carried it out, so repeating it could create a duplicate. The message says so too.
+    /// </summary>
+    public bool OutcomeUnknown { get; init; }
+
+    internal const string OutcomeUnknownAdvice =
+        " The request may have been carried out anyway, so check before trying again (for example with find_similar_tickets " +
+        "or list_ticket_activities): repeating it could create a duplicate.";
+
+    /// <summary>A failure of a create request whose outcome is unknown, with advice not to repeat it blindly.</summary>
+    internal static TicketingApiException Unknown(HttpStatusCode? statusCode, string message, Exception? innerException = null) =>
+        innerException is null
+            ? new(statusCode, message + OutcomeUnknownAdvice) { OutcomeUnknown = true }
+            : new(statusCode, message + OutcomeUnknownAdvice, innerException) { OutcomeUnknown = true };
 }

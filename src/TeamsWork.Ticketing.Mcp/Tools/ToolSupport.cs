@@ -123,7 +123,8 @@ internal sealed record TicketSummary(
 /// <summary>Envelope for write tools: what changed and who it was attributed to.</summary>
 internal sealed record WriteResult<T>(
     [property: JsonPropertyName("item")] T Item,
-    [property: JsonPropertyName("actedAs")] ActedAs ActedAs);
+    [property: JsonPropertyName("actedAs")] ActedAs ActedAs,
+    [property: JsonPropertyName("warning")] string? Warning = null);
 
 internal sealed record ActedAs(
     [property: JsonPropertyName("name")] string Name,

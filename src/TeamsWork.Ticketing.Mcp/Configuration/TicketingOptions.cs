@@ -90,6 +90,13 @@ public sealed class TicketingOptions
     public int MaxScanTickets { get; set; } = 1000;
 
     /// <summary>
+    /// Upstream requests one caller may cause per minute (Entra mode), counting every request a tool call makes, so
+    /// one caller can't use up the quota all callers share. Keep it below <see cref="RateLimitPermits"/>. 0 turns it off.
+    /// </summary>
+    [Range(0, 10_000)]
+    public int MaxUpstreamRequestsPerCallerPerMinute { get; set; } = 50;
+
+    /// <summary>
     /// Folder that upload_ticket_files may read from (stdio only). The tool is offered only when this is set, and it
     /// refuses any file outside it, so an agent steered by text it has read can't send arbitrary local files.
     /// </summary>

@@ -85,7 +85,7 @@ public sealed class AttachmentTools
     {
         return ToolRunner.RunAsync(async () =>
         {
-            string id = ToolValidation.RequireText(activityId, "activityId", 128);
+            string id = ToolValidation.RequirePathId(activityId, "activityId");
             ListResponse<Attachment> r = await _client.ListActivityAttachmentsAsync(id, timezoneOffset, cancellationToken);
             IReadOnlyList<Attachment> items = r.Items ?? [];
             return new PageResult<Attachment>(items, items.Count, null, null, null);

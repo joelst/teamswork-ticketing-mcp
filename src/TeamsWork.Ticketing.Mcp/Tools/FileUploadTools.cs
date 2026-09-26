@@ -25,17 +25,20 @@ public sealed class FileUploadTools
         _folder = folder;
     }
 
-    [McpServerTool(Name = "upload_ticket_files", Title = "Upload files", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
+    // OpenWorld: it sends local files to a third-party service, which clients should treat with more care than a
+    // change inside the help desk.
+    [McpServerTool(Name = "upload_ticket_files", Title = "Upload files", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = true)]
     [Description(
         "Upload files (for example screenshots or logs) from the local upload folder to a ticket, with an optional comment. Only files " +
         "inside the configured upload folder can be sent; relative paths are taken from it. Up to 10 files per call, within the " +
-        "configured total size. The response includes an activityId that list_activity_attachments accepts.")]
+        "configured total size. Uploads are private (internal agents only) unless isPrivate=false, which also shows them to the " +
+        "requestor. The response includes an activityId that list_activity_attachments accepts.")]
     public Task<string> UploadTicketFiles(
         [Description("Ticket UUID.")] string ticketId,
         [Description("Paths of the files to upload, relative to the upload folder (or absolute paths inside it).")] IReadOnlyList<string> paths,
         [Description("Plain-text comment shown with the files.")] string? comment = null,
         [Description("HTML comment (formatting, lists, tables, links). Ignored when 'comment' is also supplied. Script, forms, images, and inline styles are removed.")] string? commentHtml = null,
-        [Description("true to make the upload visible only to internal agents.")] bool isPrivate = false,
+        [Description("true (default) to make the upload visible only to internal agents; false also shows it to the requestor.")] bool isPrivate = true,
         [Description("Return comment_HTML in the created activity.")] bool includeHtml = false,
         [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)

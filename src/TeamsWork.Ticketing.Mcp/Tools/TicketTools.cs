@@ -128,7 +128,7 @@ public sealed class TicketTools
             ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);
             string validTitle = ToolValidation.RequireText(title, "title", 500);
             string? validDescription = ToolValidation.OptionalText(description, "description");
-            string? validHtml = description is null ? ToolValidation.OptionalHtml(descriptionHtml, "descriptionHtml") : null;
+            string? validHtml = validDescription is null ? ToolValidation.OptionalHtml(descriptionHtml, "descriptionHtml") : null;
             string? validPriority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities);
             string? validDate = ToolValidation.OptionalDateOnly(expectedDate, "expectedDate");
             CheckSizes(tags, customFields);
@@ -139,8 +139,8 @@ public sealed class TicketTools
                 Title = validTitle,
                 Description = validDescription,
                 DescriptionHtml = validHtml,
-                Requestor = await lookup.PersonAsync(requestor, "requestor") ?? actor.ToTicketUser(),
-                Assignee = await lookup.PersonAsync(assignee, "assignee"),
+                Requestor = await lookup.PersonAsync(requestor, "requestor", assigneeOnly: false) ?? actor.ToTicketUser(),
+                Assignee = await lookup.PersonAsync(assignee, "assignee", assigneeOnly: true),
                 Priority = validPriority,
                 ExpectedDate = validDate,
                 Tags = await lookup.TagsAsync(tags),
@@ -150,13 +150,31 @@ public sealed class TicketTools
             Ticket created = await _client.CreateTicketAsync(ticket, actor.ToTicketUser(), includeHtml, timezoneOffset, cancellationToken);
 
             // The live API ignores priority on create (the ticket gets the instance default) but honours it on update.
-            if (validPriority is not null && Guid.TryParse(created.Id, out Guid createdId) &&
-                !string.Equals(created.Priority, validPriority, StringComparison.OrdinalIgnoreCase))
+            // The ticket exists from here on, so a failure setting the priority must not look like a failed create:
+            // an agent that saw an error would create the ticket again.
+            string? warning = null;
+            if (validPriority is not null && !string.Equals(created.Priority, validPriority, StringComparison.OrdinalIgnoreCase))
             {
-                created = await _client.UpdateTicketAsync(createdId, new TicketWrite { Priority = validPriority }, actor.ToTicketUser(), includeHtml, timezoneOffset, cancellationToken);
+                if (!Guid.TryParse(created.Id, out Guid createdId))
+                {
+                    warning = $"The ticket was created, but its priority is {created.Priority ?? "unset"} rather than {validPriority}, and the " +
+                              "API returned no ID to correct it with. Don't create it again; find it with list_tickets and use update_ticket.";
+                }
+                else
+                {
+                    try
+                    {
+                        created = await _client.UpdateTicketAsync(createdId, new TicketWrite { Priority = validPriority }, actor.ToTicketUser(), includeHtml, timezoneOffset, cancellationToken);
+                    }
+                    catch (TicketingApiException ex)
+                    {
+                        warning = $"Ticket #{created.TicketNo} was created, but setting its priority to {validPriority} failed: {ex.Message} " +
+                                  $"Don't create it again; call update_ticket with ticketId {created.Id} and the priority.";
+                    }
+                }
             }
 
-            return new WriteResult<Ticket>(created, ActedAs.From(actor));
+            return new WriteResult<Ticket>(created, ActedAs.From(actor), warning);
         });
     }
 
@@ -185,7 +203,7 @@ public sealed class TicketTools
             ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);
             string? validTitle = ToolValidation.OptionalText(title, "title", 500);
             string? validDescription = ToolValidation.OptionalText(description, "description");
-            string? validHtml = description is null ? ToolValidation.OptionalHtml(descriptionHtml, "descriptionHtml") : null;
+            string? validHtml = validDescription is null ? ToolValidation.OptionalHtml(descriptionHtml, "descriptionHtml") : null;
             string? validPriority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities);
             string? validDate = ToolValidation.OptionalDateOnly(expectedDate, "expectedDate");
             CheckSizes(tags, customFields);
@@ -196,8 +214,8 @@ public sealed class TicketTools
                 Title = validTitle,
                 Description = validDescription,
                 DescriptionHtml = validHtml,
-                Requestor = await lookup.PersonAsync(requestor, "requestor"),
-                Assignee = await lookup.PersonAsync(assignee, "assignee"),
+                Requestor = await lookup.PersonAsync(requestor, "requestor", assigneeOnly: false),
+                Assignee = await lookup.PersonAsync(assignee, "assignee", assigneeOnly: true),
                 Priority = validPriority,
                 ExpectedDate = validDate,
                 Tags = await lookup.TagsAsync(tags),
@@ -258,7 +276,7 @@ public sealed class TicketTools
             ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);
 
             UserRef person = who.Contains('@', StringComparison.Ordinal) ? new UserRef(Email: who) : new UserRef(Name: who);
-            TicketUser? resolved = await new InstanceLookup(_client, _cache, timezoneOffset, cancellationToken).PersonAsync(person, "assignee");
+            TicketUser? resolved = await new InstanceLookup(_client, _cache, timezoneOffset, cancellationToken).PersonAsync(person, "assignee", assigneeOnly: true);
 
             Ticket updated = await _client.UpdateTicketAsync(id, new TicketWrite { Assignee = resolved }, actor.ToTicketUser(), includeHtml: false, timezoneOffset, cancellationToken);
             return new WriteResult<Ticket>(updated, ActedAs.From(actor));

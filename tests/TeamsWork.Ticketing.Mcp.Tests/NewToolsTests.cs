@@ -16,7 +16,7 @@ public sealed class NewToolsTests
     private const string TicketA = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
     private const string TicketB = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 
-    private const string InstanceJson = """
+    internal const string InstanceJson = """
         {"item":{"id":"i","displayName":"Help desk",
           "customFields":[
             {"id":"11111111-1111-1111-1111-111111111111","title":"Location","type":{"key":"1_text"}},
@@ -33,13 +33,13 @@ public sealed class NewToolsTests
     private const string TagsJson = """{"items":[{"id":"cat1","text":"Area","tags":[{"text":"Network"},{"text":"Old","deleted":true}]}]}""";
 
     private static readonly FixedTimeProvider Time = new(new DateTimeOffset(2026, 1, 15, 12, 0, 0, TimeSpan.Zero));
-    private static readonly ActingUser Jane = new("u1", "Jane Doe", "jane@example.test", ActingUserSource.DelegatedToken);
+    internal static readonly ActingUser Jane = new("u1", "Jane Doe", "jane@example.test", ActingUserSource.DelegatedToken);
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     // ---- Name lookups -----------------------------------------------------------------------------------------
 
-    private static Instance ParseInstance() =>
+    internal static Instance ParseInstance() =>
         JsonSerializer.Deserialize<ItemResponse<Instance>>(InstanceJson, TicketingClient.JsonOptions)!.Item!;
 
     private static IReadOnlyList<TagCategory> ParseTags() =>
@@ -269,16 +269,21 @@ public sealed class NewToolsTests
         }
     }
 
+    // A complete reference is still checked against the assignee list, so it can't mix two people's details; someone
+    // outside the list (an email-to-ticket requestor) is then used as given.
     [Fact]
-    public async Task Complete_person_reference_needs_no_lookup()
+    public async Task Complete_person_reference_outside_the_list_is_used_as_given()
     {
-        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.Created, $$$"""{"item":{"id":"{{{TicketA}}}"}}""");
+        var handler = new FakeHttpHandler()
+            .Enqueue(HttpStatusCode.OK, InstanceJson)
+            .Enqueue(HttpStatusCode.Created, $$$"""{"item":{"id":"{{{TicketA}}}"}}""");
         (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
         var tools = new TicketTools(client, new FixedActor(Jane), cache, options);
 
         await tools.CreateTicket("Hi", requestor: new UserRef("x@example.test", "x@example.test", "x@example.test"), cancellationToken: Ct);
 
-        Assert.Single(handler.Requests);
+        using JsonDocument body = JsonDocument.Parse(handler.Requests[1].Body!);
+        Assert.Equal("x@example.test", body.RootElement.GetProperty("ticket").GetProperty("requestor").GetProperty("id").GetString());
     }
 
     [Fact]
@@ -310,7 +315,7 @@ public sealed class NewToolsTests
             .Enqueue(HttpStatusCode.OK, """{"items":[{"id":"3"},{"id":"4"}],"itemCount":5,"continuationToken":"t3"}""");
         TicketingClient client = TestFactory.Client(handler);
 
-        TicketScan.Result r = await TicketScan.RunAsync(client, new TicketListQuery(), _ => true, maxTickets: 4, pageSize: 2, Ct);
+        TicketScan.Result<Ticket> r = await TicketScan.RunAsync(client, new TicketListQuery(), t => t, maxTickets: 4, pageSize: 2, Ct);
 
         Assert.Equal(4, r.Scanned);
         Assert.True(r.Truncated);
@@ -327,7 +332,7 @@ public sealed class NewToolsTests
             .Enqueue(HttpStatusCode.OK, """{"items":[{"id":"3"}],"itemCount":3}""");
         TicketingClient client = TestFactory.Client(handler);
 
-        TicketScan.Result r = await TicketScan.RunAsync(client, new TicketListQuery(), t => t.Id != "2", maxTickets: 100, pageSize: 2, Ct);
+        TicketScan.Result<Ticket> r = await TicketScan.RunAsync(client, new TicketListQuery(), t => t.Id != "2" ? t : null, maxTickets: 100, pageSize: 2, Ct);
 
         Assert.Equal(3, r.Scanned);
         Assert.False(r.Truncated);
@@ -412,7 +417,7 @@ public sealed class NewToolsTests
             .Enqueue(HttpStatusCode.OK, $$$"""{"items":[{"id":"{{{TicketB}}}","ticketNo":570},{"id":"{{{TicketA}}}","ticketNo":57}]}""")
             .Enqueue(HttpStatusCode.OK, $$$"""{"item":{"id":"{{{TicketA}}}","ticketNo":57,"title":"Found"}}""");
 
-        string json = await new LookupTools(TestFactory.Client(handler)).FindTicketByNumber("#57", cancellationToken: Ct);
+        string json = await Lookup(TestFactory.Client(handler)).FindTicketByNumber("#57", cancellationToken: Ct);
 
         Assert.Contains("Found", json, StringComparison.Ordinal);
         Assert.Equal("57", TestFactory.Query(handler.Requests[0].Uri)["search"]);
@@ -429,13 +434,15 @@ public sealed class NewToolsTests
             .Enqueue(HttpStatusCode.OK, $$$"""{"items":[{"id":"{{{TicketB}}}","ticketId":100},{"id":"{{{TicketA}}}","ticketId":42}]}""")
             .Enqueue(HttpStatusCode.OK, $$$"""{"item":{"id":"{{{TicketA}}}","ticketNo":42}}""");
 
-        await new LookupTools(TestFactory.Client(handler)).FindTicketByNumber("42", cancellationToken: Ct);
+        await Lookup(TestFactory.Client(handler)).FindTicketByNumber("42", cancellationToken: Ct);
 
         Dictionary<string, string> newest = TestFactory.Query(handler.Requests[1].Uri);
         Assert.Equal("ticketId", newest["orderBy"]);
         Assert.Equal("DESC", newest["order"]);
         Dictionary<string, string> window = TestFactory.Query(handler.Requests[2].Uri);
-        Assert.Equal("59", window["limit"]); // positions 0..58 cover numbers 100 down to 42
+        // Number 42 sits at position 58 at most (100 - 42); the page ending there starts at 0, and it takes what is left
+        // of the MaxScanTickets budget (1000, less the newest-ticket read).
+        Assert.Equal("999", window["limit"]);
         Assert.False(window.ContainsKey("offset")); // offset 0 isn't sent
         Assert.EndsWith($"/tickets/{TicketA}", handler.Requests[3].Uri.AbsolutePath, StringComparison.Ordinal);
     }
@@ -447,7 +454,7 @@ public sealed class NewToolsTests
             .Enqueue(HttpStatusCode.OK, """{"items":[]}""")
             .Enqueue(HttpStatusCode.OK, $$$"""{"items":[{"id":"{{{TicketB}}}","ticketNo":100}]}""");
 
-        McpException ex = await Assert.ThrowsAsync<McpException>(() => new LookupTools(TestFactory.Client(handler)).FindTicketByNumber("500", cancellationToken: Ct));
+        McpException ex = await Assert.ThrowsAsync<McpException>(() => Lookup(TestFactory.Client(handler)).FindTicketByNumber("500", cancellationToken: Ct));
 
         Assert.Contains("500", ex.Message, StringComparison.Ordinal);
         Assert.Equal(2, handler.Requests.Count);
@@ -473,7 +480,7 @@ public sealed class NewToolsTests
         });
         TicketingClient client = ClientFor(handler);
 
-        using JsonDocument doc = JsonDocument.Parse(await new LookupTools(client).GetTicketContext(TicketA, activityLimit: 5, cancellationToken: Ct));
+        using JsonDocument doc = JsonDocument.Parse(await Lookup(client).GetTicketContext(TicketA, activityLimit: 5, cancellationToken: Ct));
 
         Assert.Equal("Ctx", doc.RootElement.GetProperty("ticket").GetProperty("title").GetString());
         Assert.Equal("hello", doc.RootElement.GetProperty("activities")[0].GetProperty("comment").GetString());
@@ -492,7 +499,7 @@ public sealed class NewToolsTests
             .Enqueue(HttpStatusCode.OK, """{"items":[]}""")
             .Enqueue(HttpStatusCode.OK, """{"items":[]}""");
 
-        using JsonDocument doc = JsonDocument.Parse(await new LookupTools(TestFactory.Client(handler)).FindSimilarTickets("VPN disconnects every hour", cancellationToken: Ct));
+        using JsonDocument doc = JsonDocument.Parse(await Lookup(TestFactory.Client(handler)).FindSimilarTickets("VPN disconnects every hour", cancellationToken: Ct));
 
         JsonElement matches = doc.RootElement.GetProperty("matches");
         Assert.Equal(1, matches.GetArrayLength()); // the printer ticket shares no keyword
@@ -588,7 +595,7 @@ public sealed class NewToolsTests
 
     // ---- Helpers ----------------------------------------------------------------------------------------------
 
-    private static (TicketingClient Client, InstanceCache Cache, IOptions<TicketingOptions> Options) Build(FakeHttpHandler handler, TicketingOptions? options = null)
+    internal static (TicketingClient Client, InstanceCache Cache, IOptions<TicketingOptions> Options) Build(FakeHttpHandler handler, TicketingOptions? options = null)
     {
         options ??= TestFactory.Options();
         IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(options);
@@ -596,20 +603,23 @@ public sealed class NewToolsTests
         return (client, new InstanceCache(opts, new TimeZoneOffsetResolver(opts, Time), Time), opts);
     }
 
-    private static TicketingClient ClientFor(HttpMessageHandler handler)
+    internal static LookupTools Lookup(TicketingClient client, TicketingOptions? options = null) =>
+        new(client, Microsoft.Extensions.Options.Options.Create(options ?? TestFactory.Options()));
+
+    internal static TicketingClient ClientFor(HttpMessageHandler handler)
     {
         IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(TestFactory.Options());
         return new TicketingClient(new HttpClient(handler), opts, new TicketingRateLimiter(opts), new TimeZoneOffsetResolver(opts, Time),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<TicketingClient>.Instance, Time);
     }
 
-    private sealed class FixedActor(ActingUser user) : IActingUserProvider
+    internal sealed class FixedActor(ActingUser user) : IActingUserProvider
     {
         public ValueTask<ActingUser> GetActingUserAsync(CancellationToken cancellationToken) => ValueTask.FromResult(user);
     }
 
     /// <summary>Answers by path, for tools that make requests in parallel.</summary>
-    private sealed class RoutingHandler(Func<string, string> respond) : HttpMessageHandler
+    internal sealed class RoutingHandler(Func<string, string> respond) : HttpMessageHandler
     {
         public ConcurrentBag<string> Paths { get; } = [];
 
@@ -623,7 +633,7 @@ public sealed class NewToolsTests
         }
     }
 
-    private sealed class TempDir : IDisposable
+    internal sealed class TempDir : IDisposable
     {
         public TempDir()
         {

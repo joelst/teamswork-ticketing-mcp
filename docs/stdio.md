@@ -165,12 +165,17 @@ choose a folder for it, and it can only read files inside that folder:
 ```
 
 Put it in the secrets file (or set `Ticketing__UploadRoot`) and restart the client; the tool list then has 21 tools.
-Save or copy the files you want to send into that folder, then ask the agent to upload them by name. The folder
-must exist and must be a dedicated one: the server refuses to start with a drive root, your home folder, or a folder
-that contains the user-secrets file. The tool refuses paths outside the folder, hidden files and folders (names
-starting with `.`), and paths through symbolic links or junctions, so text an agent has read can't make it send
-other files. Up to 10 files per call, 10 MiB in total by default (`Ticketing:MaxUploadBytes`). Uploads are never
-offered by the HTTP transports.
+Save or copy the files you want to send into that folder, then ask the agent to upload them by name, as they appear
+in the folder (letter case included). A OneDrive folder works. The folder must exist and must be a dedicated one: the
+server refuses to start with a drive root, or a folder that contains your home folder, the application data or
+configuration folders, or the user-secrets file. The tool refuses paths outside the folder, hidden files and folders
+(names starting with `.`), paths through symbolic links or junctions, short 8.3 names, and alternate data streams, so
+text an agent has read can't make it send other files. Up to 10 files per call, 10 MiB in total by default
+(`Ticketing:MaxUploadBytes`). Uploads are private (visible to agents, not the requestor) unless the agent passes
+`isPrivate: false`. Uploads are never offered by the HTTP transports.
+
+Only put files in the folder that you are willing to send. Anything you place there, including a hard link to a file
+elsewhere, can be uploaded.
 
 `install.sh` updates the file without a JSON parser, so it only edits the form `dotnet user-secrets` writes: one
 `"key": "value"` setting per line. It stops, without changing anything, if the file looks different, and keeps the

@@ -66,7 +66,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -n "$REGION" ] && [ "$UNINSTALL" = 0 ]; then
-    REGION=$(printf '%s' "$REGION" | tr '[:lower:]' '[:upper:]')
+    REGION=$(printf '%s' "$REGION" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
     case "$REGION" in
         US|EU|AUS) ;;
         *) echo "Unknown --region '$REGION'. Use US (the default), EU, or AUS." >&2; exit 2 ;;

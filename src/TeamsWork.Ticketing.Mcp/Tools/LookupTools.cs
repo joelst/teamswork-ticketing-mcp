@@ -1,8 +1,11 @@
 using System.ComponentModel;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
+using TeamsWork.Ticketing.Mcp.Configuration;
 using TeamsWork.Ticketing.Mcp.Ticketing;
 using TeamsWork.Ticketing.Mcp.Ticketing.Models;
 
@@ -15,8 +18,8 @@ public sealed class LookupTools
     private const string NumberFields = "id,ticketId";
     private const string SimilarFields = "id,ticketId,title,status,priority,assignee,createdOn";
 
-    // How far below its estimated position a ticket number may sit (deleted tickets shift it) and still be found.
-    private const int NumberWindow = TicketScan.MaxApiPageSize;
+    // Tickets the number search reads before it falls back to paging through tickets sorted by number.
+    private const int NumberSearchSize = 50;
 
     private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -26,10 +29,12 @@ public sealed class LookupTools
     };
 
     private readonly TicketingClient _client;
+    private readonly TicketingOptions _options;
 
-    public LookupTools(TicketingClient client)
+    public LookupTools(TicketingClient client, IOptions<TicketingOptions> options)
     {
         _client = client;
+        _options = options.Value;
     }
 
     [McpServerTool(Name = "find_ticket_by_number", Title = "Find ticket by number", ReadOnly = true, Idempotent = true, OpenWorld = false)]
@@ -45,9 +50,15 @@ public sealed class LookupTools
         return ToolRunner.RunAsync(async () =>
         {
             int number = ParseTicketNumber(ticketNo);
-            string? id = await FindIdByNumberAsync(number, timezoneOffset, cancellationToken)
-                         ?? throw new McpException($"No ticket number {number} was found. Check the number, or search with list_tickets.");
-            return await _client.GetTicketAsync(Guid.Parse(id), includeHtml, timezoneOffset, cancellationToken);
+            NumberLookup found = await FindIdByNumberAsync(number, timezoneOffset, cancellationToken);
+            return found switch
+            {
+                { Id: string id } => await _client.GetTicketAsync(Guid.Parse(id), includeHtml, timezoneOffset, cancellationToken),
+                { Conclusive: true } => throw new McpException($"There is no ticket number {number}. Check the number, or search with list_tickets."),
+                _ => throw new McpException(
+                    $"Ticket number {number} wasn't found among the {_options.MaxScanTickets} tickets this lookup may read " +
+                    "(Ticketing:MaxScanTickets), so it may still exist. Search for it with list_tickets instead."),
+            };
         });
     }
 
@@ -67,10 +78,26 @@ public sealed class LookupTools
             Guid id = ToolValidation.RequireGuid(ticketId, "ticketId");
             int activities = ToolValidation.ResolvePageSize(activityLimit, 10, 50);
 
-            Task<Ticket> ticket = _client.GetTicketAsync(id, includeHtml, timezoneOffset, cancellationToken);
-            Task<ListResponse<Activity>> history = _client.ListActivitiesAsync(id, includeHtml, activities, null, cancellationToken);
-            Task<ListResponse<Attachment>> attachments = _client.ListTicketAttachmentsAsync(id, timezoneOffset, cancellationToken);
-            await Task.WhenAll(ticket, history, attachments);
+            // The three reads run together; the first to fail cancels the others (no point spending quota on the history of a
+            // ticket that doesn't exist), and its error is the one reported rather than the others' cancellation.
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            Task<Ticket> ticket = CancelOthersOnFailure(_client.GetTicketAsync(id, includeHtml, timezoneOffset, linked.Token), linked);
+            Task<ListResponse<Activity>> history = CancelOthersOnFailure(_client.ListActivitiesAsync(id, includeHtml, activities, null, linked.Token), linked);
+            Task<ListResponse<Attachment>> attachments = CancelOthersOnFailure(_client.ListTicketAttachmentsAsync(id, timezoneOffset, linked.Token), linked);
+            try
+            {
+                await Task.WhenAll(ticket, history, attachments);
+            }
+            catch when (!cancellationToken.IsCancellationRequested)
+            {
+                Task[] all = [ticket, history, attachments];
+                if (all.FirstOrDefault(t => t.IsFaulted)?.Exception?.InnerException is Exception first)
+                {
+                    ExceptionDispatchInfo.Throw(first);
+                }
+
+                throw;
+            }
 
             ListResponse<Activity> h = await history;
             return new TicketContext(
@@ -98,7 +125,14 @@ public sealed class LookupTools
         {
             string text = ToolValidation.RequireText(title, "title", 500);
             int max = ToolValidation.ResolvePageSize(limit, 5, 20);
-            List<string> keywords = Keywords(text);
+
+            // A title made only of short or common words ("PC", "VPN issue help") has no distinctive keywords; its plain
+            // words are compared instead, so a real duplicate isn't scored 0 and hidden.
+            List<string> keywords = Keywords(text, MaxQueryKeywords);
+            if (keywords.Count == 0)
+            {
+                keywords = Words(text).Take(MaxQueryKeywords).ToList();
+            }
 
             // The whole phrase first, then the most distinctive words on their own, since the API's full-text search
             // may require every word to match. At most four requests.
@@ -126,6 +160,15 @@ public sealed class LookupTools
                 }
             }
 
+            if (keywords.Count == 0)
+            {
+                // Nothing to score with: return what the phrase search found, unranked, rather than claiming there's none.
+                List<SimilarTicket> unranked = found.Values.Take(max).Select(t => new SimilarTicket(null, TicketSummary.From(t))).ToList();
+                return new SimilarResult(unranked, keywords, unranked.Count == 0
+                    ? "No similar tickets found; it's reasonable to create a new one."
+                    : "The title has no words to compare, so these search results are unranked. Check them before creating a ticket.");
+            }
+
             List<SimilarTicket> ranked = found.Values
                 .Select(t => new SimilarTicket(Math.Round(Similarity(keywords, t.Title), 2), TicketSummary.From(t)))
                 .Where(m => m.Score > 0)
@@ -139,60 +182,120 @@ public sealed class LookupTools
     }
 
     /// <summary>
-    /// Finds a ticket's UUID from its number. The API can't filter by number, so this first tries full-text search
-    /// (which may match the number), then reads the page of tickets, sorted by number, where the number should be.
+    /// Finds a ticket's UUID from its number. The API can't filter by number, so this tries full-text search (which
+    /// matches most numbers) and then pages through tickets sorted by number, newest first, reading no more than
+    /// Ticketing:MaxScanTickets tickets in all. A number is reported absent only when that is certain: it is above
+    /// the highest number, or the tickets on either side of where it would be have been seen.
     /// </summary>
-    private async Task<string?> FindIdByNumberAsync(int number, int? timezoneOffset, CancellationToken cancellationToken)
+    private async Task<NumberLookup> FindIdByNumberAsync(int number, int? timezoneOffset, CancellationToken cancellationToken)
     {
-        ListResponse<Ticket> searched = await _client.ListTicketsAsync(new TicketListQuery
-        {
-            Search = number.ToString(CultureInfo.InvariantCulture),
-            Select = NumberFields,
-            Limit = 50,
-            TimezoneOffset = timezoneOffset,
-        }, cancellationToken);
+        int budget = _options.MaxScanTickets;
 
-        string? id = IdOf(searched.Items, number);
-        if (id is not null)
+        ListResponse<Ticket> searched = await ListByNumberAsync(null, Math.Min(NumberSearchSize, budget), search: number, timezoneOffset, cancellationToken);
+        budget -= searched.Items?.Count ?? 0;
+        if (IdOf(searched.Items, number) is string found)
         {
-            return id;
+            return new NumberLookup(found, true);
         }
 
-        // Newest number first. Tickets numbered above this one come before it, so its position is at most
-        // (highest - number); deleted tickets only move it earlier. One page ending at that position covers it
-        // unless more than a page's worth of tickets above it were deleted.
-        ListResponse<Ticket> newest = await _client.ListTicketsAsync(new TicketListQuery
+        if (budget <= 0)
         {
-            OrderBy = "ticketId",
-            Order = "DESC",
-            Select = NumberFields,
-            Limit = 1,
-            TimezoneOffset = timezoneOffset,
-        }, cancellationToken);
-
-        if (newest.Items is not [Ticket top] || TicketSummary.TicketNumber(top) is not int highest || number > highest)
-        {
-            return null;
+            return new NumberLookup(null, false);
         }
 
-        if (highest == number)
+        ListResponse<Ticket> newest = await ListByNumberAsync(null, 1, search: null, timezoneOffset, cancellationToken);
+        budget--;
+        if (newest.Items is not [Ticket top] || TicketSummary.TicketNumber(top) is not int highest)
         {
-            return top.Id;
+            return new NumberLookup(null, newest.Items is { Count: 0 }); // no tickets at all is a certain answer
         }
 
-        int position = highest - number;
-        ListResponse<Ticket> window = await _client.ListTicketsAsync(new TicketListQuery
+        if (number > highest)
         {
-            OrderBy = "ticketId",
-            Order = "DESC",
-            Select = NumberFields,
-            Offset = position >= NumberWindow ? position - NumberWindow + 1 : null,
-            Limit = Math.Min(NumberWindow, position + 1),
-            TimezoneOffset = timezoneOffset,
-        }, cancellationToken);
+            return new NumberLookup(null, true);
+        }
 
-        return IdOf(window.Items, number);
+        if (number == highest)
+        {
+            return new NumberLookup(top.Id, true);
+        }
+
+        // Tickets numbered above this one come before it, so it sits at position (highest - number) or earlier;
+        // deleted tickets only move it earlier. Start with the page that ends at that position and move toward the
+        // start while every number seen is still below it.
+        // The first page ends exactly at that position, sized by what is left of the budget, so a small budget still
+        // reads where the ticket most likely is.
+        int page = Math.Min(TicketScan.MaxApiPageSize, _options.MaxScanTickets);
+        int offset = Math.Max(0, highest - number - Math.Min(page, budget) + 1);
+        var visited = new HashSet<int>();
+        int? belowFrom = null; // first position known to hold only numbers below it
+        while (budget > 0 && visited.Add(offset))
+        {
+            int size = Math.Min(page, budget);
+            ListResponse<Ticket> window = await ListByNumberAsync(offset, size, search: null, timezoneOffset, cancellationToken);
+            IReadOnlyList<Ticket> items = window.Items ?? [];
+            budget -= items.Count;
+
+            if (IdOf(items, number) is string id)
+            {
+                return new NumberLookup(id, true);
+            }
+
+            List<int> numbers = items.Select(TicketSummary.TicketNumber).OfType<int>().ToList();
+            if (numbers.Count == 0)
+            {
+                if (offset == 0)
+                {
+                    return new NumberLookup(null, false);
+                }
+
+                offset = Math.Max(0, offset - size); // past the end: step back
+                continue;
+            }
+
+            if (numbers.Max() < number)
+            {
+                if (offset == 0)
+                {
+                    return new NumberLookup(null, true); // it would be above everything, which the newest check ruled out
+                }
+
+                belowFrom = Math.Min(belowFrom ?? offset, offset);
+                offset = Math.Max(0, offset - size);
+            }
+            else if (numbers.Min() > number)
+            {
+                // Everything up to here is above it; if the region below it starts right after, there's no gap for it.
+                if (items.Count < size || offset + items.Count >= belowFrom)
+                {
+                    return new NumberLookup(null, true);
+                }
+
+                offset += items.Count;
+            }
+            else
+            {
+                return new NumberLookup(null, true); // numbers on both sides of it were seen, and it wasn't between them
+            }
+        }
+
+        return new NumberLookup(null, false);
     }
+
+    private Task<ListResponse<Ticket>> ListByNumberAsync(int? offset, int limit, int? search, int? timezoneOffset, CancellationToken cancellationToken) =>
+        _client.ListTicketsAsync(new TicketListQuery
+        {
+            Search = search?.ToString(CultureInfo.InvariantCulture),
+            OrderBy = search is null ? "ticketId" : null,
+            Order = search is null ? "DESC" : null,
+            Select = NumberFields,
+            Offset = offset is > 0 ? offset : null,
+            Limit = limit,
+            TimezoneOffset = timezoneOffset,
+        }, cancellationToken);
+
+    /// <summary>The ticket's UUID when found; otherwise whether its absence is certain.</summary>
+    private sealed record NumberLookup(string? Id, bool Conclusive);
 
     private static string? IdOf(IReadOnlyList<Ticket>? tickets, int number) =>
         tickets?.FirstOrDefault(t => TicketSummary.TicketNumber(t) == number && Guid.TryParse(t.Id, out _))?.Id;
@@ -205,26 +308,44 @@ public sealed class LookupTools
             : throw new McpException("'ticketNo' must be a ticket number such as 1234. For a UUID, use get_ticket.");
     }
 
+    // Keywords taken from the proposed title; a candidate's title is compared in full.
+    private const int MaxQueryKeywords = 12;
+
     /// <summary>Distinctive lower-case words of three or more letters, without common filler words.</summary>
-    internal static List<string> Keywords(string? text) =>
+    internal static List<string> Keywords(string? text, int max = int.MaxValue) =>
+        Words(text).Where(w => w.Length >= 3 && !StopWords.Contains(w)).Take(max).ToList();
+
+    /// <summary>The distinct lower-case words of <paramref name="text"/>.</summary>
+    private static IEnumerable<string> Words(string? text) =>
         (text ?? "")
             .Split(WordSeparators, StringSplitOptions.RemoveEmptyEntries)
             .Select(w => w.Trim('\'').ToLowerInvariant())
-            .Where(w => w.Length >= 3 && !StopWords.Contains(w))
-            .Distinct(StringComparer.Ordinal)
-            .Take(12)
-            .ToList();
+            .Where(w => w.Length > 0)
+            .Distinct(StringComparer.Ordinal);
 
-    /// <summary>Share of the query's keywords that also appear in the candidate's title.</summary>
-    internal static double Similarity(List<string> queryKeywords, string? candidateTitle)
+    /// <summary>Share of the query's words that also appear in the candidate's title.</summary>
+    internal static double Similarity(List<string> queryWords, string? candidateTitle)
     {
-        if (queryKeywords.Count == 0)
+        if (queryWords.Count == 0)
         {
             return 0;
         }
 
-        var candidate = new HashSet<string>(Keywords(candidateTitle), StringComparer.Ordinal);
-        return (double)queryKeywords.Count(candidate.Contains) / queryKeywords.Count;
+        var candidate = new HashSet<string>(Words(candidateTitle), StringComparer.Ordinal);
+        return (double)queryWords.Count(candidate.Contains) / queryWords.Count;
+    }
+
+    private static async Task<T> CancelOthersOnFailure<T>(Task<T> task, CancellationTokenSource others)
+    {
+        try
+        {
+            return await task;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await others.CancelAsync();
+            throw;
+        }
     }
 
     private static readonly char[] WordSeparators = " \t\r\n.,;:!?()[]{}<>\"/\\|-_+=*&^%$#@~`".ToCharArray();
@@ -237,7 +358,7 @@ public sealed class LookupTools
         [property: JsonPropertyName("attachments")] IReadOnlyList<Attachment> Attachments);
 
     private sealed record SimilarTicket(
-        [property: JsonPropertyName("score")] double Score,
+        [property: JsonPropertyName("score")] double? Score,
         [property: JsonPropertyName("ticket")] TicketSummary Ticket);
 
     private sealed record SimilarResult(

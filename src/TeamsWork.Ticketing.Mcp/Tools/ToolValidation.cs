@@ -35,6 +35,18 @@ internal static class ToolValidation
         return guid;
     }
 
+    /// <summary>
+    /// Validates an opaque upstream ID that goes into a URL path segment. Escaping doesn't stop "." or "..", which the
+    /// URI parser then resolves as path navigation, so only the characters these IDs use are allowed.
+    /// </summary>
+    public static string RequirePathId(string? value, string paramName)
+    {
+        string id = RequireText(value, paramName, 128);
+        return id.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_')
+            ? id
+            : throw new McpException($"'{paramName}' must be an ID made of letters, digits, '-' and '_', as returned by the API.");
+    }
+
     public static string RequireText(string? value, string paramName, int maxLength = 20_000)
     {
         if (string.IsNullOrWhiteSpace(value))

@@ -13,49 +13,68 @@ internal static class TicketScan
     /// <summary>The API's largest page.</summary>
     public const int MaxApiPageSize = 1000;
 
-    public sealed record Result(List<Ticket> Matches, int Scanned, int? Total, bool Truncated);
+    public sealed record Result<T>(List<T> Matches, int Scanned, int? Total, bool Truncated);
 
-    public static async Task<Result> RunAsync(
+    /// <summary>
+    /// Reads tickets and keeps what <paramref name="pick"/> returns for each (null skips the ticket). Only the picked
+    /// values are kept, not the tickets, so a scan of full tickets holds one page at a time rather than every match.
+    /// </summary>
+    public static async Task<Result<T>> RunAsync<T>(
         TicketingClient client,
         TicketListQuery query,
-        Func<Ticket, bool> match,
+        Func<Ticket, T?> pick,
         int maxTickets,
         int pageSize,
         CancellationToken cancellationToken)
+        where T : class
     {
-        var matches = new List<Ticket>();
+        var matches = new List<T>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int scanned = 0;
+        int read = 0;
         int? total = null;
         string? token = null;
         bool more;
 
         do
         {
-            int size = Math.Min(pageSize, maxTickets - scanned);
-            // The continuation token is preferred; offset paging covers a response that reports a total but no token.
+            int size = Math.Min(pageSize, maxTickets - read);
+            // The continuation token is preferred; offset paging covers a response that has none.
             TicketListQuery page = query with
             {
                 Limit = size,
                 ContinuationToken = token,
-                Offset = token is null && scanned > 0 ? scanned : null,
+                Offset = token is null && read > 0 ? read : null,
             };
 
             ListResponse<Ticket> r = await client.ListTicketsAsync(page, cancellationToken);
             IReadOnlyList<Ticket> items = r.Items ?? [];
             total ??= r.ItemCount;
-            scanned += items.Count;
-            matches.AddRange(items.Where(match));
+            read += items.Count;
+
+            // Counted once each, so an API that repeats tickets across pages (or ignores offset) can't inflate results.
+            foreach (Ticket t in items.Where(x => x.Id is null || seen.Add(x.Id)))
+            {
+                scanned++;
+                if (pick(t) is T picked)
+                {
+                    matches.Add(picked);
+                }
+            }
 
             token = r.ContinuationToken;
-            more = items.Count > 0 && (token is not null || (items.Count == size && total > scanned));
+            // Another page exists if the API says so (a token, or a total not yet reached). Without either, a full page
+            // means there may be more; a short page is the end. The API may return fewer than asked for, so page fullness
+            // alone never ends a scan that a total says isn't finished.
+            more = items.Count > 0 && (token is not null || (total is int known ? known > read : items.Count == size));
         }
-        while (more && scanned < maxTickets);
+        while (more && read < maxTickets);
 
-        return new Result(matches, scanned, total, Truncated: more);
+        return new Result<T>(matches, scanned, total, Truncated: more);
     }
 
     /// <summary>The hint shown when a scan stopped before reading every ticket.</summary>
-    public static string? TruncationHint(Result result) =>
+    public static string? TruncationHint<T>(Result<T> result) =>
         result.Truncated
             ? $"Only the first {result.Scanned} of {(result.Total is int t ? t.ToString(System.Globalization.CultureInfo.InvariantCulture) : "the")} tickets were checked " +
               "(Ticketing:MaxScanTickets). Narrow the search with the date or priority filters to see the rest."

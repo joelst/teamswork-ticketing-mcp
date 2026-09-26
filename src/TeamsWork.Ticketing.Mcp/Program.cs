@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
 using Azure.Identity;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -291,6 +292,7 @@ static EntraOptions ConfigureEntraMode(WebApplicationBuilder builder)
     builder.Services.AddOptions<EntraOptions>().Bind(builder.Configuration.GetSection(EntraOptions.SectionName));
     builder.Services.AddHttpContextAccessor();
     builder.Services.AddScoped<IActingUserProvider, HttpActingUserProvider>();
+    builder.Services.AddSingleton<IUpstreamCaller, HttpUpstreamCaller>();
 
     // Container Apps ingress terminates TLS; honour its forwarded scheme so the resource metadata says https. The
     // ingress passes the public Host through unchanged, so X-Forwarded-Host isn't needed, and it must not be
@@ -456,6 +458,9 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
     services.AddSingleton<TimeZoneOffsetResolver>();
     services.AddSingleton<TicketingRateLimiter>();
     services.AddSingleton<InstanceCache>();
+    services.AddSingleton<UpstreamQuota>();
+    // One user in stdio and local mode; Entra mode replaces this with the authenticated caller.
+    services.TryAddSingleton<IUpstreamCaller, SingleUserUpstreamCaller>();
 
     services.AddHttpClient<TicketingClient>((sp, http) =>
         {

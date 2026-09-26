@@ -48,16 +48,23 @@ argument, so an agent cannot impersonate someone else. App-only callers (for exa
 attributed to the configured service account.
 
 Writes accept names where the API wants IDs: a person by email or name (looked up in the instance's assignee list),
-a tag category by name, and a custom field by title. Custom field values are checked against the field's type and
-options before they are sent. Instance settings and tags are cached for `Ticketing:InstanceCacheSeconds`.
+a tag category by name, and a custom field by title. Every person is checked against the assignee list, so a
+reference can't pair one person's ID with another's email, and an assignee must be someone on it. Custom field values
+are checked against the field's type and options before they are sent, and a field the server can't check is refused.
+Instance settings and tags are cached for `Ticketing:InstanceCacheSeconds`, and a name not found in the cache is
+looked up once more before the call fails.
 
 The API can't filter by assignee, requestor, ticket number, or SLA state, so `list_my_tickets`, `list_sla_risk`,
 `count_tickets`, and `find_ticket_by_number` read tickets and filter them in the server. One call reads at most
-`Ticketing:MaxScanTickets` tickets (default 1000, usually a single request) and says when it stopped early.
+`Ticketing:MaxScanTickets` tickets (default 1000, usually a single request) and says when it stopped early;
+`find_ticket_by_number` says when a number may exist beyond that limit rather than reporting it missing.
+
+A create that fails after it may have reached the API (a timeout, a 5xx, a dropped connection) says the ticket may
+exist, so an agent checks before retrying instead of filing it twice.
 
 File uploads are offered only over stdio, and only from the folder named by `Ticketing:UploadRoot`, so an agent can't
-send arbitrary local files; see [docs/stdio.md](docs/stdio.md#file-uploads). The remote endpoint offers link
-attachments only.
+send arbitrary local files; uploads are private unless the agent asks otherwise. See
+[docs/stdio.md](docs/stdio.md#file-uploads). The remote endpoint offers link attachments only.
 
 ## Repository layout
 
@@ -265,7 +272,8 @@ Estimated running cost: Container Apps consumption with scale-to-zero (mostly wi
 | `Ticketing:Region` | env / user secrets | Data region of the Ticketing instance: `US` (default), `EU`, or `AUS`; picks the vendor endpoint |
 | `Ticketing:BaseUrl` | appsettings / env | Ticketing API base URL, for an endpoint `Region` doesn't cover. Set one or the other |
 | `Ticketing:InstanceCacheSeconds` | env | How long instance settings and tags are cached, default 300; `0` turns it off |
-| `Ticketing:MaxScanTickets` | env | Most tickets one filtering tool call reads, default 1000 |
+| `Ticketing:MaxScanTickets` | env | Most tickets one filtering tool call (or ticket-number lookup) reads, default 1000 |
+| `Ticketing:MaxUpstreamRequestsPerCallerPerMinute` | env | Upstream requests one caller may cause per minute, counting every request a tool call makes, default 50; `0` turns it off (Entra mode) |
 | `Ticketing:UploadRoot` | env / user secrets (stdio only) | Folder `upload_ticket_files` may read; unset turns uploads off |
 | `Ticketing:MaxUploadBytes` | env | Largest total size of one upload, default 10 MiB |
 | `Ticketing:DefaultTimeZoneId` | appsettings / env | IANA zone for the API's required `timezone` offset (default `America/Chicago`) |

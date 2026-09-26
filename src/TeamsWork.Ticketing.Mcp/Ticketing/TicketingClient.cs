@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
 using Microsoft.Extensions.Options;
 using TeamsWork.Ticketing.Mcp.Configuration;
 using TeamsWork.Ticketing.Mcp.Ticketing.Models;
@@ -31,6 +32,8 @@ public sealed class TicketingClient
     private readonly TimeZoneOffsetResolver _timeZones;
     private readonly ILogger<TicketingClient> _logger;
     private readonly TimeProvider _timeProvider;
+    private readonly UpstreamQuota? _quota;
+    private readonly IUpstreamCaller? _caller;
 
     public TicketingClient(
         HttpClient http,
@@ -38,7 +41,9 @@ public sealed class TicketingClient
         TicketingRateLimiter rateLimiter,
         TimeZoneOffsetResolver timeZones,
         ILogger<TicketingClient> logger,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        UpstreamQuota? quota = null,
+        IUpstreamCaller? caller = null)
     {
         _http = http;
         _options = options.Value;
@@ -46,6 +51,8 @@ public sealed class TicketingClient
         _timeZones = timeZones;
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _quota = quota;
+        _caller = caller;
     }
 
     // ---- Tickets ----------------------------------------------------------------------------------------------
@@ -89,9 +96,10 @@ public sealed class TicketingClient
     {
         var query = new List<KeyValuePair<string, string?>> { new("include", includeHtml ? "description_HTML" : null) };
         ItemResponse<Ticket> r = await SendAsync<ItemResponse<Ticket>>(HttpMethod.Post, "tickets", query, new InsertTicketRequest(ticket, actor), null, true, timezoneOffset, cancellationToken);
-        return r.Item ?? throw new TicketingApiException(
+        return r.Item ?? throw TicketingApiException.Unknown(
+            HttpStatusCode.OK,
             "The Ticketing API reported success but returned no ticket. This is known to happen when 'expectedDate' is not " +
-            "a plain YYYY-MM-DD date while custom fields are also supplied. Check the inputs and try again.");
+            "a plain YYYY-MM-DD date while custom fields are also supplied.");
     }
 
     public async Task<Ticket> UpdateTicketAsync(Guid ticketId, TicketWrite ticket, TicketUser actor, bool includeHtml, int? timezoneOffset, CancellationToken cancellationToken)
@@ -125,7 +133,7 @@ public sealed class TicketingClient
         var query = new List<KeyValuePair<string, string?>> { new("include", includeHtml ? "comment_HTML" : null) };
         var body = new InsertCommentRequest(comment, commentHtml, isPrivate, actor);
         ItemResponse<CommentActivity> r = await SendAsync<ItemResponse<CommentActivity>>(HttpMethod.Post, $"tickets/{ticketId:D}/activities", query, body, null, false, null, cancellationToken);
-        return r.Item ?? throw new TicketingApiException("The Ticketing API reported success but returned no comment.");
+        return r.Item ?? throw TicketingApiException.Unknown(HttpStatusCode.OK, "The Ticketing API reported success but returned no comment.");
     }
 
     // ---- Attachments ------------------------------------------------------------------------------------------
@@ -147,7 +155,7 @@ public sealed class TicketingClient
         var query = new List<KeyValuePair<string, string?>> { new("include", includeHtml ? "comment_HTML" : null) };
         var body = new InsertAttachmentLinkRequest(comment, commentHtml, links, isPrivate, actor);
         ItemResponse<CommentActivity> r = await SendAsync<ItemResponse<CommentActivity>>(HttpMethod.Post, $"tickets/{ticketId:D}/attachments", query, body, null, true, timezoneOffset, cancellationToken);
-        return r.Item ?? throw new TicketingApiException("The Ticketing API reported success but returned no attachment activity.");
+        return r.Item ?? throw TicketingApiException.Unknown(HttpStatusCode.OK, "The Ticketing API reported success but returned no attachment activity.");
     }
 
     /// <summary>Uploads files to a ticket with <c>multipart/form-data</c>, recorded as one attachment activity.</summary>
@@ -192,7 +200,7 @@ public sealed class TicketingClient
         });
 
         ItemResponse<CommentActivity> r = await SendAsync<ItemResponse<CommentActivity>>(HttpMethod.Post, $"tickets/{ticketId:D}/attachments", query, body, null, true, timezoneOffset, cancellationToken);
-        return r.Item ?? throw new TicketingApiException("The Ticketing API reported success but returned no attachment activity.");
+        return r.Item ?? throw TicketingApiException.Unknown(HttpStatusCode.OK, "The Ticketing API reported success but returned no attachment activity.");
     }
 
     public Task<ListResponse<Attachment>> ListActivityAttachmentsAsync(string activityId, int? timezoneOffset, CancellationToken cancellationToken) =>
@@ -256,7 +264,9 @@ public sealed class TicketingClient
 
         for (int attempt = 1; ; attempt++)
         {
-            // One permit per upstream call, so retries count against the vendor quota too.
+            // One permit per upstream call, so retries count against the vendor quota too: first the caller's own share,
+            // then the process-wide quota.
+            using RateLimitLease? callerLease = _quota?.Acquire(_caller?.Key);
             using var lease = await _rateLimiter.AcquireAsync(cancellationToken);
             using var request = new HttpRequestMessage(method, uri);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
@@ -300,11 +310,11 @@ public sealed class TicketingClient
             }
             catch (HttpRequestException ex)
             {
-                throw new TicketingApiException($"Could not reach the Ticketing API ({ex.HttpRequestError}).", ex);
+                throw Failure(idempotent, mayHaveBeenProcessed: !IsPreSendFailure(ex), null, $"Could not reach the Ticketing API ({ex.HttpRequestError}).", ex);
             }
             catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
-                throw new TicketingApiException($"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
+                throw Failure(idempotent, mayHaveBeenProcessed: true, null, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
             }
 
             using (response)
@@ -326,12 +336,14 @@ public sealed class TicketingClient
                 }
                 catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
                 {
-                    throw new TicketingApiException($"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
+                    // The headers arrived, so the API received the request.
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
                 }
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    throw new TicketingApiException(response.StatusCode, DescribeError(response.StatusCode, payload));
+                    // A 4xx means the API refused the request; a 5xx can come after it already acted.
+                    throw Failure(idempotent, mayHaveBeenProcessed: (int)response.StatusCode >= 500, response.StatusCode, DescribeError(response.StatusCode, payload), null);
                 }
 
                 T? result;
@@ -341,12 +353,12 @@ public sealed class TicketingClient
                 }
                 catch (JsonException ex)
                 {
-                    throw new TicketingApiException(response.StatusCode, "The Ticketing API returned a response that could not be parsed as JSON.", ex);
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned a response that could not be parsed as JSON.", ex);
                 }
 
                 if (result is null)
                 {
-                    throw new TicketingApiException(response.StatusCode, "The Ticketing API returned an empty response.");
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned an empty response.", null);
                 }
 
                 // Some endpoints report failures with HTTP 200 and error=true.
@@ -378,6 +390,21 @@ public sealed class TicketingClient
             FileName = fileName is null ? null : $"\"{fileName}\"",
         };
         return content;
+    }
+
+    /// <summary>
+    /// The exception for a failed request. For a create request (not idempotent) that may have reached the API, it is
+    /// marked <see cref="TicketingApiException.OutcomeUnknown"/> and advises checking before a retry; for anything
+    /// else the message is left as is, since repeating it is harmless or the API refused it.
+    /// </summary>
+    private static TicketingApiException Failure(bool idempotent, bool mayHaveBeenProcessed, HttpStatusCode? status, string message, Exception? inner)
+    {
+        if (!idempotent && mayHaveBeenProcessed)
+        {
+            return TicketingApiException.Unknown(status, message, inner);
+        }
+
+        return inner is null ? new TicketingApiException(status, message) : new TicketingApiException(status, message, inner);
     }
 
     /// <summary>A request body that isn't JSON. Called once per attempt, since a sent HttpContent can't be reused.</summary>

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using ModelContextProtocol;
@@ -20,6 +21,7 @@ internal sealed partial class InstanceLookup
     private readonly InstanceCache _cache;
     private readonly int? _timezoneOffset;
     private readonly CancellationToken _cancellationToken;
+    private bool _refreshed;
 
     public InstanceLookup(TicketingClient client, InstanceCache cache, int? timezoneOffset, CancellationToken cancellationToken)
     {
@@ -29,20 +31,18 @@ internal sealed partial class InstanceLookup
         _cancellationToken = cancellationToken;
     }
 
-    public async Task<TicketUser?> PersonAsync(UserRef? person, string paramName)
+    /// <summary>
+    /// Resolves a person with <see cref="ResolvePerson"/>. <paramref name="assigneeOnly"/> is for the assignee field,
+    /// which only takes someone from the instance's assignee list.
+    /// </summary>
+    public async Task<TicketUser?> PersonAsync(UserRef? person, string paramName, bool assigneeOnly)
     {
         if (person is null)
         {
             return null;
         }
 
-        // A complete reference is used as given, so people outside the assignee list (any requestor) still work.
-        if (person.IsComplete)
-        {
-            return person.ToTicketUser(paramName);
-        }
-
-        return MatchPerson(person, paramName, await InstanceAsync());
+        return await WithInstanceAsync(instance => ResolvePerson(person, paramName, instance, assigneeOnly));
     }
 
     public async Task<List<TicketTag>?> TagsAsync(IReadOnlyList<TagRef>? tags)
@@ -58,7 +58,16 @@ internal sealed partial class InstanceLookup
         }
 
         IReadOnlyList<TagCategory> categories = await _cache.GetTagCategoriesAsync(_client, refresh: false, _cancellationToken);
-        return tags.Select((t, i) => MatchTag(t, i, categories)).ToList();
+        try
+        {
+            return tags.Select((t, i) => MatchTag(t, i, categories)).ToList();
+        }
+        catch (McpException ex) when (IsMiss(ex))
+        {
+            // A tag added since the cache was filled isn't in it yet: read the tags once more before giving up.
+            categories = await _cache.GetTagCategoriesAsync(_client, refresh: true, _cancellationToken);
+            return tags.Select((t, i) => MatchTag(t, i, categories)).ToList();
+        }
     }
 
     public async Task<JsonElement?> CustomFieldsAsync(Dictionary<string, JsonElement>? customFields)
@@ -68,16 +77,80 @@ internal sealed partial class InstanceLookup
             return null;
         }
 
-        return CheckCustomFields(customFields, await InstanceAsync());
+        return await WithInstanceAsync(instance => CheckCustomFields(customFields, instance));
     }
 
-    private Task<Instance> InstanceAsync() => _cache.GetInstanceAsync(_client, _timezoneOffset, refresh: false, _cancellationToken);
+    /// <summary>
+    /// Runs a lookup against the cached instance settings. If something isn't found (a person, field, or option added
+    /// since the cache was filled), the settings are read once more, for this whole call, before the error stands.
+    /// </summary>
+    private async Task<T> WithInstanceAsync<T>(Func<Instance, T> resolve)
+    {
+        Instance instance = await _cache.GetInstanceAsync(_client, _timezoneOffset, refresh: false, _cancellationToken);
+        try
+        {
+            return resolve(instance);
+        }
+        catch (McpException ex) when (IsMiss(ex) && !_refreshed)
+        {
+            _refreshed = true;
+            instance = await _cache.GetInstanceAsync(_client, _timezoneOffset, refresh: true, _cancellationToken);
+            return resolve(instance);
+        }
+    }
 
     // ---- Matching (pure, so it can be tested without an API) ------------------------------------------------------
 
     /// <summary>
-    /// Finds the one assignee that matches every field supplied. Name falls back to a partial match when nothing
-    /// matches exactly, so "Jane" finds "Jane Doe" if she is the only Jane.
+    /// The one rule for every person an agent names (assignee, requestor, people-picker fields), so a reference can't
+    /// pair one person's ID with another's email and have the ticket look assigned to, or approved by, someone else:
+    /// <list type="bullet">
+    ///   <item>an email or name alone is looked up in the assignee list;</item>
+    ///   <item>a complete {id, name, email} whose ID or email belongs to someone in that list must match that person
+    ///   (their own name is then used);</item>
+    ///   <item>anyone else is accepted as given only where people outside the list make sense (requestors and
+    ///   people-picker fields), and refused for the assignee.</item>
+    /// </list>
+    /// </summary>
+    internal static TicketUser ResolvePerson(UserRef person, string paramName, Instance instance, bool assigneeOnly)
+    {
+        if (!person.IsComplete)
+        {
+            return MatchPerson(person, paramName, instance);
+        }
+
+        TicketUser given = person.ToTicketUser(paramName);
+        List<Persona> people = AssigneesOf(instance);
+        Persona? byId = people.FirstOrDefault(p => Same(p.Id, given.Id));
+        Persona? byEmail = people.FirstOrDefault(p => Same(p.Email, given.Email));
+
+        // The email-to-ticket form puts the email in every field, so its ID is no one's object ID.
+        bool emailForm = Same(given.Id, given.Email);
+        if (byEmail is not null && (byId == byEmail || (byId is null && emailForm)))
+        {
+            return new TicketUser(byEmail.Id!, byEmail.Name!, byEmail.Email!);
+        }
+
+        if (byId is not null || byEmail is not null)
+        {
+            throw new McpException(
+                $"'{paramName}' mixes the ID and email of different people ({(byId ?? byEmail)!.Name} is in the assignee list with other " +
+                "details). Use the id, name, and email exactly as get_instance lists them, or just the email.");
+        }
+
+        if (assigneeOnly && people.Count > 0)
+        {
+            throw Miss(
+                $"'{paramName}' '{given.Email}' isn't in the instance's assignee list, and a ticket can only be assigned to someone " +
+                "in it. Use a name or email from get_instance (section 'assignees').");
+        }
+
+        return given;
+    }
+
+    /// <summary>
+    /// Finds the one assignee that matches every field supplied. A name that matches no one exactly may match the start
+    /// of a word in a name, so "Jane" finds "Jane Doe" if she is the only one, but "ane" finds no one.
     /// </summary>
     internal static TicketUser MatchPerson(UserRef person, string paramName, Instance instance)
     {
@@ -89,14 +162,12 @@ internal sealed partial class InstanceLookup
             throw new McpException($"'{paramName}' needs an email, a name, or all of id, name, and email.");
         }
 
-        List<Persona> people = (instance.Assignees?.Peoples ?? [])
-            .Where(p => !string.IsNullOrWhiteSpace(p.Id) && !string.IsNullOrWhiteSpace(p.Name) && !string.IsNullOrWhiteSpace(p.Email))
-            .ToList();
+        List<Persona> people = AssigneesOf(instance);
 
         bool Matches(Persona p, bool partialName) =>
             (id is null || Same(p.Id, id)) &&
             (email is null || Same(p.Email, email)) &&
-            (name is null || (partialName ? p.Name!.Contains(name, StringComparison.OrdinalIgnoreCase) : Same(p.Name, name)));
+            (name is null || (partialName ? StartsAWord(p.Name!, name) : Same(p.Name, name)));
 
         List<Persona> found = people.Where(p => Matches(p, partialName: false)).ToList();
         if (found.Count == 0 && name is not null)
@@ -108,15 +179,25 @@ internal sealed partial class InstanceLookup
         return found.Count switch
         {
             1 => new TicketUser(found[0].Id!, found[0].Name!, found[0].Email!),
-            0 => throw new McpException(
+            0 => throw Miss(
                 $"'{paramName}' '{wanted}' doesn't match anyone in the instance's assignee list. Use a name or email from " +
-                "get_instance (section 'assignees'), or pass id, name, and email together for someone outside that list."),
+                "get_instance (section 'assignees'), or, for a requestor or people field, pass id, name, and email together for someone outside that list."),
             _ => throw new McpException(
                 $"'{paramName}' '{wanted}' matches more than one person: " +
                 string.Join("; ", found.Take(5).Select(p => $"{p.Name} <{p.Email}>")) +
                 (found.Count > 5 ? $" and {found.Count - 5} more" : "") + ". Use the email address."),
         };
     }
+
+    private static List<Persona> AssigneesOf(Instance instance) =>
+        (instance.Assignees?.Peoples ?? [])
+            .Where(p => !string.IsNullOrWhiteSpace(p.Id) && !string.IsNullOrWhiteSpace(p.Name) && !string.IsNullOrWhiteSpace(p.Email))
+            .ToList();
+
+    /// <summary>True when the name, or one of its words, starts with <paramref name="prefix"/>.</summary>
+    private static bool StartsAWord(string name, string prefix) =>
+        name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+        name.Split([' ', '-', '.', ','], StringSplitOptions.RemoveEmptyEntries).Any(w => w.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Accepts a category ID or name, and a tag's text in any case; returns the canonical ID and text.</summary>
     internal static TicketTag MatchTag(TagRef tag, int index, IReadOnlyList<TagCategory> categories)
@@ -128,7 +209,7 @@ internal sealed partial class InstanceLookup
                              ?? categories.FirstOrDefault(c => Same(c.Text, category));
         if (match?.Id is null)
         {
-            throw new McpException(
+            throw Miss(
                 $"'tags[{index}].tagCategoryId' '{category}' is not a tag category ID or name. Categories: " +
                 (categories.Count == 0 ? "(none defined)" : string.Join(", ", categories.Select(c => c.Text).Where(t => t is not null))) + ".");
         }
@@ -138,62 +219,84 @@ internal sealed partial class InstanceLookup
                             ?? tagTexts.FirstOrDefault(t => Same(t, text));
         return canonical is not null
             ? new TicketTag(match.Id, canonical)
-            : throw new McpException(
+            : throw Miss(
                 $"'tags[{index}].text' '{text}' is not a tag in category '{match.Text}'. Tags there: " +
                 (tagTexts.Count == 0 ? "(none)" : string.Join(", ", tagTexts.Take(30)) + (tagTexts.Count > 30 ? ", ..." : "")) + ".");
     }
 
     /// <summary>
     /// Maps each key (a field ID, or a field's title) to a field the instance defines, and checks each value against
-    /// the field's type: a string for text and date fields, a boolean for toggles, an array of option keys for lists
-    /// (an option's text is accepted and replaced by its key), and an array for people and email pickers. JSON null
-    /// clears a field and is always allowed. Fields of a type this server doesn't know are passed through unchecked.
+    /// the field's type: a length-capped string for text, a YYYY-MM-DD date, a boolean for toggles, option keys for
+    /// lists (an option's text is accepted and replaced by its key), and resolved people for people and email pickers.
+    /// JSON null clears a field and is always allowed. A field of a type this server can't check is refused, so nothing
+    /// unchecked reaches the API.
     /// </summary>
     internal static JsonElement CheckCustomFields(Dictionary<string, JsonElement> values, Instance instance)
     {
-        // Not the optional fields: those are the form's built-in ones (Requestor, Priority, Expected Date, Tags) with
-        // non-GUID IDs, set through their own parameters rather than customFields.
-        List<CustomField> fields = new[] { instance.CustomFields, instance.CustomFieldsLeft, instance.CustomFieldsRight }
-            .SelectMany(list => list ?? [])
-            .Where(f => Guid.TryParse(f.Id, out _))
-            .DistinctBy(f => f.Id, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        List<FieldDefinition> fields = CustomFieldsOf(instance);
 
         var result = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         foreach ((string key, JsonElement value) in values)
         {
-            CustomField field = fields.FirstOrDefault(f => string.Equals(f.Id, key.Trim(), StringComparison.OrdinalIgnoreCase))
-                                ?? SingleByTitle(fields, key)
-                                ?? throw new McpException(
-                                    $"'customFields' key '{key}' is not a custom field ID or title on this instance. Fields: " +
-                                    (fields.Count == 0 ? "(none defined)" : string.Join("; ", fields.Take(30).Select(f => $"{f.Title} ({f.Id})"))) + ".");
+            FieldDefinition field = fields.FirstOrDefault(f => string.Equals(f.Field.Id, key.Trim(), StringComparison.OrdinalIgnoreCase))
+                                    ?? SingleByTitle(fields, key)
+                                    ?? throw Miss(
+                                        $"'customFields' key '{key}' is not a custom field ID or title on this instance. Fields: " +
+                                        (fields.Count == 0 ? "(none defined)" : string.Join("; ", fields.Take(30).Select(f => $"{f.Field.Title} ({f.Field.Id})"))) + ".");
 
             // The API answers a hidden field with "not found or invalid definition".
-            if (UnusableStatuses.Contains(field.Status ?? ""))
+            if (field.UnusableStatus is string status)
             {
                 throw new McpException(
-                    $"Custom field '{field.Title ?? field.Id}' is {field.Status} on this instance, so the API won't accept a value for it. " +
+                    $"Custom field '{field.Field.Title ?? field.Field.Id}' is {status} on this instance, so the API won't accept a value for it. " +
                     "Leave it out, or ask a Ticketing administrator to show the field.");
             }
 
-            result[field.Id!] = CheckValue(field, value);
+            result[field.Field.Id!] = CheckValue(field.Field, value, instance);
         }
 
         return JsonSerializer.SerializeToElement(result, TicketingClient.JsonOptions);
     }
 
-    private static CustomField? SingleByTitle(List<CustomField> fields, string title)
+    /// <summary>
+    /// The custom fields, one per ID. The live API lists custom fields in customFields and again in the
+    /// customFieldsLeft/Right columns; the copies can disagree, so a field is unusable if any copy says it is. The
+    /// optional fields are left out: they are the form's built-in ones (Requestor, Priority, Expected Date, Tags) with
+    /// non-GUID IDs, set through their own parameters.
+    /// </summary>
+    private static List<FieldDefinition> CustomFieldsOf(Instance instance) =>
+        new[] { instance.CustomFields, instance.CustomFieldsLeft, instance.CustomFieldsRight }
+            .SelectMany(list => list ?? [])
+            .Where(f => Guid.TryParse(f.Id, out _))
+            .GroupBy(f => f.Id!, StringComparer.OrdinalIgnoreCase)
+            .Select(copies => new FieldDefinition(
+                copies.First(),
+                copies.Select(c => c.Status).FirstOrDefault(status => status is not null && UnusableStatuses.Contains(status))))
+            .ToList();
+
+    /// <summary>A title matches usable fields first, so a hidden field doesn't make a visible one of the same name ambiguous.</summary>
+    private static FieldDefinition? SingleByTitle(List<FieldDefinition> fields, string title)
     {
-        List<CustomField> matches = fields.Where(f => Same(f.Title, title.Trim())).ToList();
+        List<FieldDefinition> all = fields.Where(f => Same(f.Field.Title, title.Trim())).ToList();
+        List<FieldDefinition> matches = all.Where(f => f.UnusableStatus is null).ToList() is { Count: > 0 } usable ? usable : all;
         return matches.Count switch
         {
             0 => null,
             1 => matches[0],
-            _ => throw new McpException($"'customFields' key '{title}' is the title of more than one field. Use the field ID: {string.Join(", ", matches.Select(f => f.Id))}."),
+            _ => throw new McpException($"'customFields' key '{title}' is the title of more than one field. Use the field ID: {string.Join(", ", matches.Select(f => f.Field.Id))}."),
         };
     }
 
-    private static JsonElement CheckValue(CustomField field, JsonElement value)
+    private sealed record FieldDefinition(CustomField Field, string? UnusableStatus);
+
+    // Matches the limit on descriptions and comments.
+    private const int MaxTextLength = 20_000;
+
+    /// <summary>
+    /// Checks the value itself, not only its JSON kind, and returns what should be sent: dates in YYYY-MM-DD form,
+    /// list options as keys, and people as complete {id, name, email} references.
+    /// </summary>
+    private static JsonElement CheckValue(CustomField field, JsonElement value, Instance instance)
     {
         if (value.ValueKind == JsonValueKind.Null)
         {
@@ -203,10 +306,22 @@ internal sealed partial class InstanceLookup
         string label = $"Custom field '{field.Title ?? field.Id}'";
         switch (TypeKey(field))
         {
-            case "text" or "textarea" or "date":
-                return value.ValueKind == JsonValueKind.String
+            case "text" or "textarea":
+                if (value.ValueKind != JsonValueKind.String)
+                {
+                    throw new McpException($"{label} takes a string.");
+                }
+
+                return value.GetString()!.Length <= MaxTextLength
                     ? value
-                    : throw new McpException($"{label} takes a string{(TypeKey(field) == "date" ? " date (YYYY-MM-DD)" : "")}.");
+                    : throw new McpException($"{label} is too long (max {MaxTextLength} characters).");
+
+            case "date":
+                // The API fails silently on datetimes in date fields, as it does for expectedDate.
+                return value.ValueKind == JsonValueKind.String &&
+                       DateOnly.TryParseExact(value.GetString()!.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly date)
+                    ? JsonSerializer.SerializeToElement(date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
+                    : throw new McpException($"{label} takes a date in YYYY-MM-DD form (no time), for example 2026-04-01.");
 
             case "toggle":
                 return value.ValueKind is JsonValueKind.True or JsonValueKind.False
@@ -217,17 +332,53 @@ internal sealed partial class InstanceLookup
                 return CheckListValue(field, value, label);
 
             case "peoplepicker" or "emailpicker":
-                if (value.ValueKind != JsonValueKind.Array)
-                {
-                    throw new McpException($"{label} takes an array of people, each {{\"id\",\"name\",\"email\"}}.");
-                }
-
-                RequireSingleIfNotMultiple(field, value, label);
-                return value;
+                return CheckPeopleValue(field, value, label, instance);
 
             default:
-                return value;
+                throw new McpException(
+                    $"{label} is of a type this server can't check ({TypeKey(field) ?? "unknown"}), so it can't be set through this tool.");
         }
+    }
+
+    /// <summary>
+    /// Each entry is resolved by <see cref="ResolvePerson"/>, like a requestor. A bare email string is shorthand for
+    /// {email}.
+    /// </summary>
+    private static JsonElement CheckPeopleValue(CustomField field, JsonElement value, string label, Instance instance)
+    {
+        if (value.ValueKind != JsonValueKind.Array)
+        {
+            throw new McpException($"{label} takes an array of people, each an email or {{\"id\",\"name\",\"email\"}}.");
+        }
+
+        RequireSingleIfNotMultiple(field, value, label);
+        ToolValidation.MaxCount(value.EnumerateArray().ToList(), label, 50);
+
+        var people = new List<TicketUser>();
+        int index = 0;
+        foreach (JsonElement entry in value.EnumerateArray())
+        {
+            string param = $"customFields.{field.Title ?? field.Id}[{index++}]";
+            UserRef person = entry.ValueKind switch
+            {
+                JsonValueKind.String => new UserRef(Email: entry.GetString()),
+                JsonValueKind.Object => ReadPerson(entry),
+                _ => throw new McpException($"{param} must be an email or {{\"id\",\"name\",\"email\"}}."),
+            };
+
+            people.Add(ResolvePerson(person, param, instance, assigneeOnly: false));
+        }
+
+        return JsonSerializer.SerializeToElement(people, TicketingClient.JsonOptions);
+    }
+
+    private static UserRef ReadPerson(JsonElement entry)
+    {
+        string? Text(string name) =>
+            entry.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+        // An empty reference is refused by MatchPerson, which names the parameter.
+        return new UserRef(Text("id"), Text("name"), Text("email"));
     }
 
     private static JsonElement CheckListValue(CustomField field, JsonElement value, string label)
@@ -242,7 +393,7 @@ internal sealed partial class InstanceLookup
         List<(string Key, string? Text)> options = OptionsOf(field);
         if (options.Count == 0)
         {
-            return value; // options in a shape this server doesn't read; leave the check to the API
+            throw new McpException($"{label} has no options this server can read, so a value can't be checked or set through this tool.");
         }
 
         var keys = new List<string>();
@@ -255,7 +406,7 @@ internal sealed partial class InstanceLookup
                 option = options.FirstOrDefault(o => Same(o.Key, chosen) || Same(o.Text, chosen));
             }
 
-            keys.Add(option.Key ?? throw new McpException(
+            keys.Add(option.Key ?? throw Miss(
                 $"{label} has no option '{chosen}'. Options: {string.Join(", ", options.Select(o => o.Text is null ? o.Key : $"{o.Key} ({o.Text})"))}."));
         }
 
@@ -302,6 +453,18 @@ internal sealed partial class InstanceLookup
 
         return result;
     }
+
+    private const string MissKey = "TeamsWork.InstanceLookup.Miss";
+
+    /// <summary>A "not found" error, which a lookup against cached settings retries once with fresh settings.</summary>
+    private static McpException Miss(string message)
+    {
+        var ex = new McpException(message);
+        ex.Data[MissKey] = true;
+        return ex;
+    }
+
+    private static bool IsMiss(McpException ex) => ex.Data.Contains(MissKey);
 
     private static string? Blank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
