@@ -23,7 +23,7 @@
 | Transport | Stateless Streamable HTTP: no server sessions, nothing to hijack, horizontal scaling safe. HTTPS-only ingress (`allowInsecure: false`); TLS terminated by Container Apps. |
 | Input validation | Every tool validates arguments before they reach the upstream URL/body: UUIDs, enums, `YYYY-MM-DD` dates, datetime filters, page-size caps, URL schemes (http/https only) for links, custom-field IDs must be GUIDs. Errors are returned as tool errors with actionable text, never stack traces. |
 | Rate limiting | Process-wide sliding window matching the vendor's 100 requests / 60 s, bounded retries with backoff on 429/5xx. |
-| Container | `mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled`: distroless-style, non-root `app` user, no shell/package manager. Diagnostics disabled. 0.25 vCPU / 0.5 GiB. |
+| Container | `mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled-extra`: distroless-style, non-root `app` user, no shell/package manager. The `-extra` variant adds the time zone data the server needs (and ICU, unused). Diagnostics disabled. 0.25 vCPU / 0.5 GiB. |
 | Registry / pulls | ACR admin user disabled; the container app pulls with its managed identity (`AcrPull`). |
 | Pipeline | Workload-identity-federation service connection (no stored cloud secrets). `NuGetAudit` fails restore on known vulnerable packages (level *low*, warnings as errors). Image built by the .NET SDK, no Docker socket. Deploy stage guarded by an environment approval. |
 | Key Vault | RBAC authorization, soft delete 90 days, purge protection. |

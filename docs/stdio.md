@@ -33,7 +33,8 @@ The install script is the quickest way to set up one machine. It:
    them to the [user-secrets file](#settings). If the Azure CLI is signed in, your Entra object ID, name, and email are
    offered as defaults. Press Enter at any prompt to keep the current value.
 4. Starts the server once over stdio to check that it comes up. It also lists, by name only, any `Ticketing__*`
-   environment variables that are set, since those override what was just saved (see [Settings](#settings)).
+   environment variables that are set, since for clients that pass them on to the server they override what was
+   just saved (see [Settings](#settings)).
 5. Registers it as `teamswork-ticketing` with every supported client it finds on `PATH`: Claude Code (`claude`),
    Codex CLI (`codex`), GitHub Copilot CLI (`copilot`), and VS Code / GitHub Copilot Chat (`code`). Visual Studio
    has no command line for this; see [Visual Studio](#github-copilot-in-visual-studio). Under WSL, clients that
@@ -113,8 +114,16 @@ contain:
    ```
 
 2. Environment variables, with `__` in place of `:`: `Ticketing__ApiKey`, `Ticketing__ServiceAccount__Id`,
-   `Ticketing__ServiceAccount__Name`, `Ticketing__ServiceAccount__Email`. These override the secrets file, including
-   ones set in a client config or inherited from the shell the client was started from.
+   `Ticketing__ServiceAccount__Name`, `Ticketing__ServiceAccount__Email`. These override the secrets file. The server
+   sees the variables set in its client config, plus whatever the client passes on from its own environment, and
+   clients differ there:
+   - **Claude Code** passes its whole environment to servers registered at user or local scope (which the install
+     script uses). For servers in a project `.mcp.json`, it removes variables whose names look like credentials, so
+     `Ticketing__ApiKey` is dropped there.
+   - **GitHub Copilot CLI** passes only `PATH`. Other variables have to be set with `--env` or in the server's
+     `env` in `~/.copilot/mcp-config.json`.
+   - **Codex** passes only a default set of variables, plus the ones named in the server's `env` or `env_vars` in
+     `config.toml`.
 3. Command-line arguments, such as `--Ticketing:DefaultTimeZoneId=America/New_York` after `--stdio`.
 4. `KeyVault:Uri` (set in any of the above), which loads secret `Ticketing--ApiKey` with `DefaultAzureCredential`
    (needs *Key Vault Secrets User* on the vault). It overrides the API key from all of them.
@@ -122,8 +131,8 @@ contain:
 Prefer the secrets file. Client configurations are plain text and are often synced or shared, so keep the API key
 out of them; the manual examples below pass no settings for that reason. Because environment variables win, a
 client config can still override one value for that client only, for example a different
-`Ticketing__ServiceAccount__Email`. A leftover `Ticketing__*` variable in your shell profile overrides the secrets
-file too, which is why the install script lists any it finds.
+`Ticketing__ServiceAccount__Email`. A leftover `Ticketing__*` variable in your shell profile can override the
+secrets file too, for clients that pass it on, which is why the install script lists any it finds.
 
 Optional: `Ticketing:DefaultTimeZoneId` (for example `America/New_York`) if your help desk is not on US Central time.
 Add it to the secrets file; the install script keeps it when you run it again. The server checks it at startup and

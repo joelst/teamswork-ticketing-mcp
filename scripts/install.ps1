@@ -421,12 +421,15 @@
 
     Install-Binary
     if (-not $SkipSecrets) { Set-Secrets }
-    elseif (-not (Test-Path $SecretsPath)) { Write-Warning "No secrets file at $SecretsPath; the server needs its settings in environment variables instead." }
-    # Environment variables override the secrets file, so any set here (and inherited by MCP clients started from
-    # this session) win over what was just saved. Names only: the values may be secrets.
+    elseif (-not (Test-Path $SecretsPath)) { Write-Warning "No secrets file at $SecretsPath; the server needs its settings in environment variables instead, set in each client's MCP config (see docs/stdio.md)." }
+    # Environment variables override the secrets file. Whether one set here reaches the server depends on the client:
+    # Claude Code passes its environment on, GitHub Copilot CLI and Codex pass only a few variables. The startup check
+    # below sees them either way, so it can pass where a client would not. Names only: the values may be secrets.
     $overrides = @(Get-ChildItem Env: | Where-Object Name -Like 'Ticketing__*' | ForEach-Object Name | Sort-Object)
     if ($overrides) {
-        Add-Notice "These environment variables override the secrets file: $($overrides -join ', '). Remove them if the secrets file should be used."
+        Add-Notice ("These environment variables are set: $($overrides -join ', '). They override the secrets file in " +
+            "clients that pass their environment to the server, such as Claude Code, but GitHub Copilot CLI and Codex " +
+            "don't pass them. Remove them if the secrets file should be used.")
     }
     $started = Test-Server
 

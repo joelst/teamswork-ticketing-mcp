@@ -418,14 +418,15 @@ install_binary
 if [ "$SKIP_SECRETS" = 0 ]; then
     set_secrets
 elif [ ! -f "$SECRETS_PATH" ]; then
-    warn "No secrets file at $SECRETS_PATH; the server needs its settings in environment variables instead."
+    warn "No secrets file at $SECRETS_PATH; the server needs its settings in environment variables instead, set in each client's MCP config (see docs/stdio.md)."
 fi
-# Environment variables override the secrets file, so any set here (and inherited by MCP clients started from this
-# shell) win over what was just saved. Names only: the values may be secrets.
+# Environment variables override the secrets file. Whether one set here reaches the server depends on the client:
+# Claude Code passes its environment on, GitHub Copilot CLI and Codex pass only a few variables. The startup check
+# below sees them either way, so it can pass where a client would not. Names only: the values may be secrets.
 overrides=$(env | sed -n 's/^\([Tt][Ii][Cc][Kk][Ee][Tt][Ii][Nn][Gg]__[^=]*\)=.*/\1/p' | sort | tr '\n' ' ')
 NOTICE=""
 if [ -n "$overrides" ]; then
-    NOTICE="These environment variables override the secrets file: ${overrides% }. Unset them if the secrets file should be used."
+    NOTICE="These environment variables are set: ${overrides% }. They override the secrets file in clients that pass their environment to the server, such as Claude Code, but GitHub Copilot CLI and Codex don't pass them. Unset them if the secrets file should be used."
     warn "$NOTICE"
 fi
 started=1

@@ -109,12 +109,14 @@ jobs:
           sh scripts/install.sh --uninstall --clients none --install-dir "$dir"
           test ! -e "$dir"
 
-  # The Linux executable must start on systems without ICU (minimal images, some WSL distributions). The stock
-  # ubuntu image has no libicu; the runner's time zone data is mounted in, since the server checks
-  # Ticketing:DefaultTimeZoneId at startup.
+  # The Linux executable must start on systems without ICU (minimal images, some WSL distributions); it still needs
+  # tzdata, and must say so clearly when it's missing. The stock ubuntu image has neither ICU nor tzdata, so the
+  # runner's zoneinfo is mounted in for the first check and left out for the second.
   linux-without-icu:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      INIT: '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -126,14 +128,50 @@ jobs:
           dotnet publish src/TeamsWork.Ticketing.Mcp -c Release -r linux-x64 --self-contained \
             -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -o out
 
-      - name: Start it in a container without ICU
+      - name: Starts without ICU
         run: |
-          INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
           RESPONSE=$( (printf '%s\n' "$INIT"; sleep 8) | docker run --rm -i \
             -v "$PWD/out:/app:ro" -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro \
             -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=ci \
             -e Ticketing__ServiceAccount__Name=CI -e Ticketing__ServiceAccount__Email=ci@example.test \
             ubuntu:24.04 sh -c 'if ls /usr/lib/*/libicu* >/dev/null 2>&1; then echo "image has ICU" >&2; exit 1; fi; exec /app/TeamsWork.Ticketing.Mcp --stdio' \
             | head -n1 )
+          echo "$RESPONSE"
+          echo "$RESPONSE" | grep -q '"serverInfo"'
+
+      - name: Without tzdata, stops at startup and names the setting
+        run: |
+          set +e
+          OUTPUT=$(printf '%s\n' "$INIT" | docker run --rm -i -v "$PWD/out:/app:ro" \
+            -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=ci \
+            -e Ticketing__ServiceAccount__Name=CI -e Ticketing__ServiceAccount__Email=ci@example.test \
+            ubuntu:24.04 sh -c 'if [ -e /usr/share/zoneinfo/America/Chicago ]; then echo "image has tzdata" >&2; exit 1; fi; exec /app/TeamsWork.Ticketing.Mcp --stdio' 2>&1)
+          STATUS=$?
+          echo "$OUTPUT"
+          [ "$STATUS" -ne 0 ] && echo "$OUTPUT" | grep -q 'Ticketing:DefaultTimeZoneId is not a time zone this machine knows'
+
+  # Builds the image the pipeline deploys, from the same base image, and starts it. This is what catches a base image
+  # that lacks something the server checks at startup (tzdata for Ticketing:DefaultTimeZoneId).
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build the container image into the local Docker daemon
+        run: |
+          dotnet publish src/TeamsWork.Ticketing.Mcp/TeamsWork.Ticketing.Mcp.csproj -c Release --os linux --arch x64 \
+            /t:PublishContainer -p:ContainerRepository=teamswork-taas-mcp -p:ContainerImageTags=ci
+
+      - name: Start the image
+        run: |
+          INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+          RESPONSE=$( (printf '%s\n' "$INIT"; sleep 8) | docker run --rm -i \
+            -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=ci \
+            -e Ticketing__ServiceAccount__Name=CI -e Ticketing__ServiceAccount__Email=ci@example.test \
+            teamswork-taas-mcp:ci --stdio | head -n1 )
           echo "$RESPONSE"
           echo "$RESPONSE" | grep -q '"serverInfo"'

@@ -13,8 +13,8 @@
     <NuGetAuditLevel>low</NuGetAuditLevel>
     <!-- Linux builds (the release executable and the container) don't need ICU, which minimal distributions and some
          WSL images lack. Nothing here is culture-sensitive: formatting and parsing use the invariant culture. Windows
-         and macOS keep ICU, which .NET on Windows needs to look up IANA time zone names such as America/Chicago;
-         Linux reads those from tzdata instead. -->
+         and macOS keep ICU, which .NET on Windows needs to look up IANA time zone names such as America/Chicago.
+         Linux reads those from tzdata instead, so Linux still needs tzdata; the container's base image includes it. -->
     <InvariantGlobalization>false</InvariantGlobalization>
     <InvariantGlobalization Condition="$(RuntimeIdentifier.StartsWith('linux'))">true</InvariantGlobalization>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
