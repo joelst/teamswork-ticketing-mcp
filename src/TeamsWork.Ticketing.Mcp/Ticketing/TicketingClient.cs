@@ -330,7 +330,11 @@ public sealed class TicketingClient
         return true;
     }
 
-    /// <summary>Reads the body as UTF-8 text, refusing to buffer more than <paramref name="maxBytes"/>.</summary>
+    /// <summary>
+    /// Reads the body as text, refusing to buffer more than <paramref name="maxBytes"/>. Decodes as
+    /// ReadAsStringAsync did: the declared charset (UTF-8 when absent or unknown), and a byte-order mark if there is
+    /// one, which is also stripped, since JSON parsing fails on a leading U+FEFF.
+    /// </summary>
     private static async Task<string> ReadBodyAsync(HttpContent content, int maxBytes, CancellationToken cancellationToken)
     {
         if (content.Headers.ContentLength > maxBytes)
@@ -352,11 +356,33 @@ public sealed class TicketingClient
             buffer.Write(chunk, 0, read);
         }
 
-        return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+        buffer.Position = 0;
+        using var reader = new StreamReader(buffer, DeclaredEncoding(content.Headers.ContentType?.CharSet), detectEncodingFromByteOrderMarks: true);
+        return await reader.ReadToEndAsync(cancellationToken);
     }
 
-    private static TicketingApiException TooLarge(int maxBytes) =>
-        new($"The Ticketing API response was too large (over {maxBytes / (1024 * 1024)} MB). Request fewer items or use 'select' to return fewer fields.");
+    private static Encoding DeclaredEncoding(string? charset)
+    {
+        if (!string.IsNullOrWhiteSpace(charset))
+        {
+            try
+            {
+                return Encoding.GetEncoding(charset.Trim('"', ' '));
+            }
+            catch (ArgumentException)
+            {
+                // An unknown charset name; fall back to UTF-8, the JSON default.
+            }
+        }
+
+        return Encoding.UTF8;
+    }
+
+    private static TicketingApiException TooLarge(int maxBytes)
+    {
+        string limit = maxBytes >= 1024 * 1024 ? $"{maxBytes / (1024.0 * 1024):0.#} MB" : $"{maxBytes / 1024.0:0.#} KB";
+        return new($"The Ticketing API response was too large (over {limit}). Request fewer items or use 'select' to return fewer fields.");
+    }
 
     /// <summary>
     /// 429 means the gateway rejected the call without processing it, so it is safe to retry for any method.

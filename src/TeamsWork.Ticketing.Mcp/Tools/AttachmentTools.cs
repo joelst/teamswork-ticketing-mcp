@@ -43,7 +43,7 @@ public sealed class AttachmentTools
         [Description("Ticket UUID.")] string ticketId,
         [Description("Links to attach (at least one).")] IReadOnlyList<LinkRef> links,
         [Description("Plain-text comment shown with the links.")] string? comment = null,
-        [Description("Sanitised HTML comment. Ignored when 'comment' is also supplied.")] string? commentHtml = null,
+        [Description("HTML comment (formatting, lists, tables, links). Ignored when 'comment' is also supplied. Script, forms, images, and inline styles are removed; use add_ticket_link_attachments for screenshots.")] string? commentHtml = null,
         [Description("true to make the attachment activity visible only to internal agents.")] bool isPrivate = false,
         [Description("Return comment_HTML in the created activity.")] bool includeHtml = false,
         [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,

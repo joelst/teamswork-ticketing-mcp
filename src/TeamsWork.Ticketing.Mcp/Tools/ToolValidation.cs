@@ -196,9 +196,36 @@ internal static class ToolValidation
             : throw new McpException($"'{paramName}' has no content left after removing unsafe HTML (scripts, event handlers, frames).");
     }
 
-    // HtmlSanitizer's defaults: a safe tag/attribute allowlist, and only http, https and relative URLs. Sanitize is
-    // thread-safe on a shared instance as long as its settings aren't changed, and these never are.
-    private static readonly Lazy<Ganss.Xss.HtmlSanitizer> HtmlSanitizerInstance = new(() => new Ganss.Xss.HtmlSanitizer());
+    // Starts from HtmlSanitizer's defaults (no script, event handlers, or frames; http, https and relative URLs only)
+    // and narrows them to what a help-desk comment needs: text formatting, headings, lists, tables, quotes, code, and
+    // links. The defaults also allow things that are dangerous in HTML staff will view:
+    //  - form controls, which make a working credential-phishing form;
+    //  - style, which can draw a full-screen overlay (position: fixed) or load a url() beacon;
+    //  - images and image maps, which load as soon as the ticket is viewed, so an agent steered by injected text
+    //    could put data it has read in the image URL (screenshots belong in add_ticket_link_attachments);
+    //  - name, which lets markup replace named properties on the page's document (DOM clobbering);
+    //  - target, which without rel=noopener lets the opened page navigate the help desk tab (reverse tabnabbing).
+    // Sanitize is thread-safe on a shared instance as long as its settings aren't changed after this.
+    private static readonly Lazy<Ganss.Xss.HtmlSanitizer> HtmlSanitizerInstance = new(() =>
+    {
+        var sanitizer = new Ganss.Xss.HtmlSanitizer();
+        foreach (string tag in (string[])
+                 ["form", "input", "button", "select", "option", "optgroup", "textarea", "keygen", "datalist", "output",
+                  "fieldset", "legend", "label", "menu", "menuitem", "img", "area", "map", "html", "head", "body"])
+        {
+            sanitizer.AllowedTags.Remove(tag);
+        }
+
+        foreach (string attribute in (string[])
+                 ["style", "name", "target", "src", "longdesc", "usemap", "ismap", "action", "method", "enctype",
+                  "accept", "accept-charset", "autocomplete", "novalidate", "contenteditable", "draggable", "dropzone",
+                  "tabindex", "accesskey"])
+        {
+            sanitizer.AllowedAttributes.Remove(attribute);
+        }
+
+        return sanitizer;
+    });
 
     /// <summary>Rejects lists longer than <paramref name="max"/>, so one call can't build an arbitrarily large request.</summary>
     public static void MaxCount<T>(IReadOnlyCollection<T>? items, string paramName, int max)

@@ -109,7 +109,7 @@ public sealed class TicketTools
     public Task<string> CreateTicket(
         [Description("Short ticket title.")] string title,
         [Description("Plain-text description (line breaks preserved). Use descriptionHtml instead for formatted content.")] string? description = null,
-        [Description("Sanitised HTML description. Ignored when 'description' is also supplied.")] string? descriptionHtml = null,
+        [Description("HTML description (formatting, lists, tables, links). Ignored when 'description' is also supplied. Script, forms, images, and inline styles are removed; use add_ticket_link_attachments for screenshots.")] string? descriptionHtml = null,
         [Description("Person raising the ticket. Defaults to the signed-in user. To trigger the email-to-ticket flow, set id, name, and email all to the requestor's email address.")] UserRef? requestor = null,
         [Description("Person to assign the ticket to (from get_instance assignees).")] UserRef? assignee = null,
         [Description("Priority: Low, Medium, Important, or Urgent.")] string? priority = null,
@@ -150,7 +150,7 @@ public sealed class TicketTools
         [Description("Ticket UUID.")] string ticketId,
         [Description("New title.")] string? title = null,
         [Description("New plain-text description.")] string? description = null,
-        [Description("New sanitised HTML description. Ignored when 'description' is also supplied.")] string? descriptionHtml = null,
+        [Description("New HTML description (formatting, lists, tables, links). Ignored when 'description' is also supplied. Script, forms, images, and inline styles are removed; use add_ticket_link_attachments for screenshots.")] string? descriptionHtml = null,
         [Description("New requestor.")] UserRef? requestor = null,
         [Description("New assignee (from get_instance assignees).")] UserRef? assignee = null,
         [Description("New priority: Low, Medium, Important, or Urgent.")] string? priority = null,

@@ -88,10 +88,6 @@ static async Task RunHttpAsync(string[] args)
     WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
     AuthMode authMode = AuthModeResolver.Resolve(builder.Configuration, args);
 
-    // Kestrel's default body limit is about 30 MB; a tool call needs a few kilobytes.
-    int maxRequestBodyBytes = RequestLimits.MaxRequestBodyBytes(builder.Configuration);
-    builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = maxRequestBodyBytes);
-
     if (authMode == AuthMode.Local)
     {
         UserSecretsConfiguration.Add(builder.Configuration, Assembly.GetExecutingAssembly());
@@ -101,6 +97,11 @@ static async Task RunHttpAsync(string[] args)
     AddKeyVaultIfConfigured(builder.Configuration);
     AddTicketingServices(builder.Services, builder.Configuration, requireServiceAccount: authMode == AuthMode.Local);
     builder.Services.AddHealthChecks();
+
+    // Kestrel's default body limit is about 30 MB; a tool call needs a few kilobytes. Read once every configuration
+    // source (user secrets, Key Vault) has been added, like the other settings.
+    int maxRequestBodyBytes = RequestLimits.MaxRequestBodyBytes(builder.Configuration);
+    builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = maxRequestBodyBytes);
 
     int localPort = 0;
     EntraOptions entra = new();

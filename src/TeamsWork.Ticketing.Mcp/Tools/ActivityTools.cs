@@ -50,7 +50,7 @@ public sealed class ActivityTools
     public Task<string> AddTicketComment(
         [Description("Ticket UUID.")] string ticketId,
         [Description("Plain-text comment. HTML characters are escaped.")] string? comment = null,
-        [Description("Sanitised HTML comment. Ignored when 'comment' is also supplied.")] string? commentHtml = null,
+        [Description("HTML comment (formatting, lists, tables, links). Ignored when 'comment' is also supplied. Script, forms, images, and inline styles are removed; use add_ticket_link_attachments for screenshots.")] string? commentHtml = null,
         [Description("true to make the comment visible only to internal agents.")] bool isPrivate = false,
         [Description("Return comment_HTML in the created activity.")] bool includeHtml = false,
         CancellationToken cancellationToken = default)

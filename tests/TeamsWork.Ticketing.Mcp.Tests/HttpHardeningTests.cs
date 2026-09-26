@@ -84,6 +84,21 @@ public sealed class HttpHardeningTests
     }
 
     [Fact]
+    public async Task Json_rpc_batches_are_refused()
+    {
+        // The per-caller limit counts HTTP requests. That only bounds tool calls while one request carries one call:
+        // if the SDK ever accepts batches, the limiter has to count messages instead.
+        await using var factory = new McpServerFactory();
+        using HttpClient http = factory.CreateClient();
+        string batch = "[" + string.Join(',', Enumerable.Range(1, 5).Select(i =>
+            "{\"jsonrpc\":\"2.0\",\"id\":" + i + ",\"method\":\"tools/list\",\"params\":{}}")) + "]";
+
+        using HttpResponseMessage r = await http.SendAsync(ToolsList(TokenFor("alice-oid"), batch), Ct);
+
+        Assert.Equal(HttpStatusCode.BadRequest, r.StatusCode);
+    }
+
+    [Fact]
     public async Task Oversized_request_bodies_are_refused()
     {
         await using var factory = new McpServerFactory();
