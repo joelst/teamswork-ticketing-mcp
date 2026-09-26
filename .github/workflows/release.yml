@@ -195,6 +195,9 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Add install scripts
+        run: cp scripts/install.ps1 scripts/install.sh dist/
+
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
 
@@ -223,6 +226,8 @@ jobs:
           | `*-portable.zip` | Any OS | Yes, .NET 10 runtime. Run `dotnet TeamsWork.Ticketing.Mcp.dll --stdio` |
 
           `SHA256SUMS.txt` lists checksums for every file.
+
+          `install.ps1` (Windows) and `install.sh` (macOS/Linux) download the executable for your platform, check it against `SHA256SUMS.txt`, store your settings, and register the server with Claude Code, Codex, GitHub Copilot CLI, and VS Code. See [docs/stdio.md](https://github.com/joelst/teamswork-ticketing-mcp/blob/main/docs/stdio.md).
 
           ## First run
 

@@ -39,3 +39,20 @@ jobs:
       - run: dotnet restore
       - run: dotnet build -c Release --no-restore -p:ContinuousIntegrationBuild=true
       - run: dotnet test -c Release --no-build
+
+  # The install scripts run on end users' machines, which CI can't reproduce; this catches syntax errors and the
+  # portability mistakes shellcheck knows about (install.sh must run under dash and macOS sh, not only bash).
+  install-scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck install.sh
+        run: shellcheck --shell=sh scripts/install.sh
+      - name: Parse install.ps1
+        shell: pwsh
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/install.ps1", [ref]$null, [ref]$errors)
+          $errors | ForEach-Object { Write-Host "::error file=scripts/install.ps1,line=$($_.Extent.StartLineNumber)::$($_.Message)" }
+          if ($errors) { exit 1 }

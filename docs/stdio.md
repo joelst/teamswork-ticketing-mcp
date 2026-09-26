@@ -13,67 +13,287 @@ Entra object ID, name, and email so ticket history shows you as the author. Loca
 Azure Container Apps, and the remote deployment never sets `Auth:Mode`, so the Entra requirement cannot be switched
 off by accident in the cloud.
 
-## API key
+MCP clients start stdio servers themselves, so for everyday use you install the executable once and point each
+client at it.
 
-Sources, in order: environment `Ticketing__ApiKey`, .NET user secrets, or `KeyVault:Uri` (loads secret
-`Ticketing--ApiKey` with `DefaultAzureCredential`; needs *Key Vault Secrets User* on the vault). User secrets are
-loaded in every environment for the stdio and local modes, so this is the easiest option:
+## Install with the script
+
+The install script is the quickest way to set up one machine. It:
+
+1. Downloads the newest release for your platform (pre-releases included) and checks it against the release's
+   `SHA256SUMS.txt`.
+2. Puts the executable at a fixed per-user path, so client configurations keep working across upgrades:
+   - Windows: `%LOCALAPPDATA%\Programs\teamswork-ticketing-mcp\TeamsWork.Ticketing.Mcp.exe`
+   - macOS/Linux: `~/.local/share/teamswork-ticketing-mcp/TeamsWork.Ticketing.Mcp`
+3. Asks for the Ticketing API key (hidden input) and the account ticket changes are recorded under, and saves them
+   to the [user-secrets file](#settings). If the Azure CLI is signed in, your Entra object ID, name, and email are
+   offered as defaults. Press Enter at any prompt to keep the current value.
+4. Starts the server once over stdio to check that it comes up.
+5. Registers it as `teamswork-ticketing` with every supported client it finds on `PATH`: Claude Code (`claude`),
+   Codex CLI (`codex`), GitHub Copilot CLI (`copilot`), and VS Code / GitHub Copilot Chat (`code`). Visual Studio
+   has no command line for this; see [Visual Studio](#github-copilot-in-visual-studio).
+
+No client configuration contains the API key: clients get only the executable path and `--stdio`.
+
+**Windows** (PowerShell 7 or Windows PowerShell 5.1):
 
 ```powershell
-dotnet user-secrets set "Ticketing:ApiKey" "<api key>" --project src/TeamsWork.Ticketing.Mcp
+irm https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.ps1 | iex
 ```
 
-The service-account values can go in user secrets too (`Ticketing:ServiceAccount:Id` and so on) instead of the
-environment.
+**macOS / Linux**:
 
-## Claude Code
+```sh
+curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.sh | sh
+```
 
-Build once, then register the built DLL (faster startup than `dotnet run`):
+Both scripts are also attached to each [release](https://github.com/joelst/teamswork-ticketing-mcp/releases). Read a
+script before piping it to a shell if you haven't seen it before.
+
+### Options
+
+| PowerShell | sh | Meaning |
+| --- | --- | --- |
+| `-Clients claude,vscode` | `--clients claude,vscode` | Register only with these: `claude`, `codex`, `copilot`, `vscode`, `all`, or `none`. Default: every client found on `PATH` |
+| `-Version v0.2.0` | `--version v0.2.0` | Install a specific release |
+| `-InstallDir <dir>` | `--install-dir <dir>` | Install somewhere else |
+| `-SkipSecrets` | `--skip-secrets` | Don't prompt; keep the secrets file as it is (or use environment variables) |
+| `-Uninstall` | `--uninstall` | Unregister from the clients and delete the install folder |
+| `-RemoveSecrets` | `--remove-secrets` | With uninstall, also delete the secrets file |
+
+To pass options to the one-liner:
 
 ```powershell
-dotnet build <repo> -c Release
-
-claude mcp add --transport stdio --scope user teamswork-ticketing `
-  --env Ticketing__ServiceAccount__Id=<your Entra object id> `
-  --env Ticketing__ServiceAccount__Name="<your name>" `
-  --env Ticketing__ServiceAccount__Email=<your email> `
-  -- dotnet <repo>\src\TeamsWork.Ticketing.Mcp\bin\Release\net10.0\TeamsWork.Ticketing.Mcp.dll --stdio
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.ps1))) -Clients claude,copilot
 ```
 
-Or as a project `.mcp.json`:
+```sh
+curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.sh | sh -s -- --clients claude,copilot
+```
+
+### Upgrade and uninstall
+
+Run the same command again to upgrade. The executable is replaced in place and the clients are re-registered with
+the same path. On Windows a running executable can't be replaced, so close the MCP clients first; the script stops
+with a message if the file is in use. On macOS and Linux, running clients keep the old version until they restart.
+
+To uninstall, run the script with `-Uninstall` / `--uninstall`. VS Code has no command to remove a server: run
+**MCP: Open User Configuration** and delete the `teamswork-ticketing` entry.
+
+## Settings
+
+The server needs the Ticketing API key and the account that ticket changes are recorded under. It reads them from, in
+order of precedence:
+
+1. Environment variables, with `__` in place of `:`: `Ticketing__ApiKey`, `Ticketing__ServiceAccount__Id`,
+   `Ticketing__ServiceAccount__Name`, `Ticketing__ServiceAccount__Email`.
+2. The .NET user-secrets file, which the install script writes and `dotnet user-secrets` edits:
+   - Windows: `%APPDATA%\Microsoft\UserSecrets\teamswork-taas-mcp\secrets.json`
+   - macOS/Linux: `~/.microsoft/usersecrets/teamswork-taas-mcp/secrets.json`
+
+   ```json
+   {
+     "Ticketing:ApiKey": "<api key>",
+     "Ticketing:ServiceAccount:Id": "<your Entra object id>",
+     "Ticketing:ServiceAccount:Name": "<your name>",
+     "Ticketing:ServiceAccount:Email": "<your email>"
+   }
+   ```
+
+3. `KeyVault:Uri`, which loads secret `Ticketing--ApiKey` with `DefaultAzureCredential` (needs *Key Vault Secrets
+   User* on the vault).
+
+Prefer the secrets file. Client configurations are plain text and are often synced or shared, so keep the API key
+out of them; the manual examples below pass no settings for that reason. If you do use environment variables in a
+client config, put only the service-account values there.
+
+Optional: `Ticketing:DefaultTimeZoneId` (for example `America/New_York`) if your help desk is not on US Central time.
+Add it to the secrets file; the install script keeps it when you run it again.
+
+## Connect a client manually
+
+Use these if you installed without the script, built from source, or want to see what the script did. In each
+example, replace `<exe>` with the full path to the executable:
+
+| Installed with | `<exe>` |
+| --- | --- |
+| Install script, Windows | `C:\Users\<you>\AppData\Local\Programs\teamswork-ticketing-mcp\TeamsWork.Ticketing.Mcp.exe` |
+| Install script, macOS/Linux | `/home/<you>/.local/share/teamswork-ticketing-mcp/TeamsWork.Ticketing.Mcp` (`/Users/<you>/…` on macOS) |
+| Release archive | wherever you extracted it |
+| From source | `<repo>/publish/TeamsWork.Ticketing.Mcp.exe` after `dotnet publish src/TeamsWork.Ticketing.Mcp -c Release -o publish` |
+
+Clients don't expand `~` or `%LOCALAPPDATA%` in the command, so write the path out in full. For the portable build,
+the command is `dotnet` and the arguments are `<path>/TeamsWork.Ticketing.Mcp.dll --stdio`.
+
+Every client should then list `teamswork-ticketing` with 12 tools. Try "list my five most recent open tickets".
+
+### Claude Code
+
+```sh
+claude mcp add --transport stdio --scope user teamswork-ticketing -- "<exe>" --stdio
+```
+
+`--scope user` makes it available in every project. Check it with `claude mcp get teamswork-ticketing` (it should say
+**Connected**) or `/mcp` inside Claude Code. To share it with a repository instead, use `--scope project`, which
+writes `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "teamswork-ticketing": {
-      "command": "dotnet",
-      "args": ["<repo>/src/TeamsWork.Ticketing.Mcp/bin/Release/net10.0/TeamsWork.Ticketing.Mcp.dll", "--stdio"],
-      "env": {
-        "Ticketing__ServiceAccount__Id": "<your Entra object id>",
-        "Ticketing__ServiceAccount__Name": "<your name>",
-        "Ticketing__ServiceAccount__Email": "<your email>"
-      }
+      "command": "<exe>",
+      "args": ["--stdio"]
     }
   }
 }
 ```
 
-Restart Claude Code and run `/mcp`; the server should list 12 tools.
+### Codex CLI
 
-## VS Code (`.vscode/mcp.json`)
+```sh
+codex mcp add teamswork-ticketing -- "<exe>" --stdio
+```
+
+This writes `~/.codex/config.toml`, which you can also edit directly. Use a single-quoted TOML string for Windows paths
+so the backslashes are kept:
+
+```toml
+[mcp_servers.teamswork-ticketing]
+command = 'C:\Users\<you>\AppData\Local\Programs\teamswork-ticketing-mcp\TeamsWork.Ticketing.Mcp.exe'
+args = ["--stdio"]
+```
+
+Check it with `codex mcp list`, or `/mcp` inside Codex. The Codex IDE extension reads the same file.
+
+### GitHub Copilot in VS Code
+
+```sh
+code --add-mcp '{"name":"teamswork-ticketing","type":"stdio","command":"<exe>","args":["--stdio"]}'
+```
+
+In PowerShell on Windows, escape the quotes for `code.cmd`, and double the backslashes because the path is inside
+JSON:
+
+```powershell
+code --add-mcp '{\"name\":\"teamswork-ticketing\",\"type\":\"stdio\",\"command\":\"C:\\Users\\<you>\\AppData\\Local\\Programs\\teamswork-ticketing-mcp\\TeamsWork.Ticketing.Mcp.exe\",\"args\":[\"--stdio\"]}'
+```
+
+This adds the server to your user profile's `mcp.json` (open it with **MCP: Open User Configuration**), so it is
+available in every workspace:
 
 ```json
 {
   "servers": {
     "teamswork-ticketing": {
       "type": "stdio",
+      "command": "<exe>",
+      "args": ["--stdio"]
+    }
+  }
+}
+```
+
+For one repository only, put the same `servers` block in `.vscode/mcp.json`. Then open Copilot Chat, switch to
+**Agent** mode, and check that the `teamswork-ticketing` tools are selected in the tools picker. **MCP: List Servers**
+shows the server's state and output.
+
+### GitHub Copilot CLI
+
+```sh
+copilot mcp add teamswork-ticketing -- "<exe>" --stdio
+```
+
+This writes `~/.copilot/mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "teamswork-ticketing": {
+      "type": "local",
+      "command": "<exe>",
+      "args": ["--stdio"],
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+Check it with `copilot mcp get teamswork-ticketing`, or `/mcp` inside Copilot CLI.
+
+### GitHub Copilot in Visual Studio
+
+Visual Studio 2022 17.14 or later reads `%USERPROFILE%\.mcp.json` for every solution. It also reads a solution's
+`.mcp.json` and `.vscode\mcp.json`. Create or edit the file:
+
+```json
+{
+  "servers": {
+    "teamswork-ticketing": {
+      "type": "stdio",
+      "command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\teamswork-ticketing-mcp\\TeamsWork.Ticketing.Mcp.exe",
+      "args": ["--stdio"]
+    }
+  }
+}
+```
+
+In Copilot Chat, switch to **Agent** mode and enable the tools in the tools picker; Visual Studio adds new MCP tools
+turned off.
+
+### Copilot coding agent and other cloud agents
+
+The Copilot coding agent, and any agent that runs in the cloud, can't start an executable on your machine. Give those
+the [Entra-protected remote deployment](setup-entra.md) instead.
+
+If your organization uses Copilot Business or Enterprise, an administrator may need to allow MCP servers, or add this
+one to the organization's MCP allow list, before any Copilot client will use it.
+
+## Troubleshooting
+
+**The client lists the server but it fails to start.** Run `<exe> --stdio` in a terminal. If a setting is missing
+or wrong, it prints what to fix and where the secrets file is, then exits. If it waits silently, it started; press
+Ctrl+C.
+
+**Linux: `Couldn't find a valid ICU package`.** The Linux executable needs ICU. Install it with your package
+manager, for example `sudo apt install libicu-dev` on Debian/Ubuntu (or the versioned `libicuNN` package) or
+`sudo dnf install libicu` on Fedora. Minimal images, including some WSL distributions, don't include it.
+
+**Windows: SmartScreen or "blocked" warnings.** The Windows executable is code-signed, and the install script
+unblocks it. For a manually downloaded file, run `Unblock-File <exe>`.
+
+**Windows: the install script stops with "in use".** A client is running the server. Quit Claude Code, Codex, Copilot
+CLI, VS Code, and Visual Studio (or stop the `teamswork-ticketing` server from the client), then run the script again.
+
+**Windows: `irm … | iex` is blocked.** Some managed devices run PowerShell in Constrained Language mode, which stops
+the script. Download the release zip instead, extract the executable to the path above, write the secrets file by
+hand, and connect the clients manually.
+
+## Run from source
+
+For development, point a client at the build output rather than a release:
+
+```powershell
+dotnet user-secrets set "Ticketing:ApiKey" "<api key>" --project src/TeamsWork.Ticketing.Mcp
+dotnet user-secrets set "Ticketing:ServiceAccount:Id" "<your Entra object id>" --project src/TeamsWork.Ticketing.Mcp
+dotnet user-secrets set "Ticketing:ServiceAccount:Name" "<your name>" --project src/TeamsWork.Ticketing.Mcp
+dotnet user-secrets set "Ticketing:ServiceAccount:Email" "<your email>" --project src/TeamsWork.Ticketing.Mcp
+dotnet build -c Release
+
+claude mcp add --transport stdio --scope user teamswork-ticketing-dev -- `
+  dotnet <repo>\src\TeamsWork.Ticketing.Mcp\bin\Release\net10.0\TeamsWork.Ticketing.Mcp.dll --stdio
+```
+
+These write the same secrets file the install script uses. Register the built DLL rather than `dotnet run`: it starts
+faster and never writes build output to stdout, which is the MCP channel. In VS Code you can run straight from the
+workspace in `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "teamswork-ticketing-dev": {
+      "type": "stdio",
       "command": "dotnet",
-      "args": ["run", "--project", "${workspaceFolder}/src/TeamsWork.Ticketing.Mcp", "--", "--stdio"],
-      "env": {
-        "Ticketing__ServiceAccount__Id": "<your Entra object id>",
-        "Ticketing__ServiceAccount__Name": "<your name>",
-        "Ticketing__ServiceAccount__Email": "<your email>"
-      }
+      "args": ["run", "--project", "${workspaceFolder}/src/TeamsWork.Ticketing.Mcp", "--", "--stdio"]
     }
   }
 }

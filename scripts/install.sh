@@ -1,0 +1,352 @@
+#!/bin/sh
+# Installs the TeamsWork Ticketing MCP server on macOS or Linux and registers it with local MCP clients.
+#
+# Downloads a release from GitHub, checks it against the release's SHA256SUMS.txt, and puts the executable at a
+# fixed per-user path (default ~/.local/share/teamswork-ticketing-mcp), so client configurations keep working across
+# upgrades. Run it again to upgrade.
+#
+# The API key and the account ticket changes are recorded under go in the .NET user-secrets file the server reads
+# (~/.microsoft/usersecrets/teamswork-taas-mcp/secrets.json). They are never written to a client config.
+#
+# The server is then registered, over stdio, with every supported client found on PATH (or the ones named by
+# --clients): Claude Code, Codex CLI, GitHub Copilot CLI, and VS Code (GitHub Copilot Chat).
+#
+#   curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.sh | sh -s -- --clients claude,vscode
+#   sh install.sh --uninstall
+set -eu
+
+REPO=joelst/teamswork-ticketing-mcp
+SERVER_NAME=teamswork-ticketing
+EXE_NAME=TeamsWork.Ticketing.Mcp
+SECRETS_PATH="$HOME/.microsoft/usersecrets/teamswork-taas-mcp/secrets.json"
+ALL_CLIENTS="claude codex copilot vscode"
+
+VERSION=""
+CLIENTS=""
+INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/teamswork-ticketing-mcp"
+SKIP_SECRETS=0
+UNINSTALL=0
+REMOVE_SECRETS=0
+
+usage() {
+    cat <<EOF
+Usage: install.sh [options]
+
+  --version <tag>       Release to install, for example v0.2.0 (default: newest, including pre-releases)
+  --clients <list>      Comma-separated: claude, codex, copilot, vscode, all, or none (default: those on PATH)
+  --install-dir <dir>   Where to put the executable (default: $INSTALL_DIR)
+  --skip-secrets        Don't prompt for the API key and account; keep what the secrets file already has
+  --uninstall           Unregister from the clients and delete the install folder
+  --remove-secrets      With --uninstall, also delete $SECRETS_PATH
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --version) VERSION="$2"; shift 2 ;;
+        --clients) CLIENTS="$2"; shift 2 ;;
+        --install-dir) INSTALL_DIR="$2"; shift 2 ;;
+        --skip-secrets) SKIP_SECRETS=1; shift ;;
+        --uninstall) UNINSTALL=1; shift ;;
+        --remove-secrets) REMOVE_SECRETS=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+EXE_PATH="$INSTALL_DIR/$EXE_NAME"
+
+step() { printf '\033[36m==> %s\033[0m\n' "$1"; }
+warn() { printf '\033[33mWARNING: %s\033[0m\n' "$1" >&2; }
+die() { printf '\033[31mERROR: %s\033[0m\n' "$1" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+client_command() {
+    case "$1" in vscode) echo code ;; *) echo "$1" ;; esac
+}
+
+# Sets TARGETS. Not run in a subshell, so die() ends the script.
+resolve_clients() {
+    TARGETS=""
+    if [ -z "$CLIENTS" ]; then
+        for c in $ALL_CLIENTS; do
+            if have "$(client_command "$c")"; then TARGETS="$TARGETS $c"; fi
+        done
+        [ -n "$TARGETS" ] || echo 'No supported MCP client found on PATH; skipping registration.'
+        return 0
+    fi
+    names=$(echo "$CLIENTS" | tr ',' ' ' | tr '[:upper:]' '[:lower:]')
+    for n in $names; do
+        case "$n" in
+            none) TARGETS=""; return 0 ;;
+            all) TARGETS="$ALL_CLIENTS"; return 0 ;;
+            claude|codex|copilot|vscode) TARGETS="$TARGETS $n" ;;
+            *) die "Unknown client: $n. Use claude, codex, copilot, vscode, all, or none." ;;
+        esac
+    done
+}
+
+unregister_client() {
+    # Removing a server that isn't registered fails harmlessly, so the output and result are ignored.
+    case "$1" in
+        claude) claude mcp remove --scope user "$SERVER_NAME" >/dev/null 2>&1 || true ;;
+        codex) codex mcp remove "$SERVER_NAME" >/dev/null 2>&1 || true ;;
+        copilot) copilot mcp remove "$SERVER_NAME" >/dev/null 2>&1 || true ;;
+    esac
+}
+
+json_string() {
+    printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+register_client() {
+    cmd=$(client_command "$1")
+    if ! have "$cmd"; then warn "$1: '$cmd' is not on PATH; skipped."; return; fi
+    unregister_client "$1"
+    log=$(mktemp)
+    ok=1
+    case "$1" in
+        claude) claude mcp add --transport stdio --scope user "$SERVER_NAME" -- "$EXE_PATH" --stdio >"$log" 2>&1 || ok=0 ;;
+        codex) codex mcp add "$SERVER_NAME" -- "$EXE_PATH" --stdio >"$log" 2>&1 || ok=0 ;;
+        copilot) copilot mcp add "$SERVER_NAME" -- "$EXE_PATH" --stdio >"$log" 2>&1 || ok=0 ;;
+        vscode)
+            # code exits 0 even when it rejects the argument, so success is read from its output.
+            # Re-adding replaces the entry.
+            json="{\"name\":\"$SERVER_NAME\",\"type\":\"stdio\",\"command\":$(json_string "$EXE_PATH"),\"args\":[\"--stdio\"]}"
+            code --add-mcp "$json" >"$log" 2>&1 || true
+            grep -q 'Added MCP servers' "$log" || ok=0
+            ;;
+    esac
+    if [ "$ok" = 1 ]; then
+        echo "    registered with $1"
+    else
+        sed 's/^/    /' "$log"
+        warn "$1: registration failed (output above)."
+    fi
+    rm -f "$log"
+}
+
+detect_rid() {
+    os=$(uname -s)
+    arch=$(uname -m)
+    case "$os" in
+        Darwin)
+            # A shell running under Rosetta reports x86_64 on Apple silicon.
+            if [ "$arch" = arm64 ] || [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ]; then
+                echo osx-arm64
+                return
+            fi ;;
+        Linux)
+            if [ "$arch" = x86_64 ]; then echo linux-x64; return; fi ;;
+        MINGW*|MSYS*|CYGWIN*)
+            die "This installer is for macOS and Linux. On Windows use scripts/install.ps1." ;;
+    esac
+    die "No executable is published for $os $arch. Use the portable release with the .NET 10 runtime: dotnet TeamsWork.Ticketing.Mcp.dll --stdio"
+}
+
+sha256() {
+    if have sha256sum; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+install_binary() {
+    rid=$(detect_rid)
+    api="https://api.github.com/repos/$REPO/releases"
+    if [ -n "$VERSION" ]; then
+        case "$VERSION" in v*) tag="$VERSION" ;; *) tag="v$VERSION" ;; esac
+        release=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$api/tags/$tag") || die "Release $tag not found."
+    else
+        # /releases/latest skips pre-releases, and 0.x versions are published as pre-releases.
+        release=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$api?per_page=1") || die "Could not list releases of $REPO."
+    fi
+    tag=$(printf '%s' "$release" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+    [ -n "$tag" ] || die "No releases found for $REPO."
+    archive_name="teamswork-ticketing-mcp-${tag#v}-$rid.tar.gz"
+    url_of() {
+        printf '%s' "$release" | sed -n "s|.*\"browser_download_url\"[[:space:]]*:[[:space:]]*\"\([^\"]*/$1\)\".*|\1|p" | head -n1
+    }
+    archive_url=$(url_of "$archive_name")
+    sums_url=$(url_of SHA256SUMS.txt)
+    [ -n "$archive_url" ] || die "Release $tag has no file named $archive_name."
+    [ -n "$sums_url" ] || die "Release $tag has no SHA256SUMS.txt."
+
+    step "Downloading $archive_name ($tag)"
+    temp=$(mktemp -d)
+    trap 'rm -rf "$temp"' EXIT
+    curl -fsSL -o "$temp/$archive_name" "$archive_url"
+    curl -fsSL -o "$temp/SHA256SUMS.txt" "$sums_url"
+    expected=$(awk -v f="$archive_name" '$2 == f || $2 == "*" f { print $1; exit }' "$temp/SHA256SUMS.txt")
+    [ -n "$expected" ] || die "SHA256SUMS.txt has no entry for $archive_name."
+    actual=$(sha256 "$temp/$archive_name")
+    [ "$(echo "$expected" | tr '[:upper:]' '[:lower:]')" = "$actual" ] ||
+        die "Checksum mismatch for $archive_name (expected $expected, got $actual)."
+    echo '    checksum OK'
+
+    tar -xzf "$temp/$archive_name" -C "$temp"
+    extracted=$(find "$temp" -type f -name "$EXE_NAME" | head -n1)
+    [ -n "$extracted" ] || die "$EXE_NAME not found in $archive_name."
+    mkdir -p "$INSTALL_DIR"
+    # Copy then rename, so a client that is running the old executable keeps working until it restarts.
+    cp "$extracted" "$EXE_PATH.new"
+    chmod +x "$EXE_PATH.new"
+    mv -f "$EXE_PATH.new" "$EXE_PATH"
+    for f in LICENSE README.md; do
+        [ -f "$(dirname "$extracted")/$f" ] && cp "$(dirname "$extracted")/$f" "$INSTALL_DIR/"
+    done
+    echo "$tag" >"$INSTALL_DIR/version.txt"
+    if [ "$(uname -s)" = Darwin ]; then xattr -d com.apple.quarantine "$EXE_PATH" 2>/dev/null || true; fi
+    echo "    installed $EXE_PATH"
+}
+
+# Reads a simple "key": "value" pair from the secrets file, as dotnet user-secrets writes it.
+secret_get() {
+    [ -f "$SECRETS_PATH" ] || return 0
+    sed -n "s/^[[:space:]]*\"$1\"[[:space:]]*:[[:space:]]*\"\(.*\)\"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p" "$SECRETS_PATH" |
+        head -n1 | sed 's/\\"/"/g; s/\\\\/\\/g'
+}
+
+# Prompts on the terminal, since stdin is the script itself under `curl | sh`.
+ask() {
+    prompt="$1"; current="$2"
+    while :; do
+        if [ -n "$current" ]; then printf '%s [%s]: ' "$prompt" "$current" >/dev/tty; else printf '%s: ' "$prompt" >/dev/tty; fi
+        IFS= read -r value </dev/tty || value=""
+        value=$(printf '%s' "$value" | tr -d '\r')
+        if [ -n "$value" ]; then echo "$value"; return; fi
+        if [ -n "$current" ]; then echo "$current"; return; fi
+    done
+}
+
+set_secrets() {
+    step "Configuring $SECRETS_PATH"
+    # In a subshell: dash exits the whole shell when a redirect on a builtin fails.
+    (: </dev/tty) 2>/dev/null || die "No terminal to prompt on. Run again with --skip-secrets and write $SECRETS_PATH yourself."
+
+    key=$(secret_get 'Ticketing:ApiKey')
+    id=$(secret_get 'Ticketing:ServiceAccount:Id')
+    name=$(secret_get 'Ticketing:ServiceAccount:Name')
+    email=$(secret_get 'Ticketing:ServiceAccount:Email')
+
+    # Offer the signed-in Azure CLI account as the default identity, when there is one.
+    if [ -z "$id" ] && have az; then
+        # One value per line. Strip CRs, which the Windows az prints when it is reached from WSL.
+        if me=$(az ad signed-in-user show --query '[id, displayName, mail || userPrincipalName]' -o tsv 2>/dev/null | tr -d '\r'); then
+            id=$(printf '%s\n' "$me" | sed -n 1p)
+            name=${name:-$(printf '%s\n' "$me" | sed -n 2p)}
+            email=${email:-$(printf '%s\n' "$me" | sed -n 3p)}
+        fi
+    fi
+
+    if [ -n "$key" ]; then key_prompt='Ticketing API key (Enter keeps the current key): '
+    else key_prompt='Ticketing API key (Ticketing app > Settings > API): '; fi
+    while :; do
+        printf '%s' "$key_prompt" >/dev/tty
+        stty -echo </dev/tty
+        IFS= read -r value </dev/tty || value=""
+        stty echo </dev/tty
+        printf '\n' >/dev/tty
+        value=$(printf '%s' "$value" | tr -d '\r')
+        if [ -n "$value" ]; then key="$value"; break; fi
+        if [ -n "$key" ]; then break; fi
+    done
+
+    echo 'Ticket changes are recorded under this account (use your own):' >/dev/tty
+    id=$(ask '  Entra object ID' "$id")
+    name=$(ask '  Display name' "$name")
+    email=$(ask '  Email' "$email")
+
+    mkdir -p "$(dirname "$SECRETS_PATH")"
+    new="$SECRETS_PATH.new"
+    umask 077
+    {
+        echo '{'
+        printf '  "Ticketing:ApiKey": %s,\n' "$(json_string "$key")"
+        printf '  "Ticketing:ServiceAccount:Id": %s,\n' "$(json_string "$id")"
+        printf '  "Ticketing:ServiceAccount:Name": %s,\n' "$(json_string "$name")"
+        printf '  "Ticketing:ServiceAccount:Email": %s' "$(json_string "$email")"
+        # Keep any other settings already in the file, such as Ticketing:DefaultTimeZoneId.
+        if [ -f "$SECRETS_PATH" ]; then
+            grep -E '^[[:space:]]*"[^"]+"[[:space:]]*:' "$SECRETS_PATH" |
+                grep -vE '"Ticketing:(ApiKey|ServiceAccount:Id|ServiceAccount:Name|ServiceAccount:Email)"' |
+                sed 's/,[[:space:]]*$//' | while IFS= read -r line; do printf ',\n  %s' "$(echo "$line" | sed 's/^[[:space:]]*//')"; done
+        fi
+        printf '\n}\n'
+    } >"$new"
+    chmod 600 "$new"
+    mv -f "$new" "$SECRETS_PATH"
+    echo '    saved (the API key is stored only in this file)'
+}
+
+# Sends an MCP initialize request over stdio and checks for a response, the same smoke test the release runs.
+test_server() {
+    step 'Checking that the server starts'
+    dir=$(mktemp -d)
+    mkfifo "$dir/in"
+    "$EXE_PATH" --stdio <"$dir/in" >"$dir/out" 2>"$dir/err" &
+    pid=$!
+    exec 3>"$dir/in"
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"installer","version":"1"}}}' >&3
+    started=0
+    i=0
+    while [ $i -lt 40 ]; do
+        if grep -q '"serverInfo"' "$dir/out" 2>/dev/null; then started=1; break; fi
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.5
+        i=$((i + 1))
+    done
+    exec 3>&-
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    if [ "$started" = 1 ]; then
+        echo '    OK'
+    else
+        warn "The server did not start. Its output:"
+        cat "$dir/err" >&2
+    fi
+    rm -rf "$dir"
+    [ "$started" = 1 ]
+}
+
+resolve_clients
+
+if [ "$UNINSTALL" = 1 ]; then
+    step 'Unregistering'
+    for c in $TARGETS; do
+        if [ "$c" = vscode ]; then
+            echo "    vscode: run 'MCP: Open User Configuration' and delete the '$SERVER_NAME' entry"
+        elif have "$(client_command "$c")"; then
+            unregister_client "$c"
+            echo "    removed from $c"
+        fi
+    done
+    rm -rf "$INSTALL_DIR"
+    echo "    deleted $INSTALL_DIR"
+    if [ "$REMOVE_SECRETS" = 1 ]; then
+        rm -f "$SECRETS_PATH"
+        echo "    deleted $SECRETS_PATH"
+    fi
+    exit 0
+fi
+
+install_binary
+if [ "$SKIP_SECRETS" = 0 ]; then
+    set_secrets
+elif [ ! -f "$SECRETS_PATH" ]; then
+    warn "No secrets file at $SECRETS_PATH; the server needs its settings in environment variables instead."
+fi
+started=1
+test_server || started=0
+
+if [ -n "$(echo "$TARGETS" | tr -d ' ')" ]; then
+    step 'Registering with MCP clients'
+    for c in $TARGETS; do register_client "$c"; done
+fi
+
+echo
+if [ "$started" = 0 ]; then
+    echo "Installed, but the server can't start yet. Fix the settings above (or run the installer again without"
+    echo '--skip-secrets), then restart your MCP client.'
+    exit 0
+fi
+echo "Done. Restart your MCP client and look for '$SERVER_NAME' (12 tools)."
+echo 'Run the installer again to upgrade; client configurations do not need to change.'
