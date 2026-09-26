@@ -100,7 +100,8 @@ in one of two ways.
 | `Ticketing__ServiceAccount__Email` | Your email |
 
 Pass them from the MCP client config (for example `claude mcp add ... --env Ticketing__ServiceAccount__Id=...`).
-Keep the API key out of client config files where you can, because they are stored as plain text.
+Keep the API key out of client config files where you can, because they are stored as plain text. A value in the
+user-secrets file below overrides the same environment variable, so don't set a key in both.
 
 **A user-secrets file**, which keeps the key out of client configs. Create this file:
 

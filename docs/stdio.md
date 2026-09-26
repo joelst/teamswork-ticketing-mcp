@@ -21,8 +21,9 @@ client at it.
 The install script is the quickest way to set up one machine. It:
 
 1. Downloads the executable for your platform from the newest release that has one (pre-releases included), and
-   checks it against the release's `SHA256SUMS.txt`. On Windows it also requires a valid Authenticode signature:
-   the checksum file comes from the same release, so on its own it only proves the download is intact.
+   checks it against the release's `SHA256SUMS.txt`. The checksum file comes from the same release, so it only
+   proves the download is intact. On Windows the script also requires a valid Authenticode signature, which proves
+   the file was signed with a trusted code-signing certificate and not changed since, and prints the signer.
 2. Puts the executable at a fixed per-user path, so client configurations keep working across upgrades:
    - Windows: `%LOCALAPPDATA%\Programs\teamswork-ticketing-mcp\TeamsWork.Ticketing.Mcp.exe`
    - macOS/Linux: `~/.local/share/teamswork-ticketing-mcp/TeamsWork.Ticketing.Mcp`
@@ -64,7 +65,7 @@ hits that limit, set `GITHUB_TOKEN` to any GitHub token and the scripts will use
 | `-Version v0.2.0` | `--version v0.2.0` | Install a specific release, or `latest` for the newest |
 | `-InstallDir <dir>` | `--install-dir <dir>` | Install somewhere else |
 | `-SkipSecrets` | `--skip-secrets` | Don't prompt; keep the secrets file as it is (or use environment variables) |
-| `-Uninstall` | `--uninstall` | Unregister from the clients and delete the install folder |
+| `-Uninstall` | `--uninstall` | Unregister from the clients and delete the server's files (and the folder, if it is then empty) |
 | `-RemoveSecrets` | `--remove-secrets` | With uninstall, also delete the secrets file |
 
 To pass options to the one-liner:
@@ -84,18 +85,20 @@ registrations stay valid, and you don't need to close the clients first: ones th
 until they restart. (On Windows the old file is renamed aside, because a running executable can't be overwritten,
 and deleted on a later run.)
 
-To uninstall, run the script with `-Uninstall` / `--uninstall`. Quit the MCP clients first on Windows, where a running
-executable can't be deleted. VS Code has no command to remove a server: run **MCP: Open User Configuration** and
-delete the `teamswork-ticketing` entry.
+To uninstall, run the script with `-Uninstall` / `--uninstall`. It deletes only the files it installed (the
+executable and a `.version` file beside it), so an `-InstallDir` shared with other programs is safe. Quit the MCP
+clients first on Windows, where a running executable can't be deleted. VS Code has no command to remove a server:
+run **MCP: Open User Configuration** and delete the `teamswork-ticketing` entry.
 
 ## Settings
 
-The server needs the Ticketing API key and the account that ticket changes are attributed to. It reads them from, in
-order of precedence:
+The server needs the Ticketing API key and the account that ticket changes are attributed to. It reads them from
+these sources in turn, and **a later source overrides an earlier one** for any setting both contain:
 
 1. Environment variables, with `__` in place of `:`: `Ticketing__ApiKey`, `Ticketing__ServiceAccount__Id`,
    `Ticketing__ServiceAccount__Name`, `Ticketing__ServiceAccount__Email`.
-2. The .NET user-secrets file, which the install script writes and `dotnet user-secrets` edits:
+2. The .NET user-secrets file, which the install script writes and `dotnet user-secrets` edits. A value here wins
+   over the same environment variable, including one set in a client config:
    - Windows: `%APPDATA%\Microsoft\UserSecrets\teamswork-taas-mcp\secrets.json`
    - macOS/Linux: `~/.microsoft/usersecrets/teamswork-taas-mcp/secrets.json`
 
@@ -108,12 +111,13 @@ order of precedence:
    }
    ```
 
-3. `KeyVault:Uri`, which loads secret `Ticketing--ApiKey` with `DefaultAzureCredential` (needs *Key Vault Secrets
-   User* on the vault).
+3. `KeyVault:Uri` (set in either of the above), which loads secret `Ticketing--ApiKey` with `DefaultAzureCredential`
+   (needs *Key Vault Secrets User* on the vault). It overrides the API key from both.
 
 Prefer the secrets file. Client configurations are plain text and are often synced or shared, so keep the API key
 out of them; the manual examples below pass no settings for that reason. If you do use environment variables in a
-client config, put only the service-account values there.
+client config, put only the service-account values there, and leave those keys out of the secrets file, since its
+values would win.
 
 Optional: `Ticketing:DefaultTimeZoneId` (for example `America/New_York`) if your help desk is not on US Central time.
 Add it to the secrets file; the install script keeps it when you run it again.

@@ -42,7 +42,7 @@ Usage: install.sh [options]
   --clients <list>      Comma-separated: claude, codex, copilot, vscode, all, or none (default: those on PATH)
   --install-dir <dir>   Where to put the executable (default: $INSTALL_DIR)
   --skip-secrets        Don't prompt for the API key and account; keep what the secrets file already has
-  --uninstall           Unregister from the clients and delete the install folder
+  --uninstall           Unregister from the clients and delete the server's files (and the folder, if empty)
   --remove-secrets      With --uninstall, also delete $SECRETS_PATH
 EOF
 }
@@ -61,6 +61,7 @@ while [ $# -gt 0 ]; do
 done
 
 EXE_PATH="$INSTALL_DIR/$EXE_NAME"
+VERSION_PATH="$INSTALL_DIR/$EXE_NAME.version"
 
 step() { printf '\033[36m==> %s\033[0m\n' "$1"; }
 warn() { printf '\033[33mWARNING: %s\033[0m\n' "$1" >&2; }
@@ -173,23 +174,32 @@ sha256() {
     if have sha256sum; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
+# Unauthenticated API calls are limited to 60 an hour per IP address, which shared networks and CI runners hit, so
+# use a token when there is one. It goes to curl on stdin, since command lines are visible to other users. The
+# repository is public, so if the token is rejected (expired, or scoped to another organization), try without it.
+github_api() {
+    if [ -n "${GITHUB_TOKEN:-}" ] &&
+        printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" |
+            curl -fsSL -K - -H 'Accept: application/vnd.github+json' "$1" 2>/dev/null; then
+        return 0
+    fi
+    curl -fsSL -H 'Accept: application/vnd.github+json' "$1"
+}
+
 # Sets TAG, ARCHIVE_URL, and SUMS_URL from the GitHub releases API.
 find_release() {
     rid="$1"
     api="https://api.github.com/repos/$REPO/releases"
-    # Unauthenticated API calls are limited to 60 an hour per IP address, which shared networks and CI runners hit.
-    set -- -fsSL -H 'Accept: application/vnd.github+json'
-    if [ -n "${GITHUB_TOKEN:-}" ]; then set -- "$@" -H "Authorization: Bearer $GITHUB_TOKEN"; fi
     tag="$VERSION"
     [ -n "$tag" ] || tag="$PINNED_TAG"
     [ "$tag" != latest ] || tag=""
     if [ -n "$tag" ]; then
         case "$tag" in v*) ;; *) tag="v$tag" ;; esac
-        json=$(curl "$@" "$api/tags/$tag") ||
+        json=$(github_api "$api/tags/$tag") ||
             die "Couldn't get release $tag of $REPO. Check the tag on https://github.com/$REPO/releases."
     else
         # Newest first. /releases/latest would skip pre-releases, and 0.x versions are published as pre-releases.
-        json=$(curl "$@" "$api?per_page=20") || die "Couldn't list the releases of $REPO."
+        json=$(github_api "$api?per_page=20") || die "Couldn't list the releases of $REPO."
     fi
     urls=$(printf '%s\n' "$json" | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     # The first release whose files include this platform's archive and the checksums. A release is published some
@@ -234,10 +244,9 @@ install_binary() {
     cp "$extracted" "$EXE_PATH.new"
     chmod +x "$EXE_PATH.new"
     mv -f "$EXE_PATH.new" "$EXE_PATH"
-    for f in LICENSE README.md; do
-        if [ -f "$(dirname "$extracted")/$f" ]; then cp "$(dirname "$extracted")/$f" "$INSTALL_DIR/"; fi
-    done
-    echo "$TAG" >"$INSTALL_DIR/version.txt"
+    # Only files named after the executable, so a shared --install-dir (such as ~/.local/bin) gets nothing that could
+    # clash with other programs' files, and uninstall knows exactly what to delete.
+    echo "$TAG" >"$VERSION_PATH"
     if [ "$(uname -s)" = Darwin ]; then xattr -d com.apple.quarantine "$EXE_PATH" 2>/dev/null || true; fi
     echo "    installed $EXE_PATH"
 }
@@ -250,9 +259,11 @@ secrets_file_editable() {
 
 # Prints a value from the secrets file still JSON-escaped, so an unchanged value is written back exactly as it was
 # (dotnet user-secrets writes non-ASCII characters as \uXXXX escapes).
+# Keys match case-insensitively, as .NET configuration keys do.
 secret_get() {
     [ -f "$SECRETS_PATH" ] || return 0
-    sed -n "s/^[[:space:]]*\"$1\"[[:space:]]*:[[:space:]]*\"\(.*\)\"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p" "$SECRETS_PATH" | head -n1
+    grep -iE "^[[:space:]]*\"$1\"[[:space:]]*:" "$SECRETS_PATH" | head -n1 |
+        sed -n 's/^[[:space:]]*"[^"]*"[[:space:]]*:[[:space:]]*"\(.*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p'
 }
 
 # Prompts on the terminal, since stdin is the script itself under `curl | sh`. $2 is the current value, JSON-escaped;
@@ -296,9 +307,12 @@ set_secrets() {
     else key_prompt='Ticketing API key (Ticketing app > Settings > API): '; fi
     while :; do
         printf '%s' "$key_prompt" >/dev/tty
+        # Restore echo even if the prompt is interrupted with Ctrl+C.
+        trap 'stty echo </dev/tty' INT TERM
         stty -echo </dev/tty
         IFS= read -r value </dev/tty || value=""
         stty echo </dev/tty
+        trap - INT TERM
         printf '\n' >/dev/tty
         value=$(printf '%s' "$value" | tr -d '\r')
         if [ -n "$value" ]; then key=$(json_escape "$value"); break; fi
@@ -323,13 +337,15 @@ set_secrets() {
             # Keep any other settings already in the file, such as Ticketing:DefaultTimeZoneId.
             if [ -f "$SECRETS_PATH" ]; then
                 grep -E '^[[:space:]]*"[^"]+"[[:space:]]*:' "$SECRETS_PATH" |
-                    grep -vE '"Ticketing:(ApiKey|ServiceAccount:Id|ServiceAccount:Name|ServiceAccount:Email)"' |
+                    grep -viE '^[[:space:]]*"Ticketing:(ApiKey|ServiceAccount:Id|ServiceAccount:Name|ServiceAccount:Email)"' |
                     sed 's/^[[:space:]]*//; s/[[:space:]]*,\{0,1\}[[:space:]]*$//' |
                     while IFS= read -r line; do printf ',\n  %s' "$line"; done
             fi
             printf '\n}\n'
         } >"$new"
-        if [ -f "$SECRETS_PATH" ]; then cp -p "$SECRETS_PATH" "$SECRETS_PATH.bak"; fi
+        # A fresh copy, so it gets this umask rather than the original's mode (dotnet user-secrets may have made the
+        # original readable by others).
+        if [ -f "$SECRETS_PATH" ]; then rm -f "$SECRETS_PATH.bak"; cat "$SECRETS_PATH" >"$SECRETS_PATH.bak"; fi
     )
     chmod 600 "$new"
     mv -f "$new" "$SECRETS_PATH"
@@ -381,8 +397,10 @@ if [ "$UNINSTALL" = 1 ]; then
             echo "    removed from $c"
         fi
     done
-    rm -rf "$INSTALL_DIR"
-    echo "    deleted $INSTALL_DIR"
+    # Only the installer's own files: --install-dir may be a folder shared with other programs.
+    rm -f "$EXE_PATH" "$EXE_PATH.new" "$VERSION_PATH"
+    rmdir "$INSTALL_DIR" 2>/dev/null || true
+    echo "    removed the server from $INSTALL_DIR"
     if [ "$REMOVE_SECRETS" = 1 ]; then
         rm -f "$SECRETS_PATH" "$SECRETS_PATH.bak"
         echo "    deleted $SECRETS_PATH"

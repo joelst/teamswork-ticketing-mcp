@@ -21,7 +21,7 @@
       -Clients <list>   claude, codex, copilot, vscode, all, or none. Defaults to every one found on PATH.
       -InstallDir <dir> Install somewhere else.
       -SkipSecrets      Don't prompt for the API key and account; keep whatever the secrets file already has.
-      -Uninstall        Unregister from the clients and delete the install folder.
+      -Uninstall        Unregister from the clients and delete the server's files (and the folder, if empty).
       -RemoveSecrets    With -Uninstall, also delete the secrets file.
 
 .EXAMPLE
@@ -71,6 +71,7 @@
     $ClientCommand = @{ claude = 'claude'; codex = 'codex'; copilot = 'copilot'; vscode = 'code' }
     if (-not $InstallDir) { $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\teamswork-ticketing-mcp' }
     $ExePath = Join-Path $InstallDir $ExeName
+    $VersionPath = Join-Path $InstallDir 'TeamsWork.Ticketing.Mcp.version'
 
     function Write-Step([string] $Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
 
@@ -100,9 +101,14 @@
         # Windows PowerShell 5.1 turns a native command's stderr into terminating errors under 'Stop'.
         $ErrorActionPreference = 'Continue'
         if ($Client -eq 'vscode') {
-            # code is a .cmd wrapper, so arguments go through cmd.exe, which needs the JSON's quotes escaped. The
-            # command line must not start with a quote: cmd /c would strip it and the last one.
-            $line = ($Arguments | ForEach-Object { '"' + $_.Replace('"', '\"') + '"' }) -join ' '
+            # code is a .cmd wrapper, so arguments go through cmd.exe, which needs the JSON's quotes escaped. Each \"
+            # also toggles cmd's own quoting, leaving parts of the path unquoted, so characters cmd acts on there (&, ^,
+            # %, and so on; & is legal in a Windows user name) are written as JSON \u escapes. The command line must
+            # not start with a quote: cmd /c would strip it and the last one.
+            $line = ($Arguments | ForEach-Object {
+                    $arg = [regex]::Replace($_, '[&^%|<>!()]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
+                    '"' + $arg.Replace('"', '\"') + '"'
+                }) -join ' '
             $output = cmd.exe /d /c "code $line" 2>&1
         }
         else {
@@ -158,24 +164,34 @@
         (Get-Asset $Release (Get-ArchiveName $Release)) -and (Get-Asset $Release 'SHA256SUMS.txt')
     }
 
-    function Get-Release {
+    function Invoke-GitHubApi([string] $Uri) {
         $headers = @{ 'User-Agent' = 'teamswork-ticketing-mcp-installer'; Accept = 'application/vnd.github+json' }
-        # Unauthenticated API calls are limited to 60 an hour per IP address, which shared networks and CI runners hit.
-        if ($env:GITHUB_TOKEN) { $headers.Authorization = "Bearer $env:GITHUB_TOKEN" }
+        # Unauthenticated API calls are limited to 60 an hour per IP address, which shared networks and CI runners
+        # hit, so use a token when there is one. The repository is public, so if the token is rejected (expired, or
+        # scoped to another organization), try again without it.
+        if ($env:GITHUB_TOKEN) {
+            try { return Invoke-RestMethod -Headers ($headers + @{ Authorization = "Bearer $env:GITHUB_TOKEN" }) $Uri }
+            catch { if ($_.Exception.Response.StatusCode -notin 401, 403) { throw } }
+        }
+        Invoke-RestMethod -Headers $headers $Uri
+    }
+
+    function Get-Release {
         $api = "https://api.github.com/repos/$Repo/releases"
         $tag = if ($Version -and $Version -ne 'latest') { $Version } elseif (-not $Version) { $PinnedTag } else { '' }
         if ($tag) {
             if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
-            try { $release = Invoke-RestMethod -Headers $headers "$api/tags/$tag" }
+            try { $release = Invoke-GitHubApi "$api/tags/$tag" }
             catch { throw "Couldn't get release $tag of $Repo ($($_.Exception.Message)). Check the tag on https://github.com/$Repo/releases." }
             if (-not (Test-ReleaseReady $release)) { throw "Release $tag has no $(Get-ArchiveName $release) or SHA256SUMS.txt (yet)." }
             return $release
         }
         # Newest first. /releases/latest would skip pre-releases, and 0.x versions are published as pre-releases.
         # Assigning, rather than piping, keeps Windows PowerShell 5.1 from treating the JSON array as one object.
-        $releases = Invoke-RestMethod -Headers $headers "$($api)?per_page=20"
+        $releases = Invoke-GitHubApi "$($api)?per_page=20"
         foreach ($release in $releases) {
-            if (Test-ReleaseReady $release) { return $release }
+            # A token with push access also lists drafts, whose files can't be downloaded without it.
+            if (-not $release.draft -and (Test-ReleaseReady $release)) { return $release }
         }
         throw "No release of $Repo has a Windows build yet."
     }
@@ -205,8 +221,9 @@
             $extracted = Get-ChildItem -Path $temp -Recurse -Filter $ExeName | Select-Object -First 1
             if (-not $extracted) { throw "$ExeName not found in $archiveName." }
 
-            # The checksum file comes from the same release, so it only proves the download is intact. The signature
-            # proves who built it.
+            # The checksum file comes from the same release, so it only proves the download is intact. A valid signature
+            # also proves the file was signed with a trusted code-signing certificate and not changed since; the signer
+            # is printed so it can be checked.
             $signature = Get-AuthenticodeSignature $extracted.FullName
             if ($signature.Status -ne 'Valid') {
                 throw "The executable's Authenticode signature is $($signature.Status): $($signature.StatusMessage) Not installing it."
@@ -236,9 +253,9 @@
             }
             if ($old) { Remove-Item -Force $old -ErrorAction SilentlyContinue }
 
-            Get-ChildItem -Path $extracted.DirectoryName -File | Where-Object Name -In 'LICENSE', 'README.md' |
-                Copy-Item -Destination $InstallDir -Force
-            Set-Content -Path (Join-Path $InstallDir 'version.txt') -Value $release.tag_name
+            # Only files named after the executable, so a shared -InstallDir (such as a tools folder on PATH) gets
+            # nothing that could clash with other programs' files, and uninstall knows exactly what to delete.
+            Set-Content -Path $VersionPath -Value $release.tag_name
             Write-Host "    installed $ExePath"
         }
         finally {
@@ -271,7 +288,13 @@
         if (Test-Path $SecretsPath) {
             try { $existing = Get-Content -Raw $SecretsPath | ConvertFrom-Json }
             catch { throw "$SecretsPath is not valid JSON ($($_.Exception.Message)). Fix or delete it, then run the installer again." }
-            # Windows PowerShell 5.1 has no ConvertFrom-Json -AsHashtable, so copy the properties across.
+            # A nested object ("Ticketing": { ... }) would sit beside the flat keys written below, and .NET refuses to
+            # load a file where both forms name the same setting.
+            if ($existing -and ($existing.PSObject.Properties.Value | Where-Object { $_ -is [pscustomobject] -or $_ -is [array] })) {
+                throw "$SecretsPath uses nested objects. Rewrite it with flat ""Ticketing:..."" keys (see docs/stdio.md), or run again with -SkipSecrets."
+            }
+            # Windows PowerShell 5.1 has no ConvertFrom-Json -AsHashtable, so copy the properties across. [ordered]
+            # keys are case-insensitive, like .NET configuration keys.
             if ($existing) { $existing.PSObject.Properties | ForEach-Object { $secrets[$_.Name] = $_.Value } }
         }
 
@@ -327,7 +350,9 @@
             return $false
         }
         finally {
+            # Wait for the exit, so the executable isn't still locked when the caller moves on (for example to uninstall).
             if (-not $process.HasExited) { $process.Kill() }
+            $null = $process.WaitForExit(5000)
             $process.Dispose()
         }
     }
@@ -345,11 +370,20 @@
                 Write-Host "    removed from $client"
             }
         }
-        if (Test-Path $InstallDir) {
-            try { Remove-Item -Recurse -Force $InstallDir }
-            catch { throw "Couldn't delete $InstallDir because a client is still running the server. Quit the MCP clients, then run the uninstall again." }
+        # Only the installer's own files: -InstallDir may be a folder shared with other programs.
+        if (Test-Path $ExePath) {
+            try { Remove-Item -Force $ExePath }
+            catch { throw "Couldn't delete $ExePath because a client is still running the server. Quit the MCP clients, then run the uninstall again." }
         }
-        Write-Host "    deleted $InstallDir"
+        Get-ChildItem -Path $InstallDir -Filter "$ExeName.*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        Remove-Item -Force $VersionPath -ErrorAction SilentlyContinue
+        # After an upgrade, a client that hasn't restarted is running the renamed old copy, which can't be deleted yet.
+        $locked = @(Get-ChildItem -Path $InstallDir -Filter "$ExeName.*" -ErrorAction SilentlyContinue)
+        if ($locked) {
+            throw "Couldn't delete $($locked.FullName -join ', ') because a client is still running it. Quit the MCP clients, then run the uninstall again."
+        }
+        if ((Test-Path $InstallDir) -and -not (Get-ChildItem -Force $InstallDir)) { Remove-Item -Force $InstallDir }
+        Write-Host "    removed the server from $InstallDir"
         if ($RemoveSecrets) {
             Remove-Item -Force $SecretsPath -ErrorAction SilentlyContinue
             Write-Host "    deleted $SecretsPath"
