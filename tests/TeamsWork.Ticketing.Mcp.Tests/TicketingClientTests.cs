@@ -285,6 +285,19 @@ public sealed class TicketingClientTests
         Assert.True(t.Extra!.ContainsKey("futureField"));
     }
 
+    // Shape observed from the live API: a ticket's tags come back as plain strings, not the objects writes send.
+    [Fact]
+    public async Task Ticket_tags_returned_as_strings_parse()
+    {
+        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, """{"items":[{"id":"x","tags":["intune","monthly"]},{"id":"y","tags":[{"tagCategoryId":"c","text":"t"}]}]}""");
+        TicketingClient client = TestFactory.Client(handler);
+
+        ListResponse<Ticket> r = await client.ListTicketsAsync(new TicketListQuery(), TestContext.Current.CancellationToken);
+
+        Assert.Equal("intune", r.Items![0].Tags!.Value[0].GetString());
+        Assert.Equal(JsonValueKind.Object, r.Items[1].Tags!.Value[0].ValueKind);
+    }
+
     [Fact]
     public async Task Missing_api_key_fails_fast_without_calling_upstream()
     {

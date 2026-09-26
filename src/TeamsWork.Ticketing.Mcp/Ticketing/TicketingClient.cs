@@ -150,6 +150,51 @@ public sealed class TicketingClient
         return r.Item ?? throw new TicketingApiException("The Ticketing API reported success but returned no attachment activity.");
     }
 
+    /// <summary>Uploads files to a ticket with <c>multipart/form-data</c>, recorded as one attachment activity.</summary>
+    public async Task<CommentActivity> UploadFilesAsync(
+        Guid ticketId,
+        IReadOnlyList<UploadFile> files,
+        string? comment,
+        string? commentHtml,
+        bool isPrivate,
+        TicketUser actor,
+        bool includeHtml,
+        int? timezoneOffset,
+        CancellationToken cancellationToken)
+    {
+        var query = new List<KeyValuePair<string, string?>> { new("include", includeHtml ? "comment_HTML" : null) };
+
+        // Built afresh for each attempt: a sent HttpContent can't be sent again.
+        var body = new ContentFactory(() =>
+        {
+            var form = new MultipartFormDataContent();
+            foreach (UploadFile file in files)
+            {
+                var part = new ByteArrayContent(file.Content);
+                part.Headers.ContentType = new MediaTypeHeaderValue(file.ContentType);
+                form.Add(FormPart(part, "files", file.FileName));
+            }
+
+            if (comment is not null)
+            {
+                form.Add(FormPart(new StringContent(comment, Encoding.UTF8), "comment"));
+            }
+
+            if (commentHtml is not null)
+            {
+                form.Add(FormPart(new StringContent(commentHtml, Encoding.UTF8), "comment_HTML"));
+            }
+
+            // The multipart schema takes these as strings: a "true"/"false" enum and a JSON-encoded user.
+            form.Add(FormPart(new StringContent(isPrivate ? "true" : "false"), "isPrivate"));
+            form.Add(FormPart(new StringContent(JsonSerializer.Serialize(actor, JsonOptions), Encoding.UTF8), "user"));
+            return form;
+        });
+
+        ItemResponse<CommentActivity> r = await SendAsync<ItemResponse<CommentActivity>>(HttpMethod.Post, $"tickets/{ticketId:D}/attachments", query, body, null, true, timezoneOffset, cancellationToken);
+        return r.Item ?? throw new TicketingApiException("The Ticketing API reported success but returned no attachment activity.");
+    }
+
     public Task<ListResponse<Attachment>> ListActivityAttachmentsAsync(string activityId, int? timezoneOffset, CancellationToken cancellationToken) =>
         SendAsync<ListResponse<Attachment>>(HttpMethod.Get, $"tickets/activity/{Uri.EscapeDataString(activityId)}/attachments", [], null, null, true, timezoneOffset, cancellationToken);
 
@@ -227,7 +272,11 @@ public sealed class TicketingClient
                 request.Headers.TryAddWithoutValidation("continuationToken", continuationToken);
             }
 
-            if (body is not null)
+            if (body is ContentFactory factory)
+            {
+                request.Content = factory.Create();
+            }
+            else if (body is not null)
             {
                 request.Content = JsonContent.Create(body, body.GetType(), options: JsonOptions);
             }
@@ -315,6 +364,24 @@ public sealed class TicketingClient
             }
         }
     }
+
+    /// <summary>
+    /// Sets a multipart part's Content-Disposition with quoted values. MultipartFormDataContent.Add writes
+    /// <c>name=files</c> unquoted (plus a <c>filename*</c> parameter), which the Ticketing API answers with HTTP 500;
+    /// <c>name="files"</c> works. File names reach here already stripped of quotes and non-ASCII characters.
+    /// </summary>
+    private static HttpContent FormPart(HttpContent content, string name, string? fileName = null)
+    {
+        content.Headers.ContentDisposition = new ContentDispositionHeaderValue("form-data")
+        {
+            Name = $"\"{name}\"",
+            FileName = fileName is null ? null : $"\"{fileName}\"",
+        };
+        return content;
+    }
+
+    /// <summary>A request body that isn't JSON. Called once per attempt, since a sent HttpContent can't be reused.</summary>
+    private sealed record ContentFactory(Func<HttpContent> Create);
 
     /// <summary>True when every character is visible ASCII, the only characters an HTTP header value may safely hold.</summary>
     internal static bool IsSafeHeaderValue(string value)

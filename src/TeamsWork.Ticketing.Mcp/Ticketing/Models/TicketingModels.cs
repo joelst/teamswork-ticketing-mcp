@@ -42,7 +42,9 @@ public sealed class Ticket
     [JsonPropertyName("description_HTML")] public string? DescriptionHtml { get; init; }
     [JsonPropertyName("priority")] public string? Priority { get; init; }
     [JsonPropertyName("expectedDate")] public string? ExpectedDate { get; init; }
-    [JsonPropertyName("tags")] public IReadOnlyList<TicketTag>? Tags { get; init; }
+    // Writes send {tagCategoryId, text} objects, but the live API returns a ticket's tags as plain tag texts
+    // (["intune","monthly"]); passed through as-is so either shape parses.
+    [JsonPropertyName("tags")] public JsonElement? Tags { get; init; }
     [JsonPropertyName("customFields")] public JsonElement? CustomFields { get; init; }
     [JsonPropertyName("createdOn")] public string? CreatedOn { get; init; }
     [JsonPropertyName("lastUpdatedOn")] public string? LastUpdatedOn { get; init; }
@@ -154,6 +156,10 @@ public sealed class Instance
     [JsonPropertyName("enabled")] public bool? Enabled { get; init; }
     [JsonPropertyName("instanceType")] public string? InstanceType { get; init; }
     [JsonPropertyName("customFields")] public IReadOnlyList<CustomField>? CustomFields { get; init; }
+
+    // The live API also returns custom fields in these two lists (the form's left and right columns).
+    [JsonPropertyName("customFieldsLeft")] public IReadOnlyList<CustomField>? CustomFieldsLeft { get; init; }
+    [JsonPropertyName("customFieldsRight")] public IReadOnlyList<CustomField>? CustomFieldsRight { get; init; }
     [JsonPropertyName("optionalFieldsLeft")] public IReadOnlyList<CustomField>? OptionalFieldsLeft { get; init; }
     [JsonPropertyName("optionalFieldsRight")] public IReadOnlyList<CustomField>? OptionalFieldsRight { get; init; }
     [JsonPropertyName("assignees")] public AssigneeConfig? Assignees { get; init; }
@@ -244,7 +250,7 @@ public sealed record InsertAttachmentLinkRequest(
     [property: JsonPropertyName("user")] TicketUser User);
 
 /// <summary>Filter, sort, and paging options for <c>GET /tickets</c>. Null values are not sent.</summary>
-public sealed class TicketListQuery
+public sealed record TicketListQuery
 {
     public string? Search { get; init; }
     public string? Title { get; init; }
@@ -268,3 +274,6 @@ public sealed class TicketListQuery
     public bool IncludeHtml { get; init; }
     public int? TimezoneOffset { get; init; }
 }
+
+/// <summary>A file read from disk for a multipart upload.</summary>
+public sealed record UploadFile(string FileName, string ContentType, byte[] Content);

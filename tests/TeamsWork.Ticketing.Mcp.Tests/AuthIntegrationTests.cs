@@ -110,6 +110,8 @@ public sealed class AuthIntegrationTests : IClassFixture<McpServerFactory>
         "list_ticket_activities", "add_ticket_comment",
         "list_ticket_attachments", "add_ticket_link_attachments", "list_activity_attachments",
         "get_instance", "list_tag_categories",
+        "find_ticket_by_number", "get_ticket_context", "find_similar_tickets", "assign_ticket",
+        "whoami", "list_my_tickets", "list_sla_risk", "count_tickets",
     ];
 
     private readonly McpServerFactory _factory;

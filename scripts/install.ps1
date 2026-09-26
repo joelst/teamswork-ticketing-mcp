@@ -21,6 +21,8 @@
       -Clients <list>   claude, codex, copilot, vscode, all, or none. Defaults to every one found on PATH.
       -InstallDir <dir> Install somewhere else.
       -SkipSecrets      Don't prompt for the API key and account; keep whatever the secrets file already has.
+      -Region <name>    Data region of your Ticketing instance: US (the default), EU, or AUS. Saved in the secrets
+                        file; leave it out to keep the region already saved there.
       -Uninstall        Unregister from the clients and delete the server's files (and the folder, if empty).
       -RemoveSecrets    With -Uninstall, also delete the secrets file.
 
@@ -45,6 +47,7 @@
         [string[]] $Clients,
         [string] $InstallDir,
         [switch] $SkipSecrets,
+        [string] $Region,
         [switch] $Uninstall,
         [switch] $RemoveSecrets
     )
@@ -58,6 +61,14 @@
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         # Windows PowerShell 5.1 may default to TLS 1.0/1.1, which GitHub rejects.
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    }
+
+    if ($Region -and -not $Uninstall) {
+        $Region = $Region.Trim().ToUpperInvariant()
+        if ($Region -notin 'US', 'EU', 'AUS') { throw "Unknown -Region '$Region'. Use US (the default), EU, or AUS." }
+        if ($SkipSecrets) {
+            throw "-Region is saved in the secrets file, which -SkipSecrets leaves alone. Drop -SkipSecrets, or set the Ticketing__Region environment variable in each client's MCP config instead."
+        }
     }
 
     # The release workflow sets this in the copy attached to each release, so that copy installs its own release.
@@ -380,6 +391,7 @@
         $secrets['Ticketing:ServiceAccount:Id'] = Read-Value '  Entra object ID' (Get-First $secrets['Ticketing:ServiceAccount:Id'] $signedIn.id)
         $secrets['Ticketing:ServiceAccount:Name'] = Read-Value '  Display name' (Get-First $secrets['Ticketing:ServiceAccount:Name'] $signedIn.name)
         $secrets['Ticketing:ServiceAccount:Email'] = Read-Value '  Email' (Get-First $secrets['Ticketing:ServiceAccount:Email'] $signedIn.email)
+        if ($Region) { $secrets['Ticketing:Region'] = $Region }
 
         New-Item -ItemType Directory -Force -Path (Split-Path $SecretsPath) | Out-Null
         $secrets | ConvertTo-Json | Set-Content -Encoding UTF8 -Path $SecretsPath
@@ -483,6 +495,6 @@
         throw ("Installed, but registering with $($failedClients -join ', ') failed (see above). Fix the problem, then run " +
             "the installer again with -Clients $($failedClients -join ',').")
     }
-    Write-Host "Done. Restart your MCP client and look for '$ServerName' (12 tools)."
+    Write-Host "Done. Restart your MCP client and look for '$ServerName' (20 tools, 21 with file uploads on)."
     Write-Host 'Run the installer again to upgrade; client configurations do not need to change.'
 } @args

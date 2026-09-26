@@ -69,7 +69,9 @@ public sealed class LocalModeIntegrationTests
         await using McpClient client = await McpClient.CreateAsync(transport, cancellationToken: Ct);
 
         IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: Ct);
-        Assert.Equal(12, tools.Count);
+        // Every tool but upload_ticket_files, which only the stdio transport offers.
+        Assert.Equal(20, tools.Count);
+        Assert.DoesNotContain(tools, t => t.Name == "upload_ticket_files");
 
         // Validation still runs and the configured account is what writes would be attributed to.
         CallToolResult result = await client.CallToolAsync("get_ticket", new Dictionary<string, object?> { ["ticketId"] = "nope" }, cancellationToken: Ct);
@@ -209,6 +211,47 @@ public sealed class LocalModeIntegrationTests
 
         Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
         Assert.Contains("Ticketing:DefaultTimeZoneId", report, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("EU", "https://ticketing-apim-eu.azure-api.net/ticketing/v1")]
+    [InlineData("aus", "https://ticketing-apim-aus.azure-api.net/ticketing/v1")]
+    [InlineData("US", TicketingOptions.DefaultBaseUrl)]
+    public async Task Region_picks_the_vendor_endpoint(string region, string expected)
+    {
+        await using var factory = new LocalModeFactory
+        {
+            Settings = { ["Ticketing:BaseUrl"] = TicketingOptions.DefaultBaseUrl, ["Ticketing:Region"] = region },
+        };
+        factory.CreateClient().Dispose();
+
+        TicketingOptions options = factory.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<TicketingOptions>>().Value;
+
+        Assert.Equal(expected, options.BaseUrl);
+    }
+
+    [Fact]
+    public async Task No_region_keeps_the_us_endpoint()
+    {
+        await using var factory = new LocalModeFactory { Settings = { ["Ticketing:BaseUrl"] = TicketingOptions.DefaultBaseUrl } };
+        factory.CreateClient().Dispose();
+
+        TicketingOptions options = factory.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<TicketingOptions>>().Value;
+
+        Assert.Equal(TicketingOptions.DefaultBaseUrl, options.BaseUrl);
+    }
+
+    [Theory]
+    [InlineData("Mars", "Ticketing:Region must be one of")]
+    [InlineData("EU", "name different endpoints")] // the factory's BaseUrl is a custom one
+    public async Task Bad_or_conflicting_region_stops_startup(string region, string message)
+    {
+        await using var factory = new LocalModeFactory { Settings = { ["Ticketing:Region"] = region } };
+
+        Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+
+        Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
+        Assert.Contains(message, report, StringComparison.Ordinal);
     }
 
     // Each bad value must reach the entry point as a configuration failure (reported without a stack trace) that

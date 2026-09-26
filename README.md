@@ -31,14 +31,33 @@ or tool output.
 | `list_ticket_attachments` | read | Files and links on a ticket |
 | `add_ticket_link_attachments` | write | Attach hyperlinks with a comment |
 | `list_activity_attachments` | read | Attachments of one attachment activity |
-| `get_instance` | read | Custom field definitions, assignees, workflows, SLA settings |
+| `get_instance` | read | Custom field definitions, assignees, workflows, SLA settings; `section` returns one part |
 | `list_tag_categories` | read | Tag categories and tags |
+| `find_ticket_by_number` | read | Full ticket from the number people quote (`ticketNo`), not the UUID |
+| `get_ticket_context` | read | Ticket, recent activity, and attachments in one call |
+| `find_similar_tickets` | read | Open tickets with similar titles, to check for duplicates before `create_ticket` |
+| `assign_ticket` | write | Assign a ticket by the assignee's email or name |
+| `whoami` | read | The account writes are attributed to |
+| `list_my_tickets` | read | Tickets assigned to or raised by the caller |
+| `list_sla_risk` | read | Unresolved tickets that breached or escalated an SLA |
+| `count_tickets` | read | Ticket counts by status, priority, or assignee |
+| `upload_ticket_files` | write | Upload files from a chosen local folder (stdio only, off unless `Ticketing:UploadRoot` is set) |
 
 Every write is attributed to the **authenticated caller** (from the token's claims). Tools never accept a `user`
 argument, so an agent cannot impersonate someone else. App-only callers (for example a Foundry managed identity) are
 attributed to the configured service account.
 
-File uploads are intentionally not exposed (MCP tools are a poor fit for binary uploads); link attachments are.
+Writes accept names where the API wants IDs: a person by email or name (looked up in the instance's assignee list),
+a tag category by name, and a custom field by title. Custom field values are checked against the field's type and
+options before they are sent. Instance settings and tags are cached for `Ticketing:InstanceCacheSeconds`.
+
+The API can't filter by assignee, requestor, ticket number, or SLA state, so `list_my_tickets`, `list_sla_risk`,
+`count_tickets`, and `find_ticket_by_number` read tickets and filter them in the server. One call reads at most
+`Ticketing:MaxScanTickets` tickets (default 1000, usually a single request) and says when it stopped early.
+
+File uploads are offered only over stdio, and only from the folder named by `Ticketing:UploadRoot`, so an agent can't
+send arbitrary local files; see [docs/stdio.md](docs/stdio.md#file-uploads). The remote endpoint offers link
+attachments only.
 
 ## Repository layout
 
@@ -53,7 +72,8 @@ pipelines/azure-pipelines.yml    Azure DevOps: build, test, audit, deploy
 docs/                            Setup guides: Entra, Copilot Studio, Foundry, stdio, security
 ```
 
-The server was built against TeamsWork Ticketing API v1.1.0 (`https://teamswork.azure-api.net/ticketing/v1`). The
+The server was built against TeamsWork Ticketing API v1.1.0. It uses the US endpoint
+(`https://teamswork.azure-api.net/ticketing/v1`) unless `Ticketing:Region` is set to `EU` or `AUS`. The
 vendor's OpenAPI document is not redistributed here; obtain it from TeamsWork. If you keep a local copy in
 `docs/openapi/`, it is git-ignored.
 
@@ -74,7 +94,8 @@ irm https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/script
 curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.sh | sh
 ```
 
-Restart your client and look for `teamswork-ticketing` with 12 tools. Run the same command again to upgrade.
+If your Ticketing instance is hosted in the EU or Australia, add `-Region EU` / `--region EU` (or `AUS`); US is
+the default. Restart your client and look for `teamswork-ticketing` with 20 tools. Run the same command again to upgrade.
 [docs/stdio.md](docs/stdio.md) covers the script's options, uninstalling, Visual Studio, and the manual setup for
 each client.
 
@@ -180,7 +201,7 @@ If the API key or account is missing, it exits with a message naming the missing
 claude mcp add --transport stdio --scope user teamswork-ticketing -- "<full path>\publish\TeamsWork.Ticketing.Mcp.exe" --stdio
 ```
 
-Restart Claude Code and run `/mcp`. It should list `teamswork-ticketing` with 12 tools. Try
+Restart Claude Code and run `/mcp`. It should list `teamswork-ticketing` with 20 tools. Try
 "list my five most recent open tickets".
 
 **VS Code / GitHub Copilot Chat** (`.vscode/mcp.json`, or your user `mcp.json` for every workspace):
@@ -241,7 +262,12 @@ Estimated running cost: Container Apps consumption with scale-to-zero (mostly wi
 | Key | Where | Meaning |
 | --- | --- | --- |
 | `Ticketing:ApiKey` | Key Vault secret `Ticketing--ApiKey` → container secret → env `Ticketing__ApiKey`; user secrets locally | Ticketing instance API key |
-| `Ticketing:BaseUrl` | appsettings / env | Ticketing API base URL |
+| `Ticketing:Region` | env / user secrets | Data region of the Ticketing instance: `US` (default), `EU`, or `AUS`; picks the vendor endpoint |
+| `Ticketing:BaseUrl` | appsettings / env | Ticketing API base URL, for an endpoint `Region` doesn't cover. Set one or the other |
+| `Ticketing:InstanceCacheSeconds` | env | How long instance settings and tags are cached, default 300; `0` turns it off |
+| `Ticketing:MaxScanTickets` | env | Most tickets one filtering tool call reads, default 1000 |
+| `Ticketing:UploadRoot` | env / user secrets (stdio only) | Folder `upload_ticket_files` may read; unset turns uploads off |
+| `Ticketing:MaxUploadBytes` | env | Largest total size of one upload, default 10 MiB |
 | `Ticketing:DefaultTimeZoneId` | appsettings / env | IANA zone for the API's required `timezone` offset (default `America/Chicago`) |
 | `Ticketing:ServiceAccount:{Id,Name,Email}` | env / user secrets | Actor for app-only callers; **required** in stdio and `--local` modes |
 | `Auth:Mode` / `--local` | CLI / env (dev only) | `Local` = unauthenticated loopback HTTP on `Local:Port` (default 5188). Unset means `Entra`; any other value stops startup |

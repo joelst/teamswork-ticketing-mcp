@@ -69,6 +69,7 @@ hits that limit, set `GITHUB_TOKEN` to any GitHub token and the scripts will use
 | `-Version v0.2.0` | `--version v0.2.0` | Install a specific release, or `latest` for the newest |
 | `-InstallDir <dir>` | `--install-dir <dir>` | Install somewhere else |
 | `-SkipSecrets` | `--skip-secrets` | Don't prompt; keep the secrets file as it is (or use environment variables) |
+| `-Region EU` | `--region EU` | Data region of your Ticketing instance: `US` (the default), `EU`, or `AUS`. Saved in the secrets file; leave it out to keep the saved region. Not allowed with `-SkipSecrets` |
 | `-Uninstall` | `--uninstall` | Unregister from the clients and delete the server's files (and the folder, if it is then empty) |
 | `-RemoveSecrets` | `--remove-secrets` | With uninstall, also delete the secrets file |
 
@@ -148,6 +149,29 @@ Optional: `Ticketing:DefaultTimeZoneId` (for example `America/New_York`) if your
 Add it to the secrets file; the install script keeps it when you run it again. The server checks it at startup and
 refuses to start with a zone the machine doesn't know.
 
+Optional: `Ticketing:Region` if your Ticketing instance is hosted outside the US: `EU` or `AUS` (`US` is the
+default). The install script's `-Region` / `--region` option writes it. It picks the vendor's endpoint for that
+region; don't also set `Ticketing:BaseUrl`, or the server stops at startup and asks you to choose one.
+
+### File uploads
+
+`upload_ticket_files` sends files, such as screenshots and logs, from your machine to a ticket. It is off until you
+choose a folder for it, and it can only read files inside that folder:
+
+```json
+{
+  "Ticketing:UploadRoot": "C:\\Users\\you\\TicketUploads"
+}
+```
+
+Put it in the secrets file (or set `Ticketing__UploadRoot`) and restart the client; the tool list then has 21 tools.
+Save or copy the files you want to send into that folder, then ask the agent to upload them by name. The folder
+must exist and must be a dedicated one: the server refuses to start with a drive root, your home folder, or a folder
+that contains the user-secrets file. The tool refuses paths outside the folder, hidden files and folders (names
+starting with `.`), and paths through symbolic links or junctions, so text an agent has read can't make it send
+other files. Up to 10 files per call, 10 MiB in total by default (`Ticketing:MaxUploadBytes`). Uploads are never
+offered by the HTTP transports.
+
 `install.sh` updates the file without a JSON parser, so it only edits the form `dotnet user-secrets` writes: one
 `"key": "value"` setting per line. It stops, without changing anything, if the file looks different, and keeps the
 previous version as `secrets.json.bak`.
@@ -166,7 +190,7 @@ example, replace `<exe>` with the full path to the executable:
 Write the path out in full: not every client expands `~` or environment variables in the command. For the portable
 build, the command is `dotnet` and the arguments are `<folder>/TeamsWork.Ticketing.Mcp.dll --stdio`.
 
-Every client should then list `teamswork-ticketing` with 12 tools. Try "list my five most recent open tickets".
+Every client should then list `teamswork-ticketing` with 20 tools (21 with [file uploads](#file-uploads) on). Try "list my five most recent open tickets".
 
 ### Claude Code
 

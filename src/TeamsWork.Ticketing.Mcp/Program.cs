@@ -67,18 +67,29 @@ static async Task RunStdioAsync(string[] args)
     AddTicketingServices(builder.Services, builder.Configuration, requireServiceAccount: true);
     builder.Services.AddSingleton<IActingUserProvider, ServiceAccountActingUserProvider>();
 
-    builder.Services
+    IMcpServerBuilder mcp = builder.Services
         .AddMcpServer(ConfigureServerOptions)
-        .WithStdioServerTransport()
-        .WithTools<TicketTools>()
-        .WithTools<ActivityTools>()
-        .WithTools<AttachmentTools>()
-        .WithTools<InstanceTools>();
+        .WithStdioServerTransport();
+    AddTools(mcp);
+
+    // File uploads read the local disk, so they are offered only here, and only once a folder has been chosen.
+    bool uploads = !string.IsNullOrWhiteSpace(builder.Configuration[$"{TicketingOptions.SectionName}:{nameof(TicketingOptions.UploadRoot)}"]);
+    if (uploads)
+    {
+        builder.Services.AddSingleton(sp => UploadFolder.Create(
+            sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<TicketingOptions>>().Value, UserSecretsFilePath()));
+        mcp.WithTools<FileUploadTools>();
+    }
 
     IHost host = builder.Build();
     ActingUser actor = await host.Services.GetRequiredService<IActingUserProvider>().GetActingUserAsync(CancellationToken.None);
-    host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup")
-        .LogInformation("stdio transport; ticket changes will be attributed to {Name} <{Email}>.", actor.Name, actor.Email);
+    ILogger startupLog = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
+    startupLog.LogInformation("stdio transport; ticket changes will be attributed to {Name} <{Email}>.", actor.Name, actor.Email);
+    if (uploads)
+    {
+        // Resolved now so a bad folder stops startup with a clear message rather than failing the first upload.
+        startupLog.LogInformation("File uploads are on, from {Folder}.", host.Services.GetRequiredService<UploadFolder>().Root);
+    }
 
     await host.RunAsync();
 }
@@ -124,11 +135,8 @@ static async Task RunHttpAsync(string[] args)
         {
             // Stateless is required by Foundry and removes session-hijack surface (no Mcp-Session-Id to steal).
             o.SessionMode = HttpServerSessionMode.Stateless;
-        })
-        .WithTools<TicketTools>()
-        .WithTools<ActivityTools>()
-        .WithTools<AttachmentTools>()
-        .WithTools<InstanceTools>();
+        });
+    AddTools(mcp);
 
     if (authMode == AuthMode.Entra)
     {
@@ -137,6 +145,10 @@ static async Task RunHttpAsync(string[] args)
 
     WebApplication app = builder.Build();
     app.Use((ctx, next) => RequestLimits.RejectOversizedBodiesAsync(ctx, next, maxRequestBodyBytes));
+    if (!string.IsNullOrWhiteSpace(app.Configuration[$"{TicketingOptions.SectionName}:{nameof(TicketingOptions.UploadRoot)}"]))
+    {
+        app.Logger.LogWarning("Ticketing:UploadRoot is ignored: file uploads are only offered over stdio.");
+    }
 
     if (authMode == AuthMode.Local)
     {
@@ -335,6 +347,15 @@ static EntraOptions ConfigureEntraMode(WebApplicationBuilder builder)
 
 // ---------------------------------------------------------------------------------------------------------------
 
+/// <summary>The tools every transport offers.</summary>
+static void AddTools(IMcpServerBuilder mcp) =>
+    mcp.WithTools<TicketTools>()
+        .WithTools<LookupTools>()
+        .WithTools<WorkloadTools>()
+        .WithTools<ActivityTools>()
+        .WithTools<AttachmentTools>()
+        .WithTools<InstanceTools>();
+
 static void ConfigureServerOptions(ModelContextProtocol.Server.McpServerOptions options)
 {
     string version = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
@@ -350,9 +371,11 @@ static void ConfigureServerOptions(ModelContextProtocol.Server.McpServerOptions 
 
     options.ServerInstructions =
         "Tools for a TeamsWork Ticketing (Ticketing as a Service) help-desk. " +
-        "Tickets are identified by a UUID 'id' (use it for ticketId parameters) and also have a human-readable 'ticketNo'. " +
-        "Start with list_tickets or get_ticket for reads. Before creating or updating tickets with custom fields, assignees, or " +
-        "custom workflow states, call get_instance to discover the IDs; call list_tag_categories for tag IDs. " +
+        "Tickets are identified by a UUID 'id' (use it for ticketId parameters) and also have a human-readable 'ticketNo'; when someone " +
+        "quotes a number, use find_ticket_by_number. For 'my tickets' use list_my_tickets (list_tickets can't filter by person); for " +
+        "SLA problems list_sla_risk; for totals count_tickets; to understand one ticket get_ticket_context. Before create_ticket, call " +
+        "find_similar_tickets to avoid duplicates. People can be given by email or name, tag categories by name, and custom fields by " +
+        "title; get_instance (use 'section') and list_tag_categories list what exists, and custom workflow state IDs. " +
         "Dates in filters are local to the timezone offset (default US Central). 'expectedDate' must be YYYY-MM-DD. " +
         "All writes are attributed to the authenticated caller; tools never accept a user to impersonate. " +
         "The upstream API allows 100 requests per minute, so prefer 'select' and sensible page sizes.";
@@ -396,7 +419,21 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
     services.AddOptions<TicketingOptions>()
         // Bound by hand so a value of the wrong type (Ticketing__MaxPageSize=abc) is reported as a setting to fix.
         .Configure(o => StartupConfigurationException.ReadSetting(() => { section.Bind(o); return o; }, TicketingOptions.SectionName))
+        // A region replaces the built-in US endpoint only; a BaseUrl someone set to something else is reported below.
+        .PostConfigure(o =>
+        {
+            if (o.RegionBaseUrl() is string regional && string.Equals(o.BaseUrl?.TrimEnd('/'), TicketingOptions.DefaultBaseUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                o.BaseUrl = regional;
+            }
+        })
         .ValidateDataAnnotations()
+        .Validate(o => string.IsNullOrWhiteSpace(o.Region) || o.RegionBaseUrl() is not null,
+            $"Ticketing:Region must be one of {string.Join(", ", TicketingOptions.RegionBaseUrls.Keys)}, or left unset for US.")
+        .Validate(o => o.RegionBaseUrl() is not string regional || string.Equals(o.BaseUrl?.TrimEnd('/'), regional, StringComparison.OrdinalIgnoreCase),
+            "Ticketing:Region and Ticketing:BaseUrl name different endpoints. Set only one of them.")
+        .Validate(o => string.IsNullOrWhiteSpace(o.UploadRoot) || Path.IsPathFullyQualified(o.UploadRoot.Trim()),
+            "Ticketing:UploadRoot must be an absolute folder path, or left unset to turn file uploads off.")
         .Validate(o => !string.IsNullOrWhiteSpace(o.ApiKey),
             "Ticketing:ApiKey is not set. Use your Ticketing instance's API key (Ticketing app > Settings > API). " +
             "In Azure it is read from Key Vault (KeyVault:Uri, secret Ticketing--ApiKey).")
@@ -418,6 +455,7 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
     services.AddSingleton(TimeProvider.System);
     services.AddSingleton<TimeZoneOffsetResolver>();
     services.AddSingleton<TicketingRateLimiter>();
+    services.AddSingleton<InstanceCache>();
 
     services.AddHttpClient<TicketingClient>((sp, http) =>
         {

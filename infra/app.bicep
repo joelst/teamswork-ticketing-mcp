@@ -38,7 +38,7 @@ param entraClientId string
 @description('Optional public base URL (custom domain) used in protected-resource metadata. Leave empty to derive from the request.')
 param publicBaseUrl string = ''
 
-@description('Upstream Ticketing API base URL.')
+@description('Upstream Ticketing API base URL: US (default) https://teamswork.azure-api.net/ticketing/v1, EU https://ticketing-apim-eu.azure-api.net/ticketing/v1, AUS https://ticketing-apim-aus.azure-api.net/ticketing/v1.')
 param ticketingBaseUrl string = 'https://teamswork.azure-api.net/ticketing/v1'
 
 @description('IANA time zone used to compute the default timezone offset.')

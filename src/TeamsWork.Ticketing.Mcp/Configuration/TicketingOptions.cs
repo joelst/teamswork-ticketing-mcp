@@ -11,9 +11,26 @@ public sealed class TicketingOptions
 {
     public const string SectionName = "Ticketing";
 
+    /// <summary>The US (global) endpoint, used unless <see cref="Region"/> or <see cref="BaseUrl"/> says otherwise.</summary>
+    public const string DefaultBaseUrl = "https://teamswork.azure-api.net/ticketing/v1";
+
+    /// <summary>The vendor's regional endpoints, keyed by the <see cref="Region"/> names this server accepts.</summary>
+    public static readonly IReadOnlyDictionary<string, string> RegionBaseUrls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["US"] = DefaultBaseUrl,
+        ["EU"] = "https://ticketing-apim-eu.azure-api.net/ticketing/v1",
+        ["AUS"] = "https://ticketing-apim-aus.azure-api.net/ticketing/v1",
+    };
+
     /// <summary>Base URL of the Ticketing REST API (no trailing slash required).</summary>
     [Required]
-    public string BaseUrl { get; set; } = "https://teamswork.azure-api.net/ticketing/v1";
+    public string BaseUrl { get; set; } = DefaultBaseUrl;
+
+    /// <summary>
+    /// Data region of the Ticketing instance: US (the default), EU, or AUS. Picks the matching vendor endpoint, so
+    /// <see cref="BaseUrl"/> only needs setting for an endpoint the vendor adds later.
+    /// </summary>
+    public string? Region { get; set; }
 
     /// <summary>Ticketing instance API key. Sent as the <c>key</c> query parameter on every upstream call.</summary>
     public string? ApiKey { get; set; }
@@ -57,6 +74,34 @@ public sealed class TicketingOptions
     /// </summary>
     [Range(64 * 1024, 256 * 1024 * 1024)]
     public int MaxResponseBytes { get; set; } = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// How long instance settings and tag categories are cached, in seconds. They change rarely, and every lookup of a
+    /// person, tag, or custom field by name reads them. 0 turns the cache off.
+    /// </summary>
+    [Range(0, 86_400)]
+    public int InstanceCacheSeconds { get; set; } = 300;
+
+    /// <summary>
+    /// Most tickets one call to a filtering tool (list_my_tickets, list_sla_risk, count_tickets) reads. The API has no
+    /// filter for assignee, requestor, or SLA state, so those tools page through tickets and filter them here.
+    /// </summary>
+    [Range(1, 10_000)]
+    public int MaxScanTickets { get; set; } = 1000;
+
+    /// <summary>
+    /// Folder that upload_ticket_files may read from (stdio only). The tool is offered only when this is set, and it
+    /// refuses any file outside it, so an agent steered by text it has read can't send arbitrary local files.
+    /// </summary>
+    public string? UploadRoot { get; set; }
+
+    /// <summary>Largest total size of the files in one upload_ticket_files call, in bytes.</summary>
+    [Range(1, 100 * 1024 * 1024)]
+    public int MaxUploadBytes { get; set; } = 10 * 1024 * 1024;
+
+    /// <summary>The endpoint <see cref="Region"/> names, or null when it is unset or not a known region.</summary>
+    public string? RegionBaseUrl() =>
+        string.IsNullOrWhiteSpace(Region) ? null : RegionBaseUrls.GetValueOrDefault(Region.Trim());
 }
 
 /// <summary>A fixed identity used to attribute writes when no user identity is available.</summary>
