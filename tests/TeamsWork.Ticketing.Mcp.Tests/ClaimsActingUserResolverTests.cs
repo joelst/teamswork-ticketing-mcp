@@ -65,7 +65,7 @@ public sealed class ClaimsActingUserResolverTests
     {
         ClaimsPrincipal p = Principal(("roles", "Ticketing.ReadWrite"));
 
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() => ClaimsActingUserResolver.Resolve(p, null));
+        ActingUserException ex = Assert.Throws<ActingUserException>(() => ClaimsActingUserResolver.Resolve(p, null));
 
         Assert.Contains("ServiceAccount", ex.Message, StringComparison.Ordinal);
     }
@@ -75,7 +75,7 @@ public sealed class ClaimsActingUserResolverTests
     {
         ClaimsPrincipal p = Principal(("scp", "access_as_user"), ("oid", "u-4"), ("name", "No Email"));
 
-        Assert.Throws<InvalidOperationException>(() => ClaimsActingUserResolver.Resolve(p, ServiceAccount));
+        Assert.Throws<ActingUserException>(() => ClaimsActingUserResolver.Resolve(p, ServiceAccount));
     }
 
     [Fact]
@@ -83,7 +83,7 @@ public sealed class ClaimsActingUserResolverTests
     {
         var p = new ClaimsPrincipal(new ClaimsIdentity());
 
-        Assert.Throws<InvalidOperationException>(() => ClaimsActingUserResolver.Resolve(p, ServiceAccount));
+        Assert.Throws<ActingUserException>(() => ClaimsActingUserResolver.Resolve(p, ServiceAccount));
     }
 
     [Fact]

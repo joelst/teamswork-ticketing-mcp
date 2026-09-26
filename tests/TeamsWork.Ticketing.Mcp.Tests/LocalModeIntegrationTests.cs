@@ -1,7 +1,9 @@
 using System.Net;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using TeamsWork.Ticketing.Mcp.Configuration;
@@ -16,11 +18,19 @@ public sealed class LocalModeFactory : WebApplicationFactory<Program>
     /// <summary>Extra settings, applied last.</summary>
     public Dictionary<string, string> Settings { get; init; } = [];
 
+    /// <summary>Service replacements, applied after the app's own registrations.</summary>
+    public Action<IServiceCollection>? ReplaceServices { get; init; }
+
     /// <summary>A JSON settings file, added last, for values only JSON can express (such as null).</summary>
     public string? Json { get; init; }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        if (ReplaceServices is not null)
+        {
+            builder.ConfigureTestServices(ReplaceServices);
+        }
+
         if (Json is not null)
         {
             builder.ConfigureAppConfiguration(c => c.AddJsonStream(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(Json))));
@@ -137,6 +147,36 @@ public sealed class LocalModeIntegrationTests
 
     private static StringContent ToolsList() =>
         new("""{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}""", System.Text.Encoding.UTF8, "application/json");
+
+    [Fact]
+    public async Task Unexpected_failures_reach_the_client_without_their_details()
+    {
+        // An exception no tool code anticipates, carrying something that must not leak.
+        await using var factory = new LocalModeFactory
+        {
+            ReplaceServices = s => s.AddHttpClient<TeamsWork.Ticketing.Mcp.Ticketing.TicketingClient>()
+                .ConfigurePrimaryHttpMessageHandler(() => new ThrowingHandler(new InvalidOperationException("secret-detail-7f3a"))),
+        };
+        HttpClient http = factory.CreateClient();
+        var transport = new HttpClientTransport(
+            new HttpClientTransportOptions { Endpoint = new Uri(http.BaseAddress!, "mcp"), Name = "local" },
+            http, loggerFactory: null, ownsHttpClient: true);
+        await using McpClient client = await McpClient.CreateAsync(transport, cancellationToken: Ct);
+
+        CallToolResult result = await client.CallToolAsync("list_tag_categories", cancellationToken: Ct);
+
+        Assert.True(result.IsError);
+        string text = string.Join(' ', result.Content.OfType<TextContentBlock>().Select(c => c.Text));
+        Assert.NotEmpty(text);
+        Assert.DoesNotContain("secret-detail-7f3a", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("InvalidOperationException", text, StringComparison.Ordinal);
+    }
+
+    private sealed class ThrowingHandler(Exception exception) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromException<HttpResponseMessage>(exception);
+    }
 
     [Fact]
     public async Task Local_mode_refuses_to_start_without_a_service_account()

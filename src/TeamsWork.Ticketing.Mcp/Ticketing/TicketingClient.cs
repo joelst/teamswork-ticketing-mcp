@@ -217,6 +217,13 @@ public sealed class TicketingClient
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             if (!string.IsNullOrEmpty(continuationToken))
             {
+                // TryAddWithoutValidation writes the value to the wire as is, so a CR/LF would inject headers into a
+                // request that carries the API key. Tool validation rejects such tokens too; this guards every caller.
+                if (!IsSafeHeaderValue(continuationToken))
+                {
+                    throw new TicketingApiException("The continuation token contains characters that can't be sent. Pass back the value the API returned.");
+                }
+
                 request.Headers.TryAddWithoutValidation("continuationToken", continuationToken);
             }
 
@@ -225,11 +232,16 @@ public sealed class TicketingClient
                 request.Content = JsonContent.Create(body, body.GetType(), options: JsonOptions);
             }
 
+            // HttpClient.Timeout ends once the headers arrive (ResponseHeadersRead), so this also bounds the body read:
+            // an upstream that sends headers and then stalls would otherwise hold the request open indefinitely.
+            using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            attemptTimeout.CancelAfter(TimeSpan.FromSeconds(_options.RequestTimeoutSeconds));
+
             long started = _timeProvider.GetTimestamp();
             HttpResponseMessage response;
             try
             {
-                response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attemptTimeout.Token);
             }
             catch (HttpRequestException ex) when (attempt < MaxAttempts && (idempotent || IsPreSendFailure(ex)))
             {
@@ -258,7 +270,15 @@ public sealed class TicketingClient
                     continue;
                 }
 
-                string payload = await response.Content.ReadAsStringAsync(cancellationToken);
+                string payload;
+                try
+                {
+                    payload = await ReadBodyAsync(response.Content, _options.MaxResponseBytes, attemptTimeout.Token);
+                }
+                catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new TicketingApiException($"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
+                }
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -294,6 +314,74 @@ public sealed class TicketingClient
                 return result;
             }
         }
+    }
+
+    /// <summary>True when every character is visible ASCII, the only characters an HTTP header value may safely hold.</summary>
+    internal static bool IsSafeHeaderValue(string value)
+    {
+        foreach (char c in value)
+        {
+            if (c is < '!' or > '~')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Reads the body as text, refusing to buffer more than <paramref name="maxBytes"/>. Decodes as
+    /// ReadAsStringAsync did: the declared charset (UTF-8 when absent or unknown), and a byte-order mark if there is
+    /// one, which is also stripped, since JSON parsing fails on a leading U+FEFF.
+    /// </summary>
+    private static async Task<string> ReadBodyAsync(HttpContent content, int maxBytes, CancellationToken cancellationToken)
+    {
+        if (content.Headers.ContentLength > maxBytes)
+        {
+            throw TooLarge(maxBytes);
+        }
+
+        await using Stream stream = await content.ReadAsStreamAsync(cancellationToken);
+        using var buffer = new MemoryStream();
+        byte[] chunk = new byte[81920];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
+        {
+            if (buffer.Length + read > maxBytes)
+            {
+                throw TooLarge(maxBytes);
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
+
+        buffer.Position = 0;
+        using var reader = new StreamReader(buffer, DeclaredEncoding(content.Headers.ContentType?.CharSet), detectEncodingFromByteOrderMarks: true);
+        return await reader.ReadToEndAsync(cancellationToken);
+    }
+
+    private static Encoding DeclaredEncoding(string? charset)
+    {
+        if (!string.IsNullOrWhiteSpace(charset))
+        {
+            try
+            {
+                return Encoding.GetEncoding(charset.Trim('"', ' '));
+            }
+            catch (ArgumentException)
+            {
+                // An unknown charset name; fall back to UTF-8, the JSON default.
+            }
+        }
+
+        return Encoding.UTF8;
+    }
+
+    private static TicketingApiException TooLarge(int maxBytes)
+    {
+        string limit = maxBytes >= 1024 * 1024 ? $"{maxBytes / (1024.0 * 1024):0.#} MB" : $"{maxBytes / 1024.0:0.#} KB";
+        return new($"The Ticketing API response was too large (over {limit}). Request fewer items or use 'select' to return fewer fields.");
     }
 
     /// <summary>

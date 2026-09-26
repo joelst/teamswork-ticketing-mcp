@@ -39,7 +39,7 @@ public sealed class TimeZoneOffsetResolver
         {
             if (o is < -12 or > 14)
             {
-                throw new ArgumentOutOfRangeException(nameof(explicitOffsetHours), "timezoneOffset must be between -12 and 14 hours.");
+                throw new TicketingApiException("timezoneOffset must be between -12 and 14 hours.");
             }
 
             return o;

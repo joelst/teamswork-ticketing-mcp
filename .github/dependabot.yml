@@ -1,0 +1,21 @@
+# Keeps dependencies current. NuGet updates are grouped so one PR covers a coordinated bump (the Microsoft.* and
+# ModelContextProtocol packages move together); the build's NuGetAudit still fails on any known vulnerability in
+# between. Actions are pinned to commit SHAs, and Dependabot updates the SHA and the version comment together.
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      nuget:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

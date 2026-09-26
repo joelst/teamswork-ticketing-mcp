@@ -34,7 +34,7 @@ public sealed class ActivityTools
         {
             Guid id = ToolValidation.RequireGuid(ticketId, "ticketId");
             int pageSize = ToolValidation.ResolvePageSize(limit, 25, 100);
-            string? token = ToolValidation.OptionalText(continuationToken, "continuationToken", 4000);
+            string? token = ToolValidation.OptionalToken(continuationToken, "continuationToken");
 
             ListResponse<Activity> r = await _client.ListActivitiesAsync(id, includeHtml, pageSize, token, cancellationToken);
             IReadOnlyList<Activity> items = r.Items ?? [];
@@ -50,7 +50,7 @@ public sealed class ActivityTools
     public Task<string> AddTicketComment(
         [Description("Ticket UUID.")] string ticketId,
         [Description("Plain-text comment. HTML characters are escaped.")] string? comment = null,
-        [Description("Sanitised HTML comment. Ignored when 'comment' is also supplied.")] string? commentHtml = null,
+        [Description("HTML comment (formatting, lists, tables, links). Ignored when 'comment' is also supplied. Script, forms, images, and inline styles are removed; use add_ticket_link_attachments for screenshots.")] string? commentHtml = null,
         [Description("true to make the comment visible only to internal agents.")] bool isPrivate = false,
         [Description("Return comment_HTML in the created activity.")] bool includeHtml = false,
         CancellationToken cancellationToken = default)
@@ -59,7 +59,7 @@ public sealed class ActivityTools
         {
             Guid id = ToolValidation.RequireGuid(ticketId, "ticketId");
             string? text = ToolValidation.OptionalText(comment, "comment");
-            string? html = text is null ? ToolValidation.OptionalText(commentHtml, "commentHtml") : null;
+            string? html = text is null ? ToolValidation.OptionalHtml(commentHtml, "commentHtml") : null;
             if (text is null && html is null)
             {
                 throw new McpException("Provide 'comment' (plain text) or 'commentHtml'.");

@@ -21,8 +21,10 @@ internal static class ToolJson
 }
 
 /// <summary>
-/// Runs a tool body and converts internal failures into <see cref="McpException"/>s, whose messages are the only
-/// ones the SDK forwards to the client. Everything else would surface as a generic error.
+/// Runs a tool body and converts the failures whose messages are written for the agent into
+/// <see cref="McpException"/>s, the only exceptions whose message the SDK forwards to the client. Anything else is
+/// unexpected: it propagates, and the SDK logs it and returns a generic error, so internal details (type names,
+/// configuration, library messages) never reach the client.
 /// </summary>
 internal static class ToolRunner
 {
@@ -41,11 +43,7 @@ internal static class ToolRunner
         {
             throw new McpException(ex.Message, ex);
         }
-        catch (InvalidOperationException ex)
-        {
-            throw new McpException(ex.Message, ex);
-        }
-        catch (ArgumentException ex)
+        catch (ActingUserException ex)
         {
             throw new McpException(ex.Message, ex);
         }
