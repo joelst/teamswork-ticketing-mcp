@@ -64,7 +64,7 @@ public sealed class AttachmentTools
 
             var attachmentLinks = links.Select((l, i) => l.ToAttachmentLink(i)).ToList();
             string? text = ToolValidation.OptionalText(comment, "comment");
-            string? html = text is null ? ToolValidation.OptionalText(commentHtml, "commentHtml") : null;
+            string? html = text is null ? ToolValidation.OptionalHtml(commentHtml, "commentHtml") : null;
             text ??= html is null ? "Links attached." : null;
 
             ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);

@@ -11,6 +11,8 @@
     <PackageVersion Include="Microsoft.Identity.Web" Version="4.15.0" />
     <PackageVersion Include="Azure.Identity" Version="1.21.0" />
     <PackageVersion Include="Azure.Extensions.AspNetCore.Configuration.Secrets" Version="1.5.2" />
+    <!-- Security: sanitises HTML that agents write into tickets and comments -->
+    <PackageVersion Include="HtmlSanitizer" Version="9.2.1039" />
     <!-- Tests -->
     <PackageVersion Include="xunit.v3" Version="4.0.1" />
     <PackageVersion Include="Microsoft.Testing.Extensions.TrxReport" Version="2.4.0" />

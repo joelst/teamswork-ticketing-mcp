@@ -50,6 +50,13 @@ public sealed class TicketingOptions
     /// <summary>HTTP timeout for a single upstream request.</summary>
     [Range(1, 300)]
     public int RequestTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Largest upstream response the server will read, in bytes. A full page of tickets with HTML descriptions is well
+    /// under 1 MB; the limit stops a runaway response from exhausting the container's memory.
+    /// </summary>
+    [Range(64 * 1024, 256 * 1024 * 1024)]
+    public int MaxResponseBytes { get; set; } = 8 * 1024 * 1024;
 }
 
 /// <summary>A fixed identity used to attribute writes when no user identity is available.</summary>

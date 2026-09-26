@@ -75,7 +75,7 @@ public sealed class TicketTools
                 LastUpdateBefore = ToolValidation.OptionalDateTime(lastUpdateBefore, "lastUpdateBefore"),
                 Limit = ToolValidation.ResolvePageSize(limit, _options.DefaultPageSize, _options.MaxPageSize),
                 Offset = ToolValidation.OptionalOffset(offset),
-                ContinuationToken = ToolValidation.OptionalText(continuationToken, "continuationToken", 4000),
+                ContinuationToken = ToolValidation.OptionalToken(continuationToken, "continuationToken"),
                 IncludeHtml = includeHtml,
                 TimezoneOffset = timezoneOffset,
             };
@@ -128,12 +128,12 @@ public sealed class TicketTools
             {
                 Title = ToolValidation.RequireText(title, "title", 500),
                 Description = ToolValidation.OptionalText(description, "description"),
-                DescriptionHtml = description is null ? ToolValidation.OptionalText(descriptionHtml, "descriptionHtml") : null,
+                DescriptionHtml = description is null ? ToolValidation.OptionalHtml(descriptionHtml, "descriptionHtml") : null,
                 Requestor = requestor?.ToTicketUser("requestor") ?? actor.ToTicketUser(),
                 Assignee = assignee?.ToTicketUser("assignee"),
                 Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
                 ExpectedDate = ToolValidation.OptionalDateOnly(expectedDate, "expectedDate"),
-                Tags = tags?.Select((t, i) => t.ToTicketTag(i)).ToList(),
+                Tags = ValidateTags(tags),
                 CustomFields = ValidateCustomFields(customFields),
             };
 
@@ -170,12 +170,12 @@ public sealed class TicketTools
             {
                 Title = ToolValidation.OptionalText(title, "title", 500),
                 Description = ToolValidation.OptionalText(description, "description"),
-                DescriptionHtml = description is null ? ToolValidation.OptionalText(descriptionHtml, "descriptionHtml") : null,
+                DescriptionHtml = description is null ? ToolValidation.OptionalHtml(descriptionHtml, "descriptionHtml") : null,
                 Requestor = requestor?.ToTicketUser("requestor"),
                 Assignee = assignee?.ToTicketUser("assignee"),
                 Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
                 ExpectedDate = ToolValidation.OptionalDateOnly(expectedDate, "expectedDate"),
-                Tags = tags?.Select((t, i) => t.ToTicketTag(i)).ToList(),
+                Tags = ValidateTags(tags),
                 CustomFields = ValidateCustomFields(customFields),
             };
 
@@ -216,12 +216,24 @@ public sealed class TicketTools
         });
     }
 
+    // Far more than a ticket form has; they only bound the size of one request.
+    private const int MaxTags = 50;
+    private const int MaxCustomFields = 100;
+
+    private static List<TicketTag>? ValidateTags(IReadOnlyList<TagRef>? tags)
+    {
+        ToolValidation.MaxCount(tags, "tags", MaxTags);
+        return tags?.Select((t, i) => t.ToTicketTag(i)).ToList();
+    }
+
     private static JsonElement? ValidateCustomFields(Dictionary<string, JsonElement>? customFields)
     {
         if (customFields is null || customFields.Count == 0)
         {
             return null;
         }
+
+        ToolValidation.MaxCount(customFields, "customFields", MaxCustomFields);
 
         foreach (string key in customFields.Keys)
         {

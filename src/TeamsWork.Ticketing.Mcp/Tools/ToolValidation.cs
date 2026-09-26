@@ -161,6 +161,54 @@ internal static class ToolValidation
         return string.Join(',', fields);
     }
 
+    /// <summary>
+    /// Validates an opaque paging token. It is sent upstream as an HTTP header value, and the .NET HTTP stack writes
+    /// a value added without validation to the wire as is, so a CR/LF would start a new header (or request). Only
+    /// visible ASCII is allowed, which covers the base64 and URL-safe forms these tokens take.
+    /// </summary>
+    public static string? OptionalToken(string? value, string paramName, int maxLength = 4000)
+    {
+        string? token = OptionalText(value, paramName, maxLength);
+        if (token is not null && !Ticketing.TicketingClient.IsSafeHeaderValue(token))
+        {
+            throw new McpException($"'{paramName}' is not a token this server issued. Pass back the continuationToken value unchanged.");
+        }
+
+        return token;
+    }
+
+    /// <summary>
+    /// Sanitises HTML the agent wants stored in a ticket or comment. The help desk renders it for staff, and an agent
+    /// can be steered by text it has read (prompt injection), so script, event handlers, frames, and javascript: URLs
+    /// are removed here rather than trusting the vendor to do it.
+    /// </summary>
+    public static string? OptionalHtml(string? value, string paramName, int maxLength = 20_000)
+    {
+        string? html = OptionalText(value, paramName, maxLength);
+        if (html is null)
+        {
+            return null;
+        }
+
+        string clean = HtmlSanitizerInstance.Value.Sanitize(html).Trim();
+        return clean.Length > 0
+            ? clean
+            : throw new McpException($"'{paramName}' has no content left after removing unsafe HTML (scripts, event handlers, frames).");
+    }
+
+    // HtmlSanitizer's defaults: a safe tag/attribute allowlist, and only http, https and relative URLs. Sanitize is
+    // thread-safe on a shared instance as long as its settings aren't changed, and these never are.
+    private static readonly Lazy<Ganss.Xss.HtmlSanitizer> HtmlSanitizerInstance = new(() => new Ganss.Xss.HtmlSanitizer());
+
+    /// <summary>Rejects lists longer than <paramref name="max"/>, so one call can't build an arbitrarily large request.</summary>
+    public static void MaxCount<T>(IReadOnlyCollection<T>? items, string paramName, int max)
+    {
+        if (items is not null && items.Count > max)
+        {
+            throw new McpException($"'{paramName}' can have at most {max} entries.");
+        }
+    }
+
     public static Uri RequireHttpUrl(string? value, string paramName)
     {
         if (!Uri.TryCreate(value?.Trim(), UriKind.Absolute, out Uri? uri) ||

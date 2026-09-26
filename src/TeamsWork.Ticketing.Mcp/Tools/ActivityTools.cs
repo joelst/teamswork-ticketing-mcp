@@ -34,7 +34,7 @@ public sealed class ActivityTools
         {
             Guid id = ToolValidation.RequireGuid(ticketId, "ticketId");
             int pageSize = ToolValidation.ResolvePageSize(limit, 25, 100);
-            string? token = ToolValidation.OptionalText(continuationToken, "continuationToken", 4000);
+            string? token = ToolValidation.OptionalToken(continuationToken, "continuationToken");
 
             ListResponse<Activity> r = await _client.ListActivitiesAsync(id, includeHtml, pageSize, token, cancellationToken);
             IReadOnlyList<Activity> items = r.Items ?? [];
@@ -59,7 +59,7 @@ public sealed class ActivityTools
         {
             Guid id = ToolValidation.RequireGuid(ticketId, "ticketId");
             string? text = ToolValidation.OptionalText(comment, "comment");
-            string? html = text is null ? ToolValidation.OptionalText(commentHtml, "commentHtml") : null;
+            string? html = text is null ? ToolValidation.OptionalHtml(commentHtml, "commentHtml") : null;
             if (text is null && html is null)
             {
                 throw new McpException("Provide 'comment' (plain text) or 'commentHtml'.");

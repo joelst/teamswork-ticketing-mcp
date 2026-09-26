@@ -134,7 +134,7 @@ You need the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) an
 ```powershell
 git clone https://github.com/joelst/teamswork-ticketing-mcp.git
 cd teamswork-ticketing-mcp
-dotnet test                                                    # optional: 59 tests, no network needed
+dotnet test                                                    # optional: no network needed
 dotnet publish src/TeamsWork.Ticketing.Mcp -c Release -o ./publish
 ```
 
@@ -247,4 +247,7 @@ Estimated running cost: Container Apps consumption with scale-to-zero (mostly wi
 | `Auth:Mode` / `--local` | CLI / env (dev only) | `Local` = unauthenticated loopback HTTP on `Local:Port` (default 5188). Unset means `Entra`; any other value stops startup |
 | `Entra:TenantId`, `Entra:ClientId` | env | Server app registration (Entra HTTP mode) |
 | `Entra:PublicBaseUrl` | env | Optional custom domain for protected-resource metadata |
+| `Mcp:RequestsPerMinutePerCaller` | env | Requests one caller (token tenant and object ID) may make per minute, default 60; `0` turns it off (Entra mode) |
+| `Mcp:MaxRequestBodyBytes` | env | Largest request body accepted, default 1 MiB |
+| `Ticketing:MaxResponseBytes` | env | Largest upstream response read, default 8 MiB |
 | `KeyVault:Uri` | env (local only) | Load `Ticketing--ApiKey` from Key Vault with `DefaultAzureCredential` |

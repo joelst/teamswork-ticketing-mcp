@@ -69,13 +69,13 @@ public static class ClaimsActingUserResolver
 
     /// <summary>
     /// Resolves the acting user. Delegated tokens yield the signed-in user; app-only tokens yield the configured
-    /// service account. Throws <see cref="InvalidOperationException"/> when neither is possible.
+    /// service account. Throws <see cref="ActingUserException"/> when neither is possible.
     /// </summary>
     public static ActingUser Resolve(ClaimsPrincipal principal, ServiceAccountOptions? serviceAccount)
     {
         if (principal.Identity?.IsAuthenticated != true)
         {
-            throw new InvalidOperationException("The request is not authenticated.");
+            throw new ActingUserException("The request is not authenticated.");
         }
 
         if (IsDelegatedToken(principal))
@@ -86,7 +86,7 @@ public static class ClaimsActingUserResolver
 
             if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(name))
             {
-                throw new InvalidOperationException(
+                throw new ActingUserException(
                     "The access token does not carry the user's object ID, name, and email. Ensure the server app registration " +
                     "requests the 'profile' and 'email' optional claims, or that the client requests the 'openid profile email' scopes.");
             }
@@ -99,7 +99,7 @@ public static class ClaimsActingUserResolver
             return new ActingUser(serviceAccount.Id!, serviceAccount.Name!, serviceAccount.Email!, ActingUserSource.ServiceAccount);
         }
 
-        throw new InvalidOperationException(
+        throw new ActingUserException(
             "The caller is an application (no user identity) and no Ticketing:ServiceAccount is configured, so ticket " +
             "changes cannot be attributed. Configure a service account or call with a user (delegated) token.");
     }

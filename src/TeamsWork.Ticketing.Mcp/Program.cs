@@ -88,6 +88,10 @@ static async Task RunHttpAsync(string[] args)
     WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
     AuthMode authMode = AuthModeResolver.Resolve(builder.Configuration, args);
 
+    // Kestrel's default body limit is about 30 MB; a tool call needs a few kilobytes.
+    int maxRequestBodyBytes = RequestLimits.MaxRequestBodyBytes(builder.Configuration);
+    builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = maxRequestBodyBytes);
+
     if (authMode == AuthMode.Local)
     {
         UserSecretsConfiguration.Add(builder.Configuration, Assembly.GetExecutingAssembly());
@@ -108,6 +112,8 @@ static async Task RunHttpAsync(string[] args)
     else
     {
         entra = ConfigureEntraMode(builder);
+        // Local mode has one user, so fairness between callers only matters here.
+        RequestLimits.AddPerCallerRateLimiting(builder.Services, RequestLimits.RequestsPerMinutePerCaller(builder.Configuration));
     }
 
     // --- MCP server --------------------------------------------------------------------------------------------
@@ -129,6 +135,7 @@ static async Task RunHttpAsync(string[] args)
     }
 
     WebApplication app = builder.Build();
+    app.Use((ctx, next) => RequestLimits.RejectOversizedBodiesAsync(ctx, next, maxRequestBodyBytes));
 
     if (authMode == AuthMode.Local)
     {
@@ -146,8 +153,10 @@ static async Task RunHttpAsync(string[] args)
         app.UseForwardedHeaders();
         app.UseAuthentication();
         app.UseAuthorization();
+        // After authorization, so the quota is charged to the validated caller and anonymous requests never get here.
+        app.UseRateLimiter();
         app.MapHealthChecks("/healthz").AllowAnonymous();
-        app.MapMcp("/mcp").RequireAuthorization("McpCaller");
+        app.MapMcp("/mcp").RequireAuthorization("McpCaller").RequireRateLimiting(RequestLimits.PerCallerPolicy);
         app.Logger.LogInformation("Entra authentication enabled for tenant {TenantId}, audience {Audience}.", entra.TenantId, entra.ApplicationIdUri);
     }
 
@@ -239,6 +248,14 @@ static bool IsLocalOrigin(string origin, int port) =>
 static EntraOptions ConfigureEntraMode(WebApplicationBuilder builder)
 {
     EntraOptions entra = builder.Configuration.GetSection(EntraOptions.SectionName).Get<EntraOptions>() ?? new EntraOptions();
+    // A multi-tenant authority would make the issuer check accept tokens from any Entra tenant; only the audience
+    // would then stand between this server and every other organization's users.
+    if (entra.TenantId?.Trim().ToLowerInvariant() is "common" or "organizations" or "consumers")
+    {
+        throw new StartupConfigurationException(
+            $"Entra:TenantId must be your directory (tenant) ID or a verified domain. '{entra.TenantId}' accepts tokens from any tenant.");
+    }
+
     if (!entra.IsConfigured)
     {
         throw new StartupConfigurationException(
@@ -262,10 +279,13 @@ static EntraOptions ConfigureEntraMode(WebApplicationBuilder builder)
     builder.Services.AddHttpContextAccessor();
     builder.Services.AddScoped<IActingUserProvider, HttpActingUserProvider>();
 
-    // Container Apps ingress terminates TLS; honour its forwarded headers so scheme/host are the public ones.
+    // Container Apps ingress terminates TLS; honour its forwarded scheme so the resource metadata says https. The
+    // ingress passes the public Host through unchanged, so X-Forwarded-Host isn't needed, and it must not be
+    // honoured: with no known proxies to restrict it to, any client could set it and choose the resource URL this
+    // server advertises (unless Entra:PublicBaseUrl is set).
     builder.Services.Configure<ForwardedHeadersOptions>(o =>
     {
-        o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost;
+        o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
         o.KnownIPNetworks.Clear();
         o.KnownProxies.Clear();
     });

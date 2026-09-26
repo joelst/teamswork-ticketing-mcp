@@ -17,7 +17,7 @@ public sealed class ServiceAccountActingUserProvider : IActingUserProvider
         ServiceAccountOptions? sa = options.Value.ServiceAccount;
         if (sa?.IsConfigured != true)
         {
-            throw new InvalidOperationException(
+            throw new ActingUserException(
                 "Ticketing:ServiceAccount:Id, :Name and :Email are required when running without Entra authentication. " +
                 "They identify who ticket changes are attributed to.");
         }
