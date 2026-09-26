@@ -39,3 +39,139 @@ jobs:
       - run: dotnet restore
       - run: dotnet build -c Release --no-restore -p:ContinuousIntegrationBuild=true
       - run: dotnet test -c Release --no-build
+
+  # install.sh must run under dash and macOS sh, not only bash; shellcheck knows those portability mistakes.
+  install-scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck install.sh
+        run: shellcheck --shell=sh scripts/install.sh
+      - name: Parse install.ps1
+        shell: pwsh
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/install.ps1", [ref]$null, [ref]$errors)
+          $errors | ForEach-Object { Write-Host "::error file=scripts/install.ps1,line=$($_.Extent.StartLineNumber)::$($_.Message)" }
+          if ($errors) { exit 1 }
+
+  # Runs each installer against the newest published release: download, checksum (and signature on Windows),
+  # install, startup check, a second install over the first (the upgrade path), and uninstall. Client registration
+  # isn't covered: the runners have no MCP clients.
+  installer-e2e:
+    name: installer end to end (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows pwsh, os: windows-latest, shell: pwsh }
+          - { name: windows powershell 5.1, os: windows-latest, shell: powershell }
+          - { name: linux, os: ubuntu-latest, shell: sh }
+          - { name: macos, os: macos-latest, shell: sh }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    # A step's own `shell` can't use the matrix context; the job default can.
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      Ticketing__ApiKey: ci-dummy-key
+      Ticketing__ServiceAccount__Id: ci
+      Ticketing__ServiceAccount__Name: CI
+      Ticketing__ServiceAccount__Email: ci@example.test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install, reinstall, uninstall (PowerShell)
+        if: matrix.shell != 'sh'
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'tw-mcp'
+          foreach ($pass in 1, 2) {
+            $out = & ./scripts/install.ps1 -SkipSecrets -Clients none -InstallDir $dir *>&1 | Out-String
+            Write-Host $out
+            if ($out -notmatch 'Done\.') { throw "Install pass $pass did not finish" }
+          }
+          if (-not (Test-Path "$dir/TeamsWork.Ticketing.Mcp.exe")) { throw 'Executable missing' }
+          & ./scripts/install.ps1 -Uninstall -Clients none -InstallDir $dir
+          if (Test-Path $dir) { throw 'Uninstall left the install folder' }
+
+      - name: Install, reinstall, uninstall (sh)
+        if: matrix.shell == 'sh'
+        run: |
+          dir="$RUNNER_TEMP/tw-mcp"
+          for pass in 1 2; do
+            sh scripts/install.sh --skip-secrets --clients none --install-dir "$dir" </dev/null | tee out.txt
+            grep -q '^Done\.' out.txt || { echo "::error::Install pass $pass did not finish"; exit 1; }
+          done
+          test -x "$dir/TeamsWork.Ticketing.Mcp"
+          sh scripts/install.sh --uninstall --clients none --install-dir "$dir"
+          test ! -e "$dir"
+
+  # The Linux executable must start on systems without ICU (minimal images, some WSL distributions); it still needs
+  # tzdata, and must say so clearly when it's missing. The stock ubuntu image has neither ICU nor tzdata, so the
+  # runner's zoneinfo is mounted in for the first check and left out for the second.
+  linux-without-icu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      INIT: '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish the Linux executable as the release does
+        run: |
+          dotnet publish src/TeamsWork.Ticketing.Mcp -c Release -r linux-x64 --self-contained \
+            -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -o out
+
+      - name: Starts without ICU
+        run: |
+          RESPONSE=$( (printf '%s\n' "$INIT"; sleep 8) | docker run --rm -i \
+            -v "$PWD/out:/app:ro" -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro \
+            -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=ci \
+            -e Ticketing__ServiceAccount__Name=CI -e Ticketing__ServiceAccount__Email=ci@example.test \
+            ubuntu:24.04 sh -c 'if ls /usr/lib/*/libicu* >/dev/null 2>&1; then echo "image has ICU" >&2; exit 1; fi; exec /app/TeamsWork.Ticketing.Mcp --stdio' \
+            | head -n1 )
+          echo "$RESPONSE"
+          echo "$RESPONSE" | grep -q '"serverInfo"'
+
+      - name: Without tzdata, stops at startup and names the setting
+        run: |
+          set +e
+          OUTPUT=$(printf '%s\n' "$INIT" | docker run --rm -i -v "$PWD/out:/app:ro" \
+            -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=ci \
+            -e Ticketing__ServiceAccount__Name=CI -e Ticketing__ServiceAccount__Email=ci@example.test \
+            ubuntu:24.04 sh -c 'if [ -e /usr/share/zoneinfo/America/Chicago ]; then echo "image has tzdata" >&2; exit 1; fi; exec /app/TeamsWork.Ticketing.Mcp --stdio' 2>&1)
+          STATUS=$?
+          echo "$OUTPUT"
+          [ "$STATUS" -ne 0 ] && echo "$OUTPUT" | grep -q 'Ticketing:DefaultTimeZoneId is not a time zone this machine knows'
+
+  # Builds the image the pipeline deploys, from the same base image, and starts it. This is what catches a base image
+  # that lacks something the server checks at startup (tzdata for Ticketing:DefaultTimeZoneId).
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build the container image into the local Docker daemon
+        run: |
+          dotnet publish src/TeamsWork.Ticketing.Mcp/TeamsWork.Ticketing.Mcp.csproj -c Release --os linux --arch x64 \
+            /t:PublishContainer -p:ContainerRepository=teamswork-taas-mcp -p:ContainerImageTags=ci
+
+      - name: Start the image
+        run: |
+          INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+          RESPONSE=$( (printf '%s\n' "$INIT"; sleep 8) | docker run --rm -i \
+            -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=ci \
+            -e Ticketing__ServiceAccount__Name=CI -e Ticketing__ServiceAccount__Email=ci@example.test \
+            teamswork-taas-mcp:ci --stdio | head -n1 )
+          echo "$RESPONSE"
+          echo "$RESPONSE" | grep -q '"serverInfo"'

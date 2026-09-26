@@ -1,5 +1,8 @@
 # TeamsWork Ticketing MCP server
 
+> This is an independent project. It is not affiliated with, endorsed by, or supported by TeamsWork. It is provided
+> as is, without warranty, under the [MIT License](LICENSE); use it at your own risk.
+
 A Model Context Protocol (MCP) server that exposes the TeamsWork **Ticketing as a Service** REST API as tools for
 AI agents. It is built for three consumers:
 
@@ -7,7 +10,7 @@ AI agents. It is built for three consumers:
 | --- | --- | --- |
 | Azure AI Foundry agents | Streamable HTTP (`/mcp`) | Entra ID: project managed identity / agent identity (app role) or OAuth identity passthrough (user) |
 | Copilot Studio agents | Streamable HTTP via custom connector | Entra ID OAuth 2.0 with on-behalf-of (user) |
-| Local clients (Claude Code, VS Code, MCP Inspector) | stdio, or loopback-only HTTP (`--local`) | No auth; the operator must configure the account that writes are attributed to |
+| Local clients (Claude Code, Codex, GitHub Copilot in VS Code / Visual Studio / CLI, MCP Inspector) | stdio, or loopback-only HTTP (`--local`) | No auth; the operator must configure the account that writes are attributed to |
 
 The remote endpoint **always** requires a Microsoft Entra ID bearer token. The unauthenticated modes bind to
 stdio or `127.0.0.1` only, refuse to start without `Ticketing:ServiceAccount`, and are blocked inside Container Apps. The upstream Ticketing API key lives only in
@@ -45,6 +48,7 @@ tests/                           xunit v3 tests incl. an in-process HTTP + Entra
 infra/core.bicep                 Log Analytics, identity, ACR, Key Vault, Container Apps environment
 infra/app.bicep                  The container app (scale-to-zero)
 infra/scripts/                   Entra app registration + Key Vault secret helpers (PowerShell)
+scripts/                         Install scripts for local MCP clients (install.ps1, install.sh)
 pipelines/azure-pipelines.yml    Azure DevOps: build, test, audit, deploy
 docs/                            Setup guides: Entra, Copilot Studio, Foundry, stdio, security
 ```
@@ -53,19 +57,41 @@ The server was built against TeamsWork Ticketing API v1.1.0 (`https://teamswork.
 vendor's OpenAPI document is not redistributed here; obtain it from TeamsWork. If you keep a local copy in
 `docs/openapi/`, it is git-ignored.
 
+## Install for Claude Code, Codex, or GitHub Copilot
+
+The install script downloads the newest release and verifies it (checksum, plus the signature on Windows). It
+installs the executable at a fixed per-user path and asks for your API key and account, which it stores in the
+user-secrets file, never in a client config. Then it registers the server over stdio with every client it finds on your machine: Claude Code, Codex
+CLI, GitHub Copilot CLI, and VS Code (Copilot Chat).
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.ps1 | iex
+```
+
+```sh
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.sh | sh
+```
+
+Restart your client and look for `teamswork-ticketing` with 12 tools. Run the same command again to upgrade.
+[docs/stdio.md](docs/stdio.md) covers the script's options, uninstalling, Visual Studio, and the manual setup for
+each client.
+
 ## Download a release
 
 Pre-built binaries are on the [Releases](https://github.com/joelst/teamswork-ticketing-mcp/releases) page:
 single-file executables for Windows x64, Linux x64, and macOS Apple silicon that need no .NET install, plus a
 portable build that runs anywhere .NET 10 is installed (`dotnet TeamsWork.Ticketing.Mcp.dll --stdio`). The
 Windows executable and the portable build's own DLL are code-signed; the Linux and macOS executables are not, and
-the release notes explain the first-run prompts. Extract the archive, then follow
-[Configure without the .NET SDK](#configure-without-the-net-sdk) and [Connect an MCP client](#4-connect-an-mcp-client).
+the release notes explain the first-run prompts. The install script above does the following steps for you. To do
+them by hand, extract the archive, then follow [Configure without the .NET SDK](#configure-without-the-net-sdk) and
+[Connect an MCP client](#4-connect-an-mcp-client).
 
 ### Configure without the .NET SDK
 
-The server needs the API key and the account ticket changes are recorded under. Without the SDK, provide them in
-one of two ways.
+The server needs the API key and the account that ticket changes are attributed to. Without the SDK, provide them
+in one of two ways.
 
 **Environment variables** (use `__` where the setting name has `:`):
 
@@ -77,7 +103,8 @@ one of two ways.
 | `Ticketing__ServiceAccount__Email` | Your email |
 
 Pass them from the MCP client config (for example `claude mcp add ... --env Ticketing__ServiceAccount__Id=...`).
-Keep the API key out of client config files where you can, because they are stored as plain text.
+Keep the API key out of client config files where you can, because they are stored as plain text. An environment
+variable overrides the same value in the user-secrets file below, as usual for .NET apps.
 
 **A user-secrets file**, which keeps the key out of client configs. Create this file:
 
@@ -116,7 +143,7 @@ dotnet publish src/TeamsWork.Ticketing.Mcp -c Release -o ./publish
 
 ### 2. Configure it
 
-Two things are required: the API key, and the account that ticket changes are recorded under (there is no sign-in
+Two things are required: the API key, and the account that ticket changes are attributed to (there is no sign-in
 locally, so you say who you are). Store them with .NET user secrets, which live in your user profile, outside the
 repo and outside any MCP client config file. The published build finds them automatically.
 
@@ -156,7 +183,7 @@ claude mcp add --transport stdio --scope user teamswork-ticketing -- "<full path
 Restart Claude Code and run `/mcp`. It should list `teamswork-ticketing` with 12 tools. Try
 "list my five most recent open tickets".
 
-**VS Code** (`.vscode/mcp.json`):
+**VS Code / GitHub Copilot Chat** (`.vscode/mcp.json`, or your user `mcp.json` for every workspace):
 
 ```json
 {
@@ -170,6 +197,14 @@ Restart Claude Code and run `/mcp`. It should list `teamswork-ticketing` with 12
 }
 ```
 
+**Codex CLI** and **GitHub Copilot CLI** take the same form as Claude Code. The executable is
+`publish\TeamsWork.Ticketing.Mcp.exe` on Windows and `publish/TeamsWork.Ticketing.Mcp` on macOS/Linux:
+
+```sh
+codex mcp add teamswork-ticketing -- "<full path to the executable>" --stdio
+copilot mcp add teamswork-ticketing -- "<full path to the executable>" --stdio
+```
+
 **Any HTTP MCP client**: start `TeamsWork.Ticketing.Mcp.exe --local` and point the client at
 `http://127.0.0.1:5188/mcp` with no auth. Local mode accepts only loopback connections addressed to
 `127.0.0.1`/`localhost`, so other machines and web pages cannot reach it. Change the port with `Local:Port`.
@@ -177,7 +212,7 @@ Restart Claude Code and run `/mcp`. It should list `teamswork-ticketing` with 12
 Use the published build rather than `dotnet run` for stdio clients: it starts faster and never writes build output
 to stdout, which is the MCP channel.
 
-More client examples are in [docs/stdio.md](docs/stdio.md). For the Entra-protected remote deployment see
+Visual Studio, config-file formats, and troubleshooting are in [docs/stdio.md](docs/stdio.md). For the Entra-protected remote deployment see
 [docs/setup-entra.md](docs/setup-entra.md), [docs/copilot-studio.md](docs/copilot-studio.md),
 [docs/foundry.md](docs/foundry.md), and [docs/security.md](docs/security.md).
 

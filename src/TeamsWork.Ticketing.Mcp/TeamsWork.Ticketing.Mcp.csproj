@@ -9,10 +9,13 @@
 
     <!-- Container image produced by `dotnet publish /t:PublishContainer` (no Dockerfile / Docker daemon required). -->
     <ContainerRepository>teamswork-taas-mcp</ContainerRepository>
-    <ContainerBaseImage>mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled</ContainerBaseImage>
+    <!-- The -extra variant because it includes tzdata, which the server needs to resolve Ticketing:DefaultTimeZoneId
+         (and checks at startup); the plain chiseled image has none. It also includes ICU, which Linux builds don't
+         use (see InvariantGlobalization in Directory.Build.props). -->
+    <ContainerBaseImage>mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled-extra</ContainerBaseImage>
     <ContainerRuntimeIdentifier>linux-x64</ContainerRuntimeIdentifier>
     <ContainerUser>app</ContainerUser>
-    <ContainerFamily>noble-chiseled</ContainerFamily>
+    <ContainerFamily>noble-chiseled-extra</ContainerFamily>
     <EnableSdkContainerSupport>true</EnableSdkContainerSupport>
   </PropertyGroup>
 
