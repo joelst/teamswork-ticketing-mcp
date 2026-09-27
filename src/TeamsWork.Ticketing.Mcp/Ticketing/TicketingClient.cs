@@ -78,14 +78,47 @@ public sealed class TicketingClient
             new("select", q.Select),
             new("createdAfter", q.CreatedAfter),
             new("createdBefore", q.CreatedBefore),
-            new("expectedDateAfter", q.ExpectedDateAfter),
-            new("expectedDateBefore", q.ExpectedDateBefore),
+
             new("lastUpdateAfter", q.LastUpdateAfter),
             new("lastUpdateBefore", q.LastUpdateBefore),
             new("include", q.IncludeHtml ? "description_HTML" : null),
         };
 
+        if (q.HasDateFilter)
+        {
+            // Checked on the live API: a date filter's boundary is D 00:00 UTC plus 'timezone' hours, the opposite way to
+            // the spec ("7 means GMT+7"), with "after" matching values at or after it and "before" at or before it
+            // (checked at -12 to +14). Created and updated times are instants, so the caller's offset is sent negated,
+            // which puts each boundary at the caller's local midnight. Nothing else in a ticket list depends on
+            // 'timezone': responses are identical at any offset.
+            int sent = -_timeZones.Resolve(q.TimezoneOffset);
+            query.Add(new("timezone", sent.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            query.Add(new("expectedDateAfter", ExpectedDateBound(q.ExpectedDateAfter, sent, after: true)));
+            query.Add(new("expectedDateBefore", ExpectedDateBound(q.ExpectedDateBefore, sent, after: false)));
+            return SendAsync<ListResponse<Ticket>>(HttpMethod.Get, "tickets", query, body: null, q.ContinuationToken, includeTimezone: false, null, cancellationToken);
+        }
+
         return SendAsync<ListResponse<Ticket>>(HttpMethod.Get, "tickets", query, body: null, q.ContinuationToken, includeTimezone: true, q.TimezoneOffset, cancellationToken);
+    }
+
+    /// <summary>
+    /// The date to send for an expected-date filter so that it matches calendar dates exactly, whatever 'timezone' the
+    /// request carries. An expected date is a date, stored as its midnight UTC, so no time zone applies to it; but the
+    /// request's one 'timezone' moves the boundary to <c>date 00:00 UTC + sent hours</c>. For "after D" the boundary
+    /// must fall after D-1's midnight and no later than D's; for "before D" (the day itself excluded) at or after
+    /// D-1's midnight and before D's. The day before is sent where the offset would otherwise push the boundary past
+    /// those limits (checked on the live API at -12, -5, 0, +5 and +14).
+    /// </summary>
+    internal static string? ExpectedDateBound(string? date, int sentOffset, bool after)
+    {
+        if (date is null)
+        {
+            return null;
+        }
+
+        DateOnly d = DateOnly.ParseExact(date, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        bool dayBefore = after ? sentOffset > 0 : sentOffset >= 0;
+        return (dayBefore ? d.AddDays(-1) : d).ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
     }
 
     public async Task<Ticket> GetTicketAsync(Guid ticketId, bool includeHtml, int? timezoneOffset, CancellationToken cancellationToken)
