@@ -113,6 +113,35 @@ public sealed class ReviewRound6Tests
         Assert.Equal(1, r.Scanned);
     }
 
+    [Theory]
+    [InlineData("""{"items":[],"continuationToken":"next"}""", true)]  // a token says more may exist
+    [InlineData("""{"items":[],"itemCount":3}""", true)]               // a total not reached
+    [InlineData("""{"items":[]}""", false)]                            // nothing says there's more: an empty instance
+    [InlineData("""{"items":[],"itemCount":0}""", false)]
+    public async Task An_empty_page_is_the_end_only_if_nothing_says_otherwise(string page, bool truncated)
+    {
+        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, page);
+
+        TicketScan.Result<Ticket> r = await TicketScan.RunAsync(TestFactory.Client(handler), new TicketListQuery(), t => t, 100, 10, Ct);
+
+        Assert.Equal(truncated, r.Truncated);
+        Assert.Single(handler.Requests); // and it stops there, rather than paging on from no progress
+    }
+
+    [Fact]
+    public async Task An_empty_page_with_a_token_after_real_pages_is_incomplete()
+    {
+        var handler = new FakeHttpHandler()
+            .Enqueue(HttpStatusCode.OK, """{"items":[{"id":"1"},{"id":"2"}],"continuationToken":"a"}""")
+            .Enqueue(HttpStatusCode.OK, """{"items":[],"continuationToken":"b"}""");
+
+        TicketScan.Result<Ticket> r = await TicketScan.RunAsync(TestFactory.Client(handler), new TicketListQuery(), t => t, 100, 2, Ct);
+
+        Assert.Equal(2, r.Scanned);
+        Assert.True(r.Truncated);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
     // ---- Starting a shared read is atomic -------------------------------------------------------------------------------
 
     [Fact]

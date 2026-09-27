@@ -88,6 +88,30 @@ public sealed class ReviewRound9Tests
     }
 
     [Fact]
+    public async Task A_cached_copy_still_answers_while_a_refresh_is_out()
+    {
+        IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(TestFactory.Options());
+        var handler = new HeldHandler(InstanceJson, hold: 2); // the refresh is the second request
+        var time = new MutableTime(new DateTimeOffset(2026, 1, 15, 12, 0, 0, TimeSpan.Zero));
+        TicketingClient client = ClientFor(handler);
+        var cache = new InstanceCache(opts, new TimeZoneOffsetResolver(opts, time), time);
+
+        Instance first = await cache.GetInstanceAsync(client, -5, refresh: false, Ct);
+        time.Advance(TimeSpan.FromMinutes(1)); // old enough to refresh, still within its time to live
+
+        Task<Instance> refreshing = Task.Run(() => cache.GetInstanceAsync(client, -5, refresh: true, Ct), Ct);
+        await handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        // The refresh is held: an ordinary read answers at once from the copy it has, rather than waiting on it.
+        Assert.Same(first, await cache.GetInstanceAsync(client, -5, refresh: false, Ct).WaitAsync(TimeSpan.FromSeconds(5), Ct));
+
+        handler.Release.SetResult();
+        Instance refreshed = await refreshing;
+        Assert.NotSame(first, refreshed);
+        Assert.Same(refreshed, await cache.GetInstanceAsync(client, -5, refresh: false, Ct)); // from then on, the new copy
+        Assert.Equal(2, handler.Count);
+    }
+
+    [Fact]
     public async Task An_ordinary_tag_read_joins_a_refresh()
     {
         IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(TestFactory.Options());

@@ -76,14 +76,23 @@ internal static class TicketScan
                 }
             }
 
+            // An empty page ends the scan, since paging on from it makes no progress (an API that keeps answering empty
+            // pages with a token would loop). It is the end only if nothing says otherwise: a token, or a total not yet
+            // proven, means more may exist, so the result is marked incomplete rather than complete.
+            if (items.Count == 0)
+            {
+                more = r.ContinuationToken is not null || (total is int all && all > (repeated ? scanned : scanned + withoutId));
+                break;
+            }
+
             // A page that brings no ticket not already seen is no progress: the API is repeating itself (ignoring offset,
             // or a token that loops), so paging further can't reach the rest. Its rows aren't counted as read; the scan
             // stops, incomplete unless what was already proven reaches the total (a repeated last page after a complete
             // scan is the API's quirk, not a sign of more).
-            bool progress = items.Count == 0 || scanned > before || (read == 0 && items.All(x => string.IsNullOrWhiteSpace(x.Id)));
+            bool progress = scanned > before || (read == 0 && items.All(x => string.IsNullOrWhiteSpace(x.Id)));
             if (!progress)
             {
-                more = total is not int all || all > (repeated ? scanned : scanned + withoutId);
+                more = total is not int known || known > (repeated ? scanned : scanned + withoutId);
                 break;
             }
 
@@ -98,7 +107,7 @@ internal static class TicketScan
             // Another page exists if the API says so (a token, or a total not yet proven). Without either, a full page
             // means there may be more; a short page is the end. The API may return fewer than asked for, so page fullness
             // alone never ends a scan that a total says isn't finished.
-            more = items.Count > 0 && (token is not null || (total is int known ? known > proven : items.Count == size));
+            more = token is not null || (total is int reported ? reported > proven : items.Count == size);
         }
         while (more && read < maxTickets);
 
