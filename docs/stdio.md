@@ -22,10 +22,10 @@ The install script is the quickest way to set up one machine. It:
 
 1. Downloads the executable for your platform from the newest release that has one (pre-releases included), and
    checks it against the release's `SHA256SUMS.txt`. The checksum file comes from the same release, so it only
-   proves the download is intact. On Windows the script also requires a valid Authenticode signature, which proves
-   the file was signed with a trusted code-signing certificate and not changed since, and prints the signer. When it
-   replaces an installed copy, it warns if the new copy's publisher (the certificate subject) differs from the old
-   one's, or if the old copy's signature is no longer valid, so an unexpected change of publisher is noticed.
+   proves the download is intact. On Windows the script also requires a valid Authenticode signature made with this
+   project's Artifact Signing identity (checked by the EKU its certificates carry, which stays the same as they are
+   reissued), so a file signed with some other trusted certificate is refused, and prints the signer. Linux and macOS
+   builds are unsigned, so there the checksum is the only check.
 2. Puts the executable at a fixed per-user path, so client configurations keep working across upgrades:
    - Windows: `%LOCALAPPDATA%\Programs\teamswork-ticketing-mcp\TeamsWork.Ticketing.Mcp.exe`
    - macOS/Linux: `~/.local/share/teamswork-ticketing-mcp/TeamsWork.Ticketing.Mcp`

@@ -75,6 +75,11 @@
     $PinnedTag = ''
 
     $Repo = 'joelst/teamswork-ticketing-mcp'
+    # The release workflow signs with Artifact Signing, whose certificates are reissued every few days but all carry this
+    # EKU, unique to the project's validated signing identity. A fork that signs its own releases changes it with $Repo.
+    # If that identity is ever replaced, change this before the first release signed with the new one: the scripts
+    # already published refuse its releases, and say so.
+    $PublisherEku = '1.3.6.1.4.1.311.97.788016176.457502192.216551663.756714265'
     $ServerName = 'teamswork-ticketing'
     $ExeName = 'TeamsWork.Ticketing.Mcp.exe'
     $SecretsPath = Join-Path $env:APPDATA 'Microsoft\UserSecrets\teamswork-taas-mcp\secrets.json'
@@ -140,7 +145,30 @@
             $output = cmd.exe /d /c "code $line" 2>&1
         }
         else {
-            $output = & (Find-Client $Client) @Arguments 2>&1
+            $target = Find-Client $Client
+            if ($target -match '\.(cmd|bat)$') {
+                # npm installs codex and copilot (and claude, installed that way) as .cmd wrappers, which run through
+                # cmd.exe. PowerShell quotes an argument only when it has a space, so cmd would act on an & (legal in a
+                # Windows user name) in the install path and cut it there. Each argument is quoted for cmd instead, and
+                # the command line is passed as written: PowerShell would escape the quotes in a way cmd doesn't read.
+                # cmd expands % even inside quotes, so an argument with one is refused rather than changed, and /v:off
+                # keeps a machine-wide delayed-expansion setting from expanding ! there too. This can't help a shim that
+                # is itself under a path with & (npm's default prefix is in the profile): that shim breaks on its own
+                # path, as it does when the client is run from a prompt.
+                if (@($Arguments) + $target -match '["%]') {
+                    return [pscustomobject]@{ ExitCode = 1; Output = @("Can't pass `"$($Arguments -join ' ')`" through $target safely (it has a % or a quote). Register the server with $Client by hand.") }
+                }
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+                $psi.Arguments = '/d /v:off /s /c ""' + $target + '" ' + (($Arguments | ForEach-Object { '"' + $_ + '"' }) -join ' ') + ' 2>&1"'
+                $psi.UseShellExecute = $false
+                $psi.RedirectStandardOutput = $true
+                $process = [System.Diagnostics.Process]::Start($psi)
+                $text = $process.StandardOutput.ReadToEnd()
+                $process.WaitForExit()
+                return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = @($text.TrimEnd() -split '\r?\n' | Where-Object { $_ -ne '' }) }
+            }
+            $output = & $target @Arguments 2>&1
         }
         [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = @($output | ForEach-Object { "$_" }) }
     }
@@ -278,29 +306,20 @@
             $extracted = Get-ChildItem -Path $temp -Recurse -Filter $ExeName | Select-Object -First 1
             if (-not $extracted) { throw "$ExeName not found in $archiveName." }
 
-            # The checksum file comes from the same release, so it only proves the download is intact. A valid signature
-            # also proves the file was signed with a trusted code-signing certificate and not changed since; the signer
-            # is printed so it can be checked.
+            # The checksum file comes from the same release, so it only proves the download is intact: whoever could
+            # replace the archive could replace it too. The signature is what proves the publisher. It must be valid (a
+            # trusted certificate, and the file unchanged since signing) and made with this project's signing identity,
+            # not merely any trusted one.
             $signature = Get-AuthenticodeSignature $extracted.FullName
             if ($signature.Status -ne 'Valid') {
                 throw "The executable's Authenticode signature is $($signature.Status): $($signature.StatusMessage) Not installing it."
             }
             $signer = $signature.SignerCertificate.Subject
-            Write-Host "    checksum and signature OK ($signer)"
-
-            # An upgrade should come from the same publisher as the copy it replaces. Signing certificates are
-            # reissued often, so the subject is compared, not the thumbprint.
-            if (Test-Path $ExePath) {
-                $previous = Get-AuthenticodeSignature $ExePath
-                if ($previous.Status -eq 'Valid' -and $previous.SignerCertificate.Subject -ne $signer) {
-                    Add-Notice ("The new executable is signed by a different publisher than the one it replaces.`n" +
-                        "    before: $($previous.SignerCertificate.Subject)`n    now:    $signer`n" +
-                        "Check that this change is expected, for example in the release notes at https://github.com/$Repo/releases.")
-                }
-                elseif ($previous.Status -notin 'Valid', 'NotSigned') {
-                    Add-Notice "The installed executable's signature is $($previous.Status), so its publisher couldn't be compared with the new one ($signer)."
-                }
+            if (@($signature.SignerCertificate.EnhancedKeyUsageList | ForEach-Object { $_.ObjectId }) -notcontains $PublisherEku) {
+                throw ("The executable is signed by $signer, but not with this project's signing identity. Not installing it. " +
+                    "Report it at https://github.com/$Repo/issues.")
             }
+            Write-Host "    checksum and signature OK ($signer)"
 
             New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
             # A running executable can't be overwritten or deleted, but it can be renamed. Stage the new file next to

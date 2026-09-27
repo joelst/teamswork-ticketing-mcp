@@ -517,5 +517,7 @@ fi
 if [ -n "$FAILED" ]; then
     die "Installed, but registering with$FAILED failed (see above). Fix the problem, then run the installer again with --clients $(printf '%s' "${FAILED# }" | tr ' ' ',')."
 fi
-echo "Done. Restart your MCP client and look for '$SERVER_NAME' (20 tools, 21 with file uploads on)."
+# File uploads aren't offered on macOS (the server can't verify the file it opens there).
+if [ "$(uname -s)" = Darwin ]; then tools='20 tools'; else tools='20 tools, 21 with file uploads on'; fi
+echo "Done. Restart your MCP client and look for '$SERVER_NAME' ($tools)."
 echo 'Run the installer again to upgrade; client configurations do not need to change.'
