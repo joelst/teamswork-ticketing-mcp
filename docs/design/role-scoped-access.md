@@ -86,30 +86,47 @@ Every refusal names the rule ("only staff can assign tickets"), never other peop
 ## The ticket visibility index
 
 Because the API can't filter by person, the server keeps a small in-memory index of every ticket's visibility
-fields and list columns, refreshed in the background.
+fields and list columns. It is brought up to date when tools are used, not on a timer: an MCP server only acts when
+a client calls it, so an idle server makes no requests (and can scale to zero).
 
 **Row:** id, ticket number, title, status, priority, created and last-updated times, and the `oid`s of requestor,
 assignee, creator, and `isSeeTicket` people. About 300 bytes, so 100,000 tickets is about 30 MB. `Index:MaxTickets`
 (default 200,000) caps it; past the cap requester results say they are incomplete.
 
-**Sync:**
+**Sync, on demand:**
 
-| Step | When | Request |
+| Step | Triggered by | Request |
 | --- | --- | --- |
-| Full build | Startup, and every `Index:FullSyncMinutes` (default 360) to drop deleted tickets | Pages of 1,000 with `select` of the row fields: one request per 1,000 tickets |
-| Incremental | Every `Index:SyncSeconds` (default 60) | `lastUpdateAfter` = last watermark minus a 2-minute overlap |
-| Write-through | After this server creates or changes a ticket | None: the API's response updates the row |
+| Full build | The first call that needs the index after startup, and any call once the last full build is older than `Index:FullSyncHours` (default 6), which drops deleted tickets | Pages of 1,000 with `select` of the row fields: one request per 1,000 tickets |
+| Incremental | Any tool call, once the index is older than `Index:RefreshAfterMinutes` (default 5) | `lastUpdateAfter` = last watermark minus a 2-minute overlap; usually one request |
+| Forced | `refresh: true` on a list, count, or search tool, at most once every 30 s for the whole index (as for the instance cache) | As incremental |
+| Write-through | This server creating or changing a ticket | None: the API's response updates the row |
 
-Sync runs as its own caller on the existing upstream limiter, capped at `Index:MaxRequestsPerMinute` (default 10 of
-the 100), so it can't starve interactive calls. A failed sync keeps the previous index and retries with backoff.
+How a call treats the index's age:
 
-**Freshness:** a ticket filed or reassigned in Teams appears in requester lists within about a minute. Single-ticket
-reads never depend on the index. The instance config and staff list keep their own cache.
+| Index age | Call that reads the index | Any other call |
+| --- | --- | --- |
+| Under `Index:RefreshAfterMinutes` (5) | Answers from it | Nothing |
+| Between that and `Index:MaxAgeMinutes` (15) | Answers from it at once; an incremental sync starts in the background | Starts the same background sync |
+| Over `Index:MaxAgeMinutes`, or never built | Waits for the sync, up to 20 s; if it isn't done, answers from what there is and says the list may be out of date (or, before the first build, that it is still loading) | Starts the sync, doesn't wait |
 
-**Cold start:** the app scales to zero today. Until the first full build finishes, requester list and search calls
-wait up to 20 s and then answer that the list is still loading, rather than returning a partial list as complete.
-Deployments using `RoleScoped` should set `minReplicas = 1`; a persisted snapshot (blob storage) is a later option.
-The single-replica rule already in `app.bicep` means one index per deployment.
+So any tool call keeps the index warm while people are using the server, a list is never based on data more than
+15 minutes old without saying so, and an idle server does nothing. Only one sync runs at a time; calls that arrive
+during one share it. Syncs are charged to the server, not to the caller who triggered them, on the existing upstream
+limiter with their own cap (`Index:MaxRequestsPerMinute`, default 10 of the 100), so they can't starve interactive
+calls or use up one caller's share. A failed sync keeps the previous index; the next call past the threshold tries
+again, no sooner than 30 s later.
+
+**Freshness:** a ticket filed or reassigned in Teams appears in lists at the next sync: within 5 minutes while the
+server is in use, and never silently after more than 15. A requester who has just filed one in Teams can ask with
+`refresh: true`. Single-ticket reads never depend on the index, and the instance config and staff list keep their
+own cache.
+
+**Cold start:** the app scales to zero today, and the index lives in memory, so the first call after a cold start
+builds it: one request per 1,000 tickets, a few seconds for most instances. That call waits up to 20 s and then
+answers that the list is still loading rather than returning a partial list as complete. With on-demand sync,
+scale-to-zero stays viable; `minReplicas = 1` only avoids the rebuild. A persisted snapshot (blob storage) is a later
+option. The single-replica rule already in `app.bicep` means one index per deployment.
 
 **Uses beyond requesters:** `list_my_tickets`, `count_tickets`, and `list_sla_risk` for staff can read the index
 instead of scanning up to `MaxScanTickets` on each call, which removes their truncation and most of their upstream
@@ -122,7 +139,10 @@ cost. The existing scan stays as the fallback while the index is loading.
 | `Access:Mode` | `Open` | `RoleScoped` turns this design on (Entra mode only; startup refuses it with stdio or `--local`) |
 | `Ticketing:ApiKeyIsReadOnly` | `false` | Hides write tools for everyone |
 | `Index:Enabled` | `true` when `RoleScoped` | Staff tools may use it in `Open` mode too |
-| `Index:SyncSeconds`, `Index:FullSyncMinutes`, `Index:MaxRequestsPerMinute`, `Index:MaxTickets` | 60, 360, 10, 200,000 | |
+| `Index:RefreshAfterMinutes` | 5 | Age at which any tool call starts a background incremental sync |
+| `Index:MaxAgeMinutes` | 15 | Age past which a call that reads the index waits for the sync first (up to 20 s) |
+| `Index:FullSyncHours` | 6 | Age at which the next sync is a full rebuild, dropping deleted tickets |
+| `Index:MaxRequestsPerMinute`, `Index:MaxTickets` | 10, 200,000 | The sync's share of the upstream limit; the most tickets indexed |
 
 `app.bicep` gains `accessMode` and `apiKeyIsReadOnly` parameters; `New-EntraAppRegistrations.ps1` adds the
 `Ticketing.Read` app role.
@@ -150,12 +170,15 @@ Each milestone ships behind `Access:Mode = Open` and keeps today's tests green.
 - Tests: a requester can't read, comment on, or move someone else's ticket by ID or number; staff can.
 
 **M3: the index**
-- `TicketIndex` (background service): full build, incremental sync, write-through, caps, cold-start behaviour, its
-  own limiter share.
+- `TicketIndex`: on-demand full build and incremental sync (single flight, triggered by tool calls through a request
+  filter, no timer), the age thresholds, `refresh: true`, write-through, caps, cold-start behaviour, its own limiter
+  share.
 - Requester `list_tickets`, `count_tickets`, `find_similar_tickets` (API search, then filtered to visible tickets),
   `find_ticket_by_number`, `list_my_tickets`.
-- Tests with a fake API: sync picks up changes after the watermark, the overlap doesn't duplicate rows, a full sync
-  drops deleted tickets, a sync failure keeps the old index, loading answers "still loading".
+- Tests with a fake API and clock: sync picks up changes after the watermark, the overlap doesn't duplicate rows, a
+  full sync drops deleted tickets, a sync failure keeps the old index; each age band behaves as in the table (no
+  request under 5 minutes, a background sync between 5 and 15, a wait past 15); concurrent calls share one sync; an
+  idle server makes no requests; loading answers "still loading".
 
 **M4: requester writes**
 - `create_ticket` (requestor forced, no assignee), `add_ticket_comment` (visible, never private),
