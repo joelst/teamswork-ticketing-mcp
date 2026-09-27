@@ -105,27 +105,4 @@ public sealed class ReviewRound9Tests
         Assert.Equal(1, handler.Count);
         Assert.Equal("Hardware", Assert.Single(await ordinary).Text);
     }
-
-    /// <summary>Answers with <paramref name="body"/>, holding the first request until released.</summary>
-    private sealed class HeldHandler(string body) : HttpMessageHandler
-    {
-        private int _count;
-
-        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public int Count => Volatile.Read(ref _count);
-
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            if (Interlocked.Increment(ref _count) == 1)
-            {
-                Entered.SetResult();
-                await Release.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
-            }
-
-            return FakeHttpHandler.Json(HttpStatusCode.OK, body);
-        }
-    }
 }

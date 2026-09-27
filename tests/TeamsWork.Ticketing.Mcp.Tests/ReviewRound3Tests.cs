@@ -144,7 +144,7 @@ public sealed class ReviewRound3Tests
     [Fact]
     public async Task Callers_that_miss_together_share_one_read()
     {
-        var handler = new GatedHandler(gateFirst: true);
+        var handler = new HeldHandler(InstanceJson);
         (TicketingClient client, InstanceCache cache) = Gated(handler);
 
         Task<Instance> first = Task.Run(() => cache.GetInstanceAsync(client, null, refresh: false, Ct), Ct);
@@ -159,7 +159,7 @@ public sealed class ReviewRound3Tests
     [Fact]
     public async Task A_refresh_doesnt_join_a_read_that_started_before_it()
     {
-        var handler = new GatedHandler(gateFirst: true);
+        var handler = new HeldHandler(InstanceJson);
         (TicketingClient client, InstanceCache cache) = Gated(handler);
 
         Task<Instance> ordinary = Task.Run(() => cache.GetInstanceAsync(client, -6, refresh: false, Ct), Ct);
@@ -174,7 +174,7 @@ public sealed class ReviewRound3Tests
     [Fact]
     public async Task A_read_older_than_a_refresh_cant_put_its_copy_back()
     {
-        var handler = new GatedHandler(gateFirst: true);
+        var handler = new HeldHandler(InstanceJson);
         (TicketingClient client, InstanceCache cache) = Gated(handler);
 
         Task<Instance> older = Task.Run(() => cache.GetInstanceAsync(client, -6, refresh: false, Ct), Ct); // held back
@@ -190,7 +190,7 @@ public sealed class ReviewRound3Tests
     [Fact]
     public async Task Cycling_offsets_doesnt_multiply_refreshes()
     {
-        var handler = new GatedHandler(gateFirst: false);
+        var handler = new HeldHandler(InstanceJson, hold: 0);
         (TicketingClient client, InstanceCache cache) = Gated(handler);
 
         await cache.GetInstanceAsync(client, -6, refresh: true, Ct);  // honoured: a read
@@ -204,7 +204,7 @@ public sealed class ReviewRound3Tests
     [Fact]
     public async Task A_new_caller_doesnt_join_a_read_from_before_a_refresh()
     {
-        var handler = new GatedHandler(gateFirst: true);
+        var handler = new HeldHandler(InstanceJson);
         (TicketingClient client, InstanceCache cache) = Gated(handler);
 
         Task<Instance> older = Task.Run(() => cache.GetInstanceAsync(client, -6, refresh: false, Ct), Ct); // held back
@@ -217,34 +217,11 @@ public sealed class ReviewRound3Tests
         await older;
     }
 
-    private static (TicketingClient Client, InstanceCache Cache) Gated(GatedHandler handler)
+    private static (TicketingClient Client, InstanceCache Cache) Gated(HeldHandler handler)
     {
         IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(TestFactory.Options());
         var time = new FixedTimeProvider(new DateTimeOffset(2026, 1, 15, 12, 0, 0, TimeSpan.Zero));
         return (ClientFor(handler), new InstanceCache(opts, new TimeZoneOffsetResolver(opts, time), time));
-    }
-
-    /// <summary>Answers every request with the instance; the first can be held until released, asynchronously.</summary>
-    private sealed class GatedHandler(bool gateFirst) : HttpMessageHandler
-    {
-        private int _count;
-
-        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public int Count => Volatile.Read(ref _count);
-
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            if (Interlocked.Increment(ref _count) == 1 && gateFirst)
-            {
-                Entered.SetResult();
-                await Release.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
-            }
-
-            return FakeHttpHandler.Json(HttpStatusCode.OK, InstanceJson);
-        }
     }
 
     [Theory]

@@ -113,11 +113,13 @@ public sealed class HttpHardeningTests
     }
 
     // A chunked body declares no length, so only the server's MaxRequestBodySize stops it, and the in-process test host
-    // doesn't enforce that. This runs the real Kestrel server.
+    // doesn't enforce that. This runs the real Kestrel server. The limit is the smallest allowed and the body only a
+    // little over it, so the whole request is off the socket when Kestrel refuses it: closing a connection with unread
+    // data resets it, and on Windows the reset can overtake the 413 already sent.
     [Fact]
     public async Task Oversized_chunked_request_bodies_are_refused_by_kestrel()
     {
-        await using var factory = new McpServerFactory();
+        await using var factory = new McpServerFactory { Settings = { ["Mcp:MaxRequestBodyBytes"] = "16384" } };
         factory.UseKestrel(0);
         factory.StartServer();
         // A plain client, so nothing in the factory's handler chain can buffer the body and give it a length.
@@ -125,7 +127,7 @@ public sealed class HttpHardeningTests
         using var http = new HttpClient { BaseAddress = factoryClient.BaseAddress };
         using HttpRequestMessage request = ToolsList(TokenFor("alice-oid"));
         request.Headers.TransferEncodingChunked = true;
-        request.Content = new UnsizedContent("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"pad\":\"", new string('x', 2 * 1024 * 1024), "\"}}");
+        request.Content = new UnsizedContent("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{\"pad\":\"", new string('x', 32 * 1024), "\"}}");
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
         using HttpResponseMessage r = await http.SendAsync(request, Ct);

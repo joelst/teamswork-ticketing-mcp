@@ -139,7 +139,7 @@ public sealed class ReviewRound8Tests
     [Fact]
     public async Task A_request_refused_as_busy_spends_no_rate_permit()
     {
-        var handler = new SlowHandler();
+        var handler = new HeldHandler("""{"items":[]}""");
         (TicketingClient client, TicketingRateLimiter limiter) = ClientWith(handler, o =>
         {
             o.MaxConcurrentUpstreamRequests = 1;
@@ -148,7 +148,9 @@ public sealed class ReviewRound8Tests
         using (limiter)
         {
             // One in flight and 32 waiting: of 40 at once, 7 are refused as busy before taking a permit.
+            // The first is held until all 40 have started, so none of the waiting ones can go out early.
             Task[] burst = Enumerable.Range(0, 40).Select(_ => (Task)client.ListTicketsAsync(new TicketListQuery(), Ct)).ToArray();
+            handler.Release.SetResult();
             try
             {
                 await Task.WhenAll(burst);
@@ -163,7 +165,7 @@ public sealed class ReviewRound8Tests
             await client.ListTicketsAsync(new TicketListQuery(), Ct).WaitAsync(TimeSpan.FromSeconds(10), Ct);
         }
 
-        Assert.Equal(34, handler.Calls);
+        Assert.Equal(34, handler.Count);
     }
 
     // ---- The local modes read no settings files ------------------------------------------------------------------
@@ -206,21 +208,6 @@ public sealed class ReviewRound8Tests
             }
 
             return Task.FromResult(FakeHttpHandler.Json(HttpStatusCode.OK, """{"items":[]}"""));
-        }
-    }
-
-    /// <summary>Answers every request after a short pause, counting them.</summary>
-    private sealed class SlowHandler : HttpMessageHandler
-    {
-        private int _calls;
-
-        public int Calls => Volatile.Read(ref _calls);
-
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            Interlocked.Increment(ref _calls);
-            await Task.Delay(20, cancellationToken);
-            return FakeHttpHandler.Json(HttpStatusCode.OK, """{"items":[]}""");
         }
     }
 }

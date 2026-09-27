@@ -119,7 +119,7 @@ public sealed class ReviewRound6Tests
     public async Task A_caller_joins_a_read_being_started_instead_of_being_charged_for_another()
     {
         IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(TestFactory.Options(o => o.MaxUpstreamRequestsPerCallerPerMinute = 1));
-        var handler = new HeldHandler();
+        var handler = new HeldHandler(InstanceJson);
         var time = new FixedTimeProvider(DateTimeOffset.UtcNow);
         using var quota = new UpstreamQuota(opts);
         var caller = new FixedCaller("tenant/alice");
@@ -141,7 +141,7 @@ public sealed class ReviewRound6Tests
     public async Task A_refresh_takes_the_whole_caches_slot_as_soon_as_it_starts()
     {
         IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(TestFactory.Options());
-        var handler = new HeldHandler(hold: 2);
+        var handler = new HeldHandler(InstanceJson, hold: 2);
         var time = new MutableTime(new DateTimeOffset(2026, 1, 15, 12, 0, 0, TimeSpan.Zero));
         TicketingClient client = ClientFor(handler);
         var cache = new InstanceCache(opts, new TimeZoneOffsetResolver(opts, time), time);
@@ -247,27 +247,4 @@ public sealed class ReviewRound6Tests
     }
 
     private sealed record FixedCaller(string? Key) : IUpstreamCaller;
-
-    /// <summary>Answers with the instance, holding one request (the first, by default) until released.</summary>
-    private sealed class HeldHandler(int hold = 1) : HttpMessageHandler
-    {
-        private int _count;
-
-        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public int Count => Volatile.Read(ref _count);
-
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            if (Interlocked.Increment(ref _count) == hold)
-            {
-                Entered.SetResult();
-                await Release.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
-            }
-
-            return FakeHttpHandler.Json(HttpStatusCode.OK, InstanceJson);
-        }
-    }
 }
