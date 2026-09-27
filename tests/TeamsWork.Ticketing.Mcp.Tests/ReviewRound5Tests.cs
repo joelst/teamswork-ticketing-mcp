@@ -17,8 +17,10 @@ public sealed class ReviewRound5Tests
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    // How SocketsHttpHandler reports a connection lost after the request went out: an I/O error, not a connect failure.
     private static HttpResponseMessage Reset(HttpRequestMessage _) =>
-        throw new HttpRequestException(HttpRequestError.ConnectionError, "The connection was reset.");
+        throw new HttpRequestException(HttpRequestError.Unknown, "Error while copying content to a stream.",
+            new IOException("The connection was reset.", new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionReset)));
 
     [Fact]
     public async Task A_create_whose_connection_resets_isnt_retried()

@@ -163,9 +163,9 @@ public sealed class TicketTools
                 else
                 {
                     // The ticket exists now, so the follow-up doesn't use the caller's token: a caller that gives up here would
-                    // otherwise get an error for a ticket that was created, and might create it again. Its own time limit
-                    // (the client's retries within it) keeps the call from hanging.
-                    using var followUp = new CancellationTokenSource(TimeSpan.FromSeconds(_options.RequestTimeoutSeconds * 3 + 15));
+                    // otherwise get an error for a ticket that was created, and might create it again. Its own time limit,
+                    // the longest the client's retries can take, keeps the call from hanging without cutting a retry short.
+                    using var followUp = new CancellationTokenSource(TicketingClient.LongestRequest(_options));
                     try
                     {
                         created = await _client.UpdateTicketAsync(createdId, new TicketWrite { Priority = validPriority }, actor.ToTicketUser(), includeHtml, timezoneOffset, followUp.Token);

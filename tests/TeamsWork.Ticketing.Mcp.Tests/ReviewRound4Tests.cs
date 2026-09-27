@@ -357,7 +357,7 @@ public sealed class ReviewRound4Tests
         Assert.Equal(OperatingSystem.IsWindows() || OperatingSystem.IsLinux(), UploadFolder.IsSupported);
     }
 
-    private static byte[] Utf8(string path) => System.Text.Encoding.UTF8.GetBytes(path + " ");
+    private static byte[] Utf8(string path) => System.Text.Encoding.UTF8.GetBytes(path + "\0");
 
     [DllImport("libc", ExactSpelling = true, SetLastError = true)]
     [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]

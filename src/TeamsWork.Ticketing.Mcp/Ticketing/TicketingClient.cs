@@ -20,6 +20,9 @@ public sealed class TicketingClient
 {
     private const int MaxAttempts = 3;
 
+    /// <summary>The longest a Retry-After is honoured for between attempts.</summary>
+    private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(10);
+
     internal static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -399,15 +402,17 @@ public sealed class TicketingClient
                     throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned an empty response.", null);
                 }
 
-                // Some endpoints report failures with HTTP 200 and error=true.
+                // Some endpoints report failures with HTTP 200 and error=true. The request reached the endpoint, and nothing
+                // says an error reported this way means nothing was done, so for a request that isn't safe to repeat it is
+                // an unknown outcome (with the API's message), like every other failure after the request arrived.
                 if (result is ListResponse<Ticket> { Error: true } or ItemResponse<Ticket> { Error: true })
                 {
-                    throw new TicketingApiException(response.StatusCode, ExtractMessage(payload) ?? "The Ticketing API reported an error.");
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, ExtractMessage(payload) ?? "The Ticketing API reported an error.", null);
                 }
 
                 if (TryGetErrorFlag(payload, out string? message))
                 {
-                    throw new TicketingApiException(response.StatusCode, message ?? "The Ticketing API reported an error.");
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, message ?? "The Ticketing API reported an error.", null);
                 }
 
                 return result;
@@ -525,19 +530,31 @@ public sealed class TicketingClient
         (idempotent && status is HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout);
 
     /// <summary>
-    /// Failures that can only happen before any request bytes are sent: the name didn't resolve, or the TLS handshake
-    /// failed (the request is sent only over an established TLS session). A generic connection error isn't among them:
-    /// a server or proxy can reset the connection after a request body has gone out, so for a request that isn't safe to
-    /// repeat it counts as an unknown outcome, not as proof that nothing happened.
+    /// Failures that can only happen before any request bytes are sent: the name didn't resolve, the TLS handshake failed
+    /// (the request is sent only over an established TLS session), or the TCP connection couldn't be made. The last is
+    /// recognised by its cause as well as its category: the handler reports a failed connect as a connection error
+    /// wrapping the socket's own error, whereas a connection lost after the request went out surfaces as an I/O error.
+    /// Anything else, for a request that isn't safe to repeat, is an unknown outcome rather than proof nothing happened.
     /// </summary>
-    private static bool IsPreSendFailure(HttpRequestException ex) =>
-        ex.HttpRequestError is HttpRequestError.NameResolutionError or HttpRequestError.SecureConnectionError;
+    internal static bool IsPreSendFailure(HttpRequestException ex) =>
+        ex.HttpRequestError is HttpRequestError.NameResolutionError or HttpRequestError.SecureConnectionError ||
+        (ex.HttpRequestError is HttpRequestError.ConnectionError && ex.InnerException is System.Net.Sockets.SocketException);
+
+    /// <summary>
+    /// The longest one request can take, retries included: each attempt may wait a full window for the rate limiter and
+    /// then its own time limit, with the longest honoured delay between attempts. A caller that must let a request finish
+    /// on its own (after the caller's token no longer applies) bounds it by this, so it isn't cut short mid-exchange.
+    /// </summary>
+    internal static TimeSpan LongestRequest(TicketingOptions options) =>
+        MaxAttempts * TimeSpan.FromSeconds(options.RateLimitWindowSeconds + options.RequestTimeoutSeconds) +
+        (MaxAttempts - 1) * MaxRetryDelay +
+        TimeSpan.FromSeconds(5);
 
     private static TimeSpan Backoff(int attempt, RetryConditionHeaderValue? retryAfter)
     {
         if (retryAfter?.Delta is TimeSpan delta && delta > TimeSpan.Zero)
         {
-            return delta > TimeSpan.FromSeconds(10) ? TimeSpan.FromSeconds(10) : delta;
+            return delta > MaxRetryDelay ? MaxRetryDelay : delta;
         }
 
         double baseMs = 400 * Math.Pow(2, attempt - 1);

@@ -31,7 +31,9 @@ internal static class TicketScan
         var matches = new List<T>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int scanned = 0;
-        int read = 0;
+        int read = 0;        // rows read: where the next offset page starts, since the API's offset counts rows
+        int withoutId = 0;   // rows without an ID, which can't be told apart across pages
+        bool repeated = false;
         int? total = null;
         string? token = null;
         bool more;
@@ -52,15 +54,25 @@ internal static class TicketScan
             total ??= r.ItemCount;
 
             // Counted once each, so an API that repeats tickets across pages (or ignores offset) can't inflate results.
-            // Rows without an ID aren't offered as matches (nothing can act on them), but they are rows, and the API's
-            // total counts rows, so paging and completeness are measured in rows read.
+            // Rows without an ID aren't offered as matches (nothing can act on them).
             int before = scanned;
-            foreach (Ticket t in items.Where(x => !string.IsNullOrWhiteSpace(x.Id) && seen.Add(x.Id)))
+            foreach (Ticket t in items)
             {
-                scanned++;
-                if (pick(t) is T picked)
+                if (string.IsNullOrWhiteSpace(t.Id))
                 {
-                    matches.Add(picked);
+                    withoutId++;
+                }
+                else if (!seen.Add(t.Id))
+                {
+                    repeated = true;
+                }
+                else
+                {
+                    scanned++;
+                    if (pick(t) is T picked)
+                    {
+                        matches.Add(picked);
+                    }
                 }
             }
 
@@ -76,15 +88,22 @@ internal static class TicketScan
 
             read += items.Count;
             token = r.ContinuationToken;
-            // Another page exists if the API says so (a token, or a total not yet reached). Without either, a full page
+
+            // Completeness is only claimed on proof: distinct tickets seen, plus rows without an ID as long as the API
+            // hasn't repeated itself (once it has, those rows could be repeats too, so only distinct tickets count). Raw rows
+            // aren't proof: a page with a repeat and a new ticket would reach the total with one ticket still unseen.
+            int proven = repeated ? scanned : scanned + withoutId;
+
+            // Another page exists if the API says so (a token, or a total not yet proven). Without either, a full page
             // means there may be more; a short page is the end. The API may return fewer than asked for, so page fullness
             // alone never ends a scan that a total says isn't finished.
-            more = items.Count > 0 && (token is not null || (total is int known ? known > read : items.Count == size));
+            more = items.Count > 0 && (token is not null || (total is int known ? known > proven : items.Count == size));
         }
         while (more && read < maxTickets);
 
-        // Incomplete if more was expected, or if fewer rows were read than the API said there are.
-        return new Result<T>(matches, scanned, total, Truncated: more || (total is int expected && read < expected));
+        // Incomplete if more was expected, or if fewer tickets were proven seen than the API said there are.
+        int seenInAll = repeated ? scanned : scanned + withoutId;
+        return new Result<T>(matches, scanned, total, Truncated: more || (total is int expected && seenInAll < expected));
     }
 
     /// <summary>The hint shown when a scan stopped before reading every ticket.</summary>

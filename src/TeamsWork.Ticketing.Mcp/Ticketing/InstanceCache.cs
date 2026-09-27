@@ -14,7 +14,9 @@ namespace TeamsWork.Ticketing.Mcp.Ticketing;
 /// <list type="bullet">
 ///   <item>a copy is replaced only once a fresh one has been read;</item>
 ///   <item>a refresh is honoured at most once per <see cref="MinRefreshInterval"/> for the whole cache (not per copy, so
-///   cycling time zone offsets doesn't multiply it); within that interval it is an ordinary read;</item>
+///   cycling time zone offsets doesn't multiply it); within that interval it is an ordinary read. The slot is taken when
+///   a refresh starts, so while one is out, a refresh asked for at the same offset joins it and one at another offset is
+///   an ordinary read;</item>
 ///   <item>the caller who starts a read is charged for it against their own quota share, and refused alone if it is
 ///   used up; callers who join a read in flight share it at no charge and never see another caller's quota error;</item>
 ///   <item>a successful refresh starts a new generation: reads that began before it can't store their older copy, and new
@@ -39,6 +41,7 @@ public sealed class InstanceCache
     private readonly Dictionary<(int Offset, bool Refresh), InFlight<Instance>> _instanceReads = [];
     private int _instanceGeneration;
     private DateTimeOffset _lastInstanceRefresh = DateTimeOffset.MinValue;
+    private int? _instanceRefreshOffset; // the offset of the honoured refresh that is out, if any
 
     private Entry<IReadOnlyList<TagCategory>>? _tags;
     private readonly Dictionary<bool, InFlight<IReadOnlyList<TagCategory>>> _tagReads = [];
@@ -73,9 +76,11 @@ public sealed class InstanceCache
             refreshing => (offset, refreshing),
             refreshing =>
             {
-                bool honoured = refreshing && _time.GetUtcNow() - _lastInstanceRefresh >= MinRefreshInterval;
+                bool honoured = refreshing && _time.GetUtcNow() - _lastInstanceRefresh >= MinRefreshInterval &&
+                                (_instanceRefreshOffset is null || _instanceRefreshOffset == offset);
                 return (honoured, Usable(_instances.GetValueOrDefault(offset), honoured), _instanceGeneration);
             },
+            started => _instanceRefreshOffset = started ? offset : null,
             () => client.GetInstanceAsync(offset, CancellationToken.None, shared: true),
             (instance, honoured, generation) =>
             {
@@ -112,6 +117,7 @@ public sealed class InstanceCache
                 bool honoured = refreshing && _time.GetUtcNow() - _lastTagRefresh >= MinRefreshInterval;
                 return (honoured, Usable(_tags, honoured), _tagGeneration);
             },
+            _ => { }, // one copy, so a refresh already out is always joined
             async () =>
             {
                 ListResponse<TagCategory> r = await client.ListTagCategoriesAsync(CancellationToken.None, shared: true);
@@ -136,13 +142,18 @@ public sealed class InstanceCache
     }
 
     /// <summary>
-    /// The shared logic: answer from the cache, or join a read of the current generation, or start one (charging this
-    /// caller first). Runs <paramref name="state"/> and <paramref name="store"/> under the lock.
+    /// The shared logic: answer from the cache, or join a read of the current generation, or start one. Starting is
+    /// atomic: the read is reserved under the lock before its starter is charged, so two callers can't both decide to
+    /// start one. If the starter's share is used up, the reservation is withdrawn and the starter alone is refused;
+    /// callers who had joined it try again on their own account (joining another read, or starting and paying for one)
+    /// rather than inheriting that refusal. <paramref name="refreshSlot"/> is told, under the lock, when an honoured
+    /// refresh starts and when it ends however it ends, so the next caller's state sees it.
     /// </summary>
     private async Task<T> GetAsync<TKey, T>(
         Dictionary<TKey, InFlight<T>> reads,
         Func<bool, TKey> keyOf,
         Func<bool, (bool Honoured, T? Cached, int Generation)> state,
+        Action<bool> refreshSlot,
         Func<Task<T>> read,
         Action<T, bool, int> store,
         bool refresh,
@@ -150,11 +161,10 @@ public sealed class InstanceCache
         where TKey : notnull
         where T : class
     {
-        bool charged = false;
         while (true)
         {
             TaskCompletionSource<T>? mine = null;
-            Task<T>? task = null;
+            Task<T> task;
             TKey key;
             bool honoured;
             int generation;
@@ -171,35 +181,60 @@ public sealed class InstanceCache
                 {
                     task = inFlight.Task;
                 }
-                else if (charged)
+                else
                 {
                     mine = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
                     task = mine.Task;
                     reads[key] = new InFlight<T>(task, generation);
+                    if (honoured)
+                    {
+                        refreshSlot(true);
+                    }
                 }
-            }
-
-            if (task is null)
-            {
-                // Starting a read: this caller pays for it, and is refused alone if their share is used up. Charged
-                // outside the lock, then the state is looked at again, since another caller may have started one meanwhile.
-                _quota?.Acquire(_caller?.Key)?.Dispose();
-                charged = true;
-                continue;
             }
 
             if (mine is not null)
             {
-                _ = ReadAsync(mine, read, value => store(value, honoured, generation), () =>
+                // Called under the lock on every path that ends this read.
+                void Forget()
                 {
                     if (reads.TryGetValue(key, out InFlight<T>? current) && ReferenceEquals(current.Task, mine.Task))
                     {
                         reads.Remove(key);
                     }
-                });
+
+                    if (honoured)
+                    {
+                        refreshSlot(false);
+                    }
+                }
+
+                try
+                {
+                    _quota?.Acquire(_caller?.Key)?.Dispose();
+                }
+                catch (TicketingApiException refused) when (refused.QuotaRefused)
+                {
+                    lock (_lock)
+                    {
+                        Forget();
+                    }
+
+                    mine.SetException(refused); // callers who joined see a refusal and try for themselves
+                    throw;
+                }
+
+                _ = ReadAsync(mine, read, value => store(value, honoured, generation), Forget);
             }
 
-            return await task.WaitAsync(cancellationToken);
+            try
+            {
+                return await task.WaitAsync(cancellationToken);
+            }
+            catch (TicketingApiException ex) when (mine is null && ex.QuotaRefused)
+            {
+                // The caller who started the read was refused before it went out: try again on this caller's account.
+            }
         }
     }
 

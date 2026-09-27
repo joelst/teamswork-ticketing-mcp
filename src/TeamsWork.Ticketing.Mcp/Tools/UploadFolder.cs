@@ -245,25 +245,13 @@ public sealed class UploadFolder
     {
         try
         {
-            // On Linux the kind of file is checked before opening it: opening a FIFO would wait for a writer (hanging the
-            // call), and a device isn't a file to upload. Its identity is kept, to confirm the open handle is the same file.
-            NativeMethods.UnixFileInfo? before = null;
-            if (OperatingSystem.IsLinux())
-            {
-                before = NativeMethods.LinuxStat(file.FullName);
-                if (before is not { IsRegularFile: true })
-                {
-                    throw new McpException($"'{param}' isn't a regular file (or can't be checked), so it can't be uploaded.");
-                }
-            }
-
-            using FileStream stream = new(file.FullName, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using FileStream stream = Open(file.FullName, param);
             if (!string.Equals(Resolve(path, param).FullName, file.FullName, InsideComparison))
             {
                 throw new McpException($"'{param}' changed while it was being read. Try again.");
             }
 
-            VerifyOpenFile(stream, param, before);
+            VerifyOpenFile(stream, param);
 
             using var buffer = new MemoryStream();
             byte[] chunk = new byte[81920];
@@ -287,12 +275,35 @@ public sealed class UploadFolder
     }
 
     /// <summary>
+    /// Opens a file to read. On Linux it is opened without waiting and without following a final link, so a FIFO, or a
+    /// path swapped for one or for a link after it was checked, can't hang the call; what was opened is checked next.
+    /// </summary>
+    private static FileStream Open(string path, string param)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        }
+
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle = NativeMethods.LinuxOpenForRead(path)
+            ?? throw new McpException($"'{param}' couldn't be opened as a plain file (it may be a link, or unreadable), so it wasn't read.");
+        try
+        {
+            return new FileStream(handle, FileAccess.Read);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Checks the file that is actually open, not the path used to open it: where the operating system says the handle
     /// points must be inside the folder, with no hidden segment, and the file must be a regular file with a single name,
-    /// so a hard link to a file elsewhere is refused. On Linux it must also be the file checked before opening. Anything
-    /// that can't be checked is refused rather than passed.
+    /// so a hard link to a file elsewhere is refused. Anything that can't be checked is refused rather than passed.
     /// </summary>
-    private void VerifyOpenFile(FileStream stream, string param, NativeMethods.UnixFileInfo? before)
+    private void VerifyOpenFile(FileStream stream, string param)
     {
         const string HardLink = "has more than one name on disk (a hard link), so it can't be uploaded. Copy the file into the folder instead.";
         string? real = null;
@@ -306,9 +317,9 @@ public sealed class UploadFolder
         }
         else if (OperatingSystem.IsLinux())
         {
-            if (NativeMethods.LinuxStat(stream.SafeFileHandle) is not { IsRegularFile: true } opened || before is null || !opened.SameFileAs(before.Value))
+            if (NativeMethods.LinuxStat(stream.SafeFileHandle) is not { IsRegularFile: true } opened)
             {
-                throw new McpException($"'{param}' turned out, once open, not to be the regular file that was checked, so it wasn't read.");
+                throw new McpException($"'{param}' isn't a regular file (or can't be checked), so it can't be uploaded.");
             }
 
             if (opened.LinkCount != 1)

@@ -269,30 +269,59 @@ internal static class ToolValidation
     public static string RequireEmail(string? value, string paramName)
     {
         string v = RequireText(value, paramName, 320);
-        if (!System.Net.Mail.MailAddress.TryCreate(v, out System.Net.Mail.MailAddress? address) ||
+        return CanonicalEmail(v) switch
+        {
+            { Error: EmailError.None, Canonical: string canonical } => canonical,
+            { Error: EmailError.NotAsciiDomain } => throw new McpException(
+                $"'{paramName}' must have its domain in ASCII form (for an internationalised domain, its xn-- punycode form)."),
+            { Error: EmailError.NotHostName } => throw new McpException(
+                $"'{paramName}' must have a domain name, such as example.com (not an IP address)."),
+            _ => throw new McpException($"'{paramName}' must be one plain email address, such as name@example.com."),
+        };
+    }
+
+    public enum EmailError { None, NotOneAddress, NotAsciiDomain, NotHostName }
+
+    /// <summary>
+    /// The checks behind <see cref="RequireEmail"/>, for callers that report problems their own way (configuration). The
+    /// canonical form is the one every address is compared and sent in.
+    /// </summary>
+    public static (string? Canonical, EmailError Error) CanonicalEmail(string value)
+    {
+        if (!System.Net.Mail.MailAddress.TryCreate(value, out System.Net.Mail.MailAddress? address) ||
             !string.IsNullOrEmpty(address.DisplayName) ||
-            !string.Equals(address.Address, v, StringComparison.Ordinal))
+            !string.Equals(address.Address, value, StringComparison.Ordinal))
         {
-            throw new McpException($"'{paramName}' must be one plain email address, such as name@example.com.");
+            return (null, EmailError.NotOneAddress);
         }
 
-        if (!IsAsciiDomain(address.Host))
+        if (!address.Host.All(char.IsAscii))
         {
-            throw new McpException($"'{paramName}' must have its domain in ASCII form (for an internationalised domain, its xn-- punycode form).");
+            return (null, EmailError.NotAsciiDomain);
         }
 
-        return address.User + "@" + address.Host.ToLowerInvariant();
+        return IsHostName(address.Host) ? (address.User + "@" + address.Host.ToLowerInvariant(), EmailError.None) : (null, EmailError.NotHostName);
     }
 
     /// <summary>The domain of an address from <see cref="RequireEmail"/>, lower case.</summary>
     public static string EmailDomain(string address) => address[(address.LastIndexOf('@') + 1)..].ToLowerInvariant();
 
     /// <summary>
-    /// Whether <paramref name="domain"/> is a plain ASCII host name (letters, digits, hyphens, dots), or an IP literal in
-    /// brackets. Punycode labels (xn--) are ASCII and pass.
+    /// Whether <paramref name="domain"/> is a DNS host name in ASCII: two or more labels of letters, digits and hyphens,
+    /// each 1 to 63 characters and not starting or ending with a hyphen, 253 characters at most, and a last label that
+    /// isn't all digits (so an IP address isn't one). Punycode labels (xn--) pass; IP literals in brackets don't, since
+    /// no help desk user has one and they can't be put in an allowlist.
     /// </summary>
-    public static bool IsAsciiDomain(string domain) =>
-        domain.Length > 0 &&
-        ((domain.StartsWith('[') && domain.EndsWith(']')) ||
-         domain.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '.'));
+    public static bool IsHostName(string domain)
+    {
+        if (domain.Length is 0 or > 253)
+        {
+            return false;
+        }
+
+        string[] labels = domain.Split('.');
+        return labels.Length >= 2 &&
+               labels.All(l => l.Length is >= 1 and <= 63 && l[0] != '-' && l[^1] != '-' && l.All(c => char.IsAsciiLetterOrDigit(c) || c == '-')) &&
+               !labels[^1].All(char.IsAsciiDigit);
+    }
 }

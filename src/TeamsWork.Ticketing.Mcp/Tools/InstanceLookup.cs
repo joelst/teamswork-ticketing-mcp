@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -160,8 +161,10 @@ internal sealed partial class InstanceLookup
                 "in it. Use a name or email from get_instance (section 'assignees').");
         }
 
-        // Someone outside the list can't appear under a listed person's name, however it is spelled on screen.
-        if (given.Name.EnumerateRunes().Any(IsInvisible))
+        // Someone outside the list can't appear under a listed person's name, however it is spelled on screen. The
+        // zero-width joiner and non-joiner are part of how many Persian and Indic names are written, so they are allowed
+        // (and ignored in the comparison); no other invisible character belongs in a name.
+        if (given.Name.EnumerateRunes().Any(r => IsInvisible(r) && r.Value is not (0x200C or 0x200D)))
         {
             throw new McpException($"'{paramName}' name contains invisible characters. Give the person's name as it should appear.");
         }
@@ -172,6 +175,13 @@ internal sealed partial class InstanceLookup
                 $"'{paramName}' uses the name of {namesake.Name}, who is in the assignee list with a different ID and email. Use their " +
                 "details from get_instance; if this is someone else with the same name, add something that tells them apart, such as " +
                 "their organisation.");
+        }
+
+        // A listed person's email can't be imitated with look-alike letters in its local part (the domain is ASCII already).
+        if (!given.Email.All(char.IsAscii))
+        {
+            throw new McpException(
+                $"'{paramName}' email must be all ASCII for someone outside the assignee list, so it can't pass for a listed person's address.");
         }
 
         // An outsider's ID is either an object ID in the standard form or, in the email-to-ticket form, the email itself.
@@ -189,8 +199,8 @@ internal sealed partial class InstanceLookup
                 $"(Ticketing:ExternalEmailDomains: {string.Join(", ", externalDomains.Order(StringComparer.OrdinalIgnoreCase))}).");
         }
 
-        // Sent as validated: an object ID in its standard lower-case form.
-        return Guid.TryParseExact(given.Id, "D", out Guid standard) ? given with { Id = standard.ToString("D") } : given;
+        // Sent as validated: an object ID in its standard lower-case form, or the canonical email in the email-to-ticket form.
+        return given with { Id = emailForm ? given.Email : Guid.ParseExact(given.Id, "D").ToString("D") };
     }
 
     /// <summary>
@@ -240,10 +250,10 @@ internal sealed partial class InstanceLookup
 
     /// <summary>
     /// A name reduced to what a reader sees, using nothing that depends on globalisation data (the Linux build has none,
-    /// and Unicode normalisation there silently does nothing): invisible code points removed, full-width Latin letters
-    /// and digits mapped to their ordinary forms, runs of whitespace collapsed, case ignored. It works on whole code
-    /// points, so characters outside the basic plane (tag characters) aren't missed. Look-alike letters from other
-    /// scripts (Cyrillic "а" for Latin "a") aren't folded; that needs the Unicode confusables table.
+    /// and Unicode normalisation there silently does nothing): invisible code points and combining marks removed, styled
+    /// and look-alike Latin letters mapped to plain ones (see <see cref="Fold"/>), runs of whitespace collapsed, case
+    /// ignored. It works on whole code points, so characters outside the basic plane aren't missed. It errs towards
+    /// matching: "José" and "Jose" are the same name here, which only means an outsider called Jose must be told apart.
     /// </summary>
     internal static string NameSkeleton(string? name)
     {
@@ -251,12 +261,12 @@ internal sealed partial class InstanceLookup
         bool space = false;
         foreach (System.Text.Rune rune in (name ?? "").EnumerateRunes())
         {
-            if (IsInvisible(rune))
+            if (IsInvisible(rune) || System.Text.Rune.GetUnicodeCategory(rune) is UnicodeCategory.NonSpacingMark or UnicodeCategory.EnclosingMark)
             {
                 continue;
             }
 
-            if (System.Text.Rune.IsWhiteSpace(rune))
+            if (System.Text.Rune.IsWhiteSpace(rune) || rune.Value == 0x2800) // U+2800, the blank braille pattern, shows as a space
             {
                 space = builder.Length > 0;
                 continue;
@@ -268,22 +278,63 @@ internal sealed partial class InstanceLookup
                 space = false;
             }
 
-            // U+FF01..U+FF5E are full-width forms of U+0021..U+007E.
-            System.Text.Rune plain = rune.Value is >= 0xFF01 and <= 0xFF5E ? new System.Text.Rune(rune.Value - 0xFEE0) : rune;
-            builder.Append(System.Text.Rune.ToLowerInvariant(plain).ToString());
+            builder.Append(System.Text.Rune.ToLowerInvariant(new System.Text.Rune(Fold(rune.Value))).ToString());
         }
 
         return builder.ToString();
     }
 
     /// <summary>
+    /// Maps a code point that displays as a Latin letter to that letter: full-width forms, the mathematical alphabets
+    /// (bold, italic, script and the rest), circled, parenthesised and squared letters, letterlike symbols, small
+    /// capitals, and the Cyrillic and Greek letters that look Latin. This covers what NFKC folding did plus the common
+    /// cross-script look-alikes, without Unicode data files; rarer confusables (modifier letters, other scripts) aren't
+    /// covered.
+    /// </summary>
+    private static int Fold(int c) => c switch
+    {
+        >= 0xFF01 and <= 0xFF5E => c - 0xFEE0,                                    // full-width ASCII
+        >= 0x1D400 and <= 0x1D6A3 => MathLetter((c - 0x1D400) % 52),             // 13 alphabets of A-Z a-z
+        >= 0x1D7CE and <= 0x1D7FF => '0' + (c - 0x1D7CE) % 10,                    // 5 styles of digits
+        >= 0x24B6 and <= 0x24CF => 'A' + (c - 0x24B6),                            // circled capitals
+        >= 0x24D0 and <= 0x24E9 => 'a' + (c - 0x24D0),                            // circled small letters
+        >= 0x249C and <= 0x24B5 => 'a' + (c - 0x249C),                            // parenthesised small letters
+        >= 0x1F110 and <= 0x1F129 => 'A' + (c - 0x1F110),                         // parenthesised capitals
+        >= 0x1F130 and <= 0x1F149 => 'A' + (c - 0x1F130),                         // squared
+        >= 0x1F150 and <= 0x1F169 => 'A' + (c - 0x1F150),                         // negative circled
+        >= 0x1F170 and <= 0x1F189 => 'A' + (c - 0x1F170),                         // negative squared
+        _ => LookAlikes.GetValueOrDefault(c, c),
+    };
+
+    private static readonly System.Collections.Frozen.FrozenDictionary<int, int> LookAlikes = new (string From, string To)[]
+    {
+        // Letterlike symbols (the letters missing from the mathematical alphabets live here).
+        ("\u2102\u210A\u210B\u210C\u210D\u210E\u2110\u2111\u2112\u2113\u2115\u2119\u211A\u211B\u211C\u211D\u2124\u2128\u212A\u212C\u212D\u212F\u2130\u2131\u2133\u2134\u2145\u2146\u2147\u2148\u2149",
+         "CgHHHhIILlNPQRRRZZKBCeEFMoDdeij"),
+        // Small capitals.
+        ("\u1D00\u0299\u1D04\u1D05\u1D07\uA730\u0262\u029C\u026A\u1D0A\u1D0B\u029F\u1D0D\u0274\u1D0F\u1D18\uA7AF\u0280\uA731\u1D1B\u1D1C\u1D20\u1D21\u028F\u1D22",
+         "abcdefghijklmnopqrstuvwyz"),
+        // Cyrillic.
+        ("\u0430\u0435\u043E\u0440\u0441\u0443\u0445\u0456\u0458\u0455\u0501\u04BB\u051B\u051D\u0410\u0412\u0415\u041A\u041C\u041D\u041E\u0420\u0421\u0422\u0425\u0406\u0408\u0405\u0423",
+         "aeopcyxijsdhqwABEKMHOPCTXIJSY"),
+        // Greek, and the dotless i.
+        ("\u0391\u0392\u0395\u0396\u0397\u0399\u039A\u039C\u039D\u039F\u03A1\u03A4\u03A5\u03A7\u03BF\u03BD\u03B9\u0131",
+         "ABEZHIKMNOPTYXovii"),
+    }
+    .SelectMany(m => m.From.Zip(m.To, (from, to) => KeyValuePair.Create((int)from, (int)to)))
+    .ToFrozenDictionary();
+
+    private static int MathLetter(int i) => i < 26 ? 'A' + i : 'a' + (i - 26);
+
+    /// <summary>
     /// Whether a code point is invisible when displayed: format characters (zero-width spaces and joiners, tag characters)
     /// and the other Default_Ignorable_Code_Point characters that aren't format characters (combining grapheme joiner,
-    /// Hangul fillers, variation selectors).
+    /// Hangul fillers, variation selectors, and the unassigned ones in the U+2060 block, which render as nothing).
     /// </summary>
     internal static bool IsInvisible(System.Text.Rune rune) =>
         System.Text.Rune.GetUnicodeCategory(rune) == UnicodeCategory.Format ||
         rune.Value is 0x034F or 0x115F or 0x1160 or 0x17B4 or 0x17B5 or 0x3164 or 0xFFA0 ||
+        rune.Value is >= 0x2060 and <= 0x206F ||
         rune.Value is >= 0x180B and <= 0x180F ||
         rune.Value is >= 0xFE00 and <= 0xFE0F ||
         rune.Value is >= 0xFFF0 and <= 0xFFF8 ||

@@ -41,11 +41,13 @@ jobs:
       - run: dotnet test -c Release --no-build
       # The Linux release build and container run without ICU (InvariantGlobalization), where Unicode normalisation and
       # IDN mapping silently change meaning. Run the tests that way too, so behaviour that depends on culture data shows.
+      # It must be a build setting: the runtimeconfig records it, and the runtime then ignores the environment variable.
+      # EXPECT_INVARIANT_GLOBALIZATION makes a test fail if this leg ever runs with culture data after all.
       - name: dotnet test (invariant globalization)
         if: runner.os == 'Linux'
         env:
-          DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "1"
-        run: dotnet test -c Release --no-build
+          EXPECT_INVARIANT_GLOBALIZATION: "1"
+        run: dotnet test -c Release --no-restore -p:InvariantGlobalization=true -p:ContinuousIntegrationBuild=true
 
   # install.sh must run under dash and macOS sh, not only bash; shellcheck knows those portability mistakes.
   install-scripts:

@@ -124,8 +124,7 @@ public sealed class TicketingOptions
     /// <summary>Entries of <see cref="ExternalEmailDomains"/> that aren't plain ASCII host names.</summary>
     public IReadOnlyList<string> InvalidExternalEmailDomains() =>
         ExternalEmailDomainEntries()
-            .Where(d => d.StartsWith('.') || d.EndsWith('.') || !d.Contains('.') ||
-                        !d.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '.'))
+            .Where(d => !TeamsWork.Ticketing.Mcp.Tools.ToolValidation.IsHostName(d))
             .ToList();
 
     private IEnumerable<string> ExternalEmailDomainEntries() =>
@@ -157,12 +156,25 @@ public sealed class ServiceAccountOptions
     /// (a GUID other than all zeros) or that same email (the email-to-ticket form). Anything else attributes every write
     /// to someone the help desk doesn't know, without any error.
     /// </summary>
-    public bool IsValidIdentity =>
-        IsConfigured &&
-        System.Net.Mail.MailAddress.TryCreate(Email!.Trim(), out System.Net.Mail.MailAddress? address) &&
-        string.Equals(address.Address, Email.Trim(), StringComparison.OrdinalIgnoreCase) &&
-        TeamsWork.Ticketing.Mcp.Tools.ToolValidation.IsAsciiDomain(address.Host) &&
+    public bool IsValidIdentity => Canonical() is not null;
+
+    /// <summary>
+    /// The identity in the form every person is compared and sent in (see <see cref="IsValidIdentity"/>), or null when it
+    /// isn't valid: the email as <see cref="TeamsWork.Ticketing.Mcp.Tools.ToolValidation.RequireEmail"/> returns it, and
+    /// the ID as a lower-case object ID or, in the email-to-ticket form, that same canonical email.
+    /// </summary>
+    public (string Id, string Name, string Email)? Canonical()
+    {
+        if (!IsConfigured || TeamsWork.Ticketing.Mcp.Tools.ToolValidation.CanonicalEmail(Email!.Trim()).Canonical is not string email)
+        {
+            return null;
+        }
+
         // The standard 36-character form only: the help desk stores that form and people are matched on it.
-        ((Guid.TryParseExact(Id!.Trim(), "D", out Guid objectId) && objectId != Guid.Empty) ||
-         string.Equals(Id!.Trim(), Email.Trim(), StringComparison.OrdinalIgnoreCase));
+        string id = Id!.Trim();
+        string? canonicalId = Guid.TryParseExact(id, "D", out Guid objectId) && objectId != Guid.Empty ? objectId.ToString("D")
+            : string.Equals(id, email, StringComparison.OrdinalIgnoreCase) ? email
+            : null;
+        return canonicalId is null ? null : (canonicalId, Name!.Trim(), email);
+    }
 }

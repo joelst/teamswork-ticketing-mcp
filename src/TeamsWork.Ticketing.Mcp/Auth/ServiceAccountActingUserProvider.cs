@@ -14,21 +14,11 @@ public sealed class ServiceAccountActingUserProvider : IActingUserProvider
 
     public ServiceAccountActingUserProvider(IOptions<TicketingOptions> options)
     {
-        ServiceAccountOptions? sa = options.Value.ServiceAccount;
-        if (sa?.IsConfigured != true)
-        {
-            throw new ActingUserException(
-                "Ticketing:ServiceAccount:Id, :Name and :Email are required when running without Entra authentication. " +
-                "They identify who ticket changes are attributed to.");
-        }
-
-        // Used exactly as validated: trimmed, and an object ID in the standard form the help desk stores.
-        string id = sa.Id!.Trim();
-        _user = new ActingUser(
-            Guid.TryParseExact(id, "D", out Guid objectId) ? objectId.ToString("D") : id,
-            sa.Name!.Trim(),
-            sa.Email!.Trim(),
-            ActingUserSource.ServiceAccount);
+        // Used exactly as validated, in the form every other person is compared and sent in.
+        (string id, string name, string email) = options.Value.ServiceAccount?.Canonical() ?? throw new ActingUserException(
+            "Ticketing:ServiceAccount:Id, :Name and :Email are required when running without Entra authentication, and must be a " +
+            "valid identity. They identify who ticket changes are attributed to.");
+        _user = new ActingUser(id, name, email, ActingUserSource.ServiceAccount);
     }
 
     public ValueTask<ActingUser> GetActingUserAsync(CancellationToken cancellationToken) => ValueTask.FromResult(_user);
