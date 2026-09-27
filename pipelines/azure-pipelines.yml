@@ -101,7 +101,10 @@ stages:
               az bicep install
               az bicep build --file infra/core.bicep --stdout > /dev/null
               az bicep build --file infra/app.bicep --stdout > /dev/null
-              echo "Bicep templates compile."
+              # The parameter files too: that is where a value outside a template's limits shows.
+              az bicep build-params --file infra/core.bicepparam --stdout > /dev/null
+              az bicep build-params --file infra/app.bicepparam --stdout > /dev/null
+              echo "Bicep templates and parameter files compile."
             displayName: Lint Bicep
 
   # ---------------------------------------------------------------------------------------------------------------

@@ -65,6 +65,22 @@ jobs:
           $errors | ForEach-Object { Write-Host "::error file=scripts/install.ps1,line=$($_.Extent.StartLineNumber)::$($_.Message)" }
           if ($errors) { exit 1 }
 
+  # Compiles the templates and their parameter files, which catches a parameter value outside a template's limits
+  # before a deployment does. Needs no Azure sign-in.
+  bicep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Compile Bicep
+        run: |
+          set -eu
+          az bicep install
+          for t in core app; do
+            az bicep build --file "infra/$t.bicep" --stdout > /dev/null
+            az bicep build-params --file "infra/$t.bicepparam" --stdout > /dev/null
+          done
+
   # Runs each installer against the newest published release: download, checksum (and signature on Windows),
   # install, startup check, a second install over the first (the upgrade path), and uninstall. Client registration
   # isn't covered: the runners have no MCP clients.

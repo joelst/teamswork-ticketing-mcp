@@ -21,4 +21,4 @@ param serviceAccountName = readEnvironmentVariable('TAAS_SERVICE_ACCOUNT_NAME', 
 param serviceAccountEmail = readEnvironmentVariable('TAAS_SERVICE_ACCOUNT_EMAIL', '')
 
 param minReplicas = 0
-param maxReplicas = 2
+param maxReplicas = 1 // app.bicep allows only one; see the note there
