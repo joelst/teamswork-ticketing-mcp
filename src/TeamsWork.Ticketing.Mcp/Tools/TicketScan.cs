@@ -120,7 +120,8 @@ internal static class TicketScan
     public static string? TruncationHint<T>(Result<T> result) =>
         result.Truncated
             ? $"Only {result.Scanned} of {(result.Total is int t ? t.ToString(System.Globalization.CultureInfo.InvariantCulture) : "the")} tickets were checked: the " +
-              "scan stops at Ticketing:MaxScanTickets, or when the API stops returning new tickets. Narrow it with the date or " +
-              "priority filters to see the rest."
+              "scan stops at Ticketing:MaxScanTickets, or when the API stops returning new tickets. It reads newest first, so " +
+              "the rest are older: call again with createdBefore set to the day after the oldest day already seen (so none of " +
+              "that day is skipped), or narrow it with the priority filter."
             : null;
 }
