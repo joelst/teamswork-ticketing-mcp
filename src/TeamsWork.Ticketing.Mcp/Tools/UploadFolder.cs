@@ -33,17 +33,30 @@ public sealed class UploadFolder
         [".pptx"] = "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     };
 
+    private static readonly string[] PseudoFileSystems = ["/proc", "/sys", "/dev", "/run"];
+
+    // Kernel filesystems, refused wherever they are mounted (a container's /host/proc as much as /proc).
+    private static readonly HashSet<string> KernelFileSystemTypes = new(StringComparer.Ordinal)
+    {
+        "proc", "sysfs", "devtmpfs", "devpts", "debugfs", "securityfs", "cgroup", "cgroup2", "tracefs", "configfs",
+        "bpf", "efivarfs", "fusectl", "pstore", "mqueue", "binfmt_misc", "autofs", "hugetlbfs", "rpc_pipefs", "nsfs",
+    };
+
     private readonly int _maxBytes;
+
+    // On Linux, the mount the folder is on; every file read must be on it too.
+    private readonly ulong? _rootMount;
 
     // Where the folder really is, as the operating system reports the path of an open handle: the Windows final path,
     // or the canonical path on Linux (compared with /proc/self/fd). Null where no such check is available (macOS).
     private readonly string? _realRoot;
 
-    private UploadFolder(string root, int maxBytes, string? realRoot)
+    private UploadFolder(string root, int maxBytes, string? realRoot, ulong? rootMount)
     {
         Root = root;
         _maxBytes = maxBytes;
         _realRoot = realRoot;
+        _rootMount = rootMount;
     }
 
     /// <summary>
@@ -58,10 +71,9 @@ public sealed class UploadFolder
     /// <summary>
     /// Checks the configured folder at startup. Its real location (links resolved, names as stored) must exist, must not
     /// be a drive root, and must not contain the home folder, the application data or configuration folders (where MCP
-    /// client configs can hold the API key), or the user-secrets file.
+    /// client configs can hold the API key), or the user-secrets file. On Linux the same holds for every other path that
+    /// reaches the folder through a bind mount, and the folder's mount is kept, so a file on another mount is refused.
     /// </summary>
-    private static readonly string[] PseudoFileSystems = ["/proc", "/sys", "/dev", "/run"];
-
     public static UploadFolder Create(TicketingOptions options, string? userSecretsPath)
     {
         if (!IsSupported)
@@ -98,20 +110,102 @@ public sealed class UploadFolder
             throw new StartupConfigurationException("Ticketing:UploadRoot must be a folder on a local drive, not a network share or mapped drive.");
         }
 
-        // The kernel's pseudo-filesystems hold process environments (/proc/<pid>/environ has the API key) and device
-        // nodes whose "files" pass as regular ones, so nothing under them can be an upload folder.
-        if (OperatingSystem.IsLinux() && PseudoFileSystems.Any(p => IsWithin(root, p, StringComparison.Ordinal)))
+        List<string> locations = realRoot is null ? [root] : [root, Path.TrimEndingDirectorySeparator(realRoot)];
+
+        // On Linux a bind mount shows the same folder under another path, which the path checks below can't see through: a
+        // bind of ~/.config at an allowed path would pass them. So every path the mount table says reaches this folder is
+        // checked too, and the folder's mount is kept so a file on any other mount (one mounted inside the folder later)
+        // is refused. Where the mount can't be identified, uploads are refused.
+        ulong? rootMount = null;
+        if (OperatingSystem.IsLinux())
         {
-            throw new StartupConfigurationException($"Ticketing:UploadRoot '{root}' is inside a system folder ({string.Join(", ", PseudoFileSystems)}), which can't hold uploads.");
+            rootMount = NativeMethods.LinuxStat(root)?.MountId ?? throw new StartupConfigurationException(
+                $"Ticketing:UploadRoot '{root}' can't be checked: this system doesn't report which mount a folder is on (Linux 5.8 or later is needed).");
+            string mountTable;
+            try
+            {
+                mountTable = File.ReadAllText("/proc/self/mountinfo");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new StartupConfigurationException($"Ticketing:UploadRoot '{root}' can't be checked: the mount table (/proc/self/mountinfo) can't be read.");
+            }
+
+            MountView view = MountAliases(mountTable, root, rootMount.Value) ?? throw new StartupConfigurationException(
+                $"Ticketing:UploadRoot '{root}' can't be checked: its mount isn't in the mount table.");
+            if (KernelFileSystemTypes.Contains(view.FileSystemType))
+            {
+                throw new StartupConfigurationException($"Ticketing:UploadRoot '{root}' is on a kernel filesystem ({view.FileSystemType}), which can't hold uploads.");
+            }
+
+            locations.AddRange(view.Aliases);
         }
 
-        string[] locations = realRoot is null ? [root] : [root, Path.TrimEndingDirectorySeparator(realRoot)];
         foreach (string location in locations.Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            // The kernel's pseudo-filesystems hold process environments (/proc/<pid>/environ has the API key) and device
+            // nodes whose "files" pass as regular ones, so nothing under them can be an upload folder.
+            if (OperatingSystem.IsLinux() && PseudoFileSystems.Any(p => IsWithin(location, p, StringComparison.Ordinal)))
+            {
+                throw new StartupConfigurationException($"Ticketing:UploadRoot '{root}' is inside a system folder ({string.Join(", ", PseudoFileSystems)}), which can't hold uploads.");
+            }
+
             CheckNotProtected(location, userSecretsPath);
         }
 
-        return new UploadFolder(root + Path.DirectorySeparatorChar, options.MaxUploadBytes, realRoot is null ? null : Path.TrimEndingDirectorySeparator(realRoot));
+        return new UploadFolder(root + Path.DirectorySeparatorChar, options.MaxUploadBytes, realRoot is null ? null : Path.TrimEndingDirectorySeparator(realRoot), rootMount);
+    }
+
+    /// <summary>The type of the filesystem a folder is on, and every other path that reaches it.</summary>
+    internal sealed record MountView(string FileSystemType, IReadOnlyList<string> Aliases);
+
+    /// <summary>
+    /// Where <paramref name="path"/>, which is on mount <paramref name="mountId"/>, can be reached, according to a Linux
+    /// mount table (/proc/self/mountinfo): the path within its filesystem is worked out from the mount's root, and each
+    /// other mount of that filesystem whose root contains it gives an alias. Null when the mount isn't listed or the path
+    /// isn't under its mount point, so the caller can refuse rather than guess.
+    /// </summary>
+    internal static MountView? MountAliases(string mountTable, string path, ulong mountId)
+    {
+        var mounts = new List<(ulong Id, string Device, string Root, string MountPoint, string Type)>();
+        foreach (string line in mountTable.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            // id parent major:minor root mount-point options [optional fields] - type source super-options (paths escape
+            // space, tab, newline and backslash in octal)
+            string[] f = line.Split(' ');
+            int separator = Array.IndexOf(f, "-", 6);
+            if (f.Length >= 5 && separator > 0 && separator + 1 < f.Length &&
+                ulong.TryParse(f[0], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out ulong id))
+            {
+                mounts.Add((id, f[2], Unescape(f[3]), Unescape(f[4]), f[separator + 1]));
+            }
+        }
+
+        (ulong Id, string Device, string Root, string MountPoint, string Type) own = mounts.FirstOrDefault(m => m.Id == mountId);
+        if (own.MountPoint is null || Below(path, own.MountPoint) is not string rest)
+        {
+            return null;
+        }
+
+        string inFileSystem = Join(own.Root, rest);
+        return new MountView(own.Type, mounts
+            .Where(m => m.Device == own.Device && Below(inFileSystem, m.Root) is not null)
+            .Select(m => Join(m.MountPoint, Below(inFileSystem, m.Root)!))
+            .Where(alias => alias != path)
+            .Distinct(StringComparer.Ordinal)
+            .ToList());
+
+        // The part of a path below a folder ("" for the folder itself, else starting with '/'), or null if it isn't below it.
+        static string? Below(string p, string folder) =>
+            folder == "/" ? (p == "/" ? "" : p)
+            : p == folder ? ""
+            : p.StartsWith(folder + "/", StringComparison.Ordinal) ? p[folder.Length..]
+            : null;
+
+        static string Join(string folder, string below) => folder == "/" ? (below.Length == 0 ? "/" : below) : folder + below;
+
+        static string Unescape(string field) => System.Text.RegularExpressions.Regex.Replace(
+            field, @"\\([0-7]{3})", m => ((char)Convert.ToInt32(m.Groups[1].Value, 8)).ToString());
     }
 
     /// <summary>
@@ -329,6 +423,12 @@ public sealed class UploadFolder
             if (NativeMethods.LinuxStat(stream.SafeFileHandle) is not { IsRegularFile: true } opened)
             {
                 throw new McpException($"'{param}' isn't a regular file (or can't be checked), so it can't be uploaded.");
+            }
+
+            // A mount inside the folder could show any other folder there, so only the folder's own mount is read from.
+            if (opened.MountId is not ulong mount || mount != _rootMount)
+            {
+                throw new McpException($"'{param}' is on a different mount from the upload folder (a mount point inside it), so it wasn't read.");
             }
 
             if (opened.LinkCount != 1)

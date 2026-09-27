@@ -668,7 +668,7 @@ public sealed class NewToolsTests
         // be deleted is left in the temp folder rather than failing a test that has already passed.
         public void Dispose()
         {
-            for (int attempt = 1; ; attempt++)
+            for (int attempt = 1; Directory.Exists(Path); attempt++)
             {
                 try
                 {

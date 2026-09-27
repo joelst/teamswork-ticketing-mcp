@@ -56,8 +56,11 @@ internal static class NativeMethods
 
     // ---- Linux ------------------------------------------------------------------------------------------------
 
+    private const int AtFdCwd = -100;
+    private const int AtSymlinkNoFollow = 0x100;
     private const int AtEmptyPath = 0x1000;
     private const uint StatxBasicStats = 0x7ff;
+    private const uint StatxMountId = 0x1000; // Linux 5.8 and later
 
     // The fields the checks read; a file system may leave any of them out, and then the file can't be verified.
     private const uint StatxRequired = 0x1 /* type */ | 0x4 /* nlink */ | 0x100 /* ino */;
@@ -67,8 +70,15 @@ internal static class NativeMethods
     private const int FileTypeMask = 0xF000;
     private const int RegularFile = 0x8000;
 
-    /// <summary>What statx reports about a file: whether it is a regular file, and how many names it has.</summary>
-    public readonly record struct UnixFileInfo(bool IsRegularFile, uint LinkCount);
+    /// <summary>
+    /// What statx reports about a file: whether it is a regular file, how many names it has, and the ID of the mount it
+    /// is on (the ID /proc/self/mountinfo lists; null when the kernel doesn't report it).
+    /// </summary>
+    public readonly record struct UnixFileInfo(bool IsRegularFile, uint LinkCount, ulong? MountId);
+
+    /// <summary>A path itself, without following a final symbolic link. Null if statx isn't available or fails.</summary>
+    [SupportedOSPlatform("linux")]
+    public static UnixFileInfo? LinuxStat(string path) => Statx(AtFdCwd, path, AtSymlinkNoFollow);
 
     /// <summary>
     /// Opens a file read-only without waiting and without following a final symbolic link: a FIFO opens at once instead
@@ -127,7 +137,7 @@ internal static class NativeMethods
         byte[] buffer = new byte[StatxSize];
         try
         {
-            if (LibcStatx(directory, Utf8Z(path), flags, StatxBasicStats, buffer) != 0)
+            if (LibcStatx(directory, Utf8Z(path), flags, StatxBasicStats | StatxMountId, buffer) != 0)
             {
                 return null;
             }
@@ -138,14 +148,16 @@ internal static class NativeMethods
         }
 
         ReadOnlySpan<byte> b = buffer;
-        if ((BitConverter.ToUInt32(b[0..4]) & StatxRequired) != StatxRequired)
+        uint mask = BitConverter.ToUInt32(b[0..4]);
+        if ((mask & StatxRequired) != StatxRequired)
         {
             return null; // a field left out would read as zero from the empty buffer
         }
 
         uint links = BitConverter.ToUInt32(b[16..20]);
         ushort mode = BitConverter.ToUInt16(b[28..30]);
-        return new UnixFileInfo((mode & FileTypeMask) == RegularFile, links);
+        ulong? mountId = (mask & StatxMountId) != 0 ? BitConverter.ToUInt64(b[144..152]) : null;
+        return new UnixFileInfo((mode & FileTypeMask) == RegularFile, links, mountId);
     }
 
     /// <summary>A path as null-terminated UTF-8, the file-name encoding Linux uses.</summary>

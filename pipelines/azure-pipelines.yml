@@ -128,16 +128,19 @@ stages:
                 set -euo pipefail
                 az group create --name "$(azureResourceGroup)" --location "$(azureLocation)" --output none
 
-                EXTRA=""
-                if [ -n "${TICKETING_API_KEY:-}" ] && [ "${TICKETING_API_KEY}" != '$(ticketingApiKey)' ]; then
-                  EXTRA="ticketingApiKey=${TICKETING_API_KEY}"
+                # Azure Pipelines leaves an undefined variable as the literal text $(ticketingApiKey) in the environment. It
+                # is detected by its "$(" start, written here without that sequence, so the pipeline can't expand it (a
+                # macro in this script would expand on both sides of a comparison, and write the secret into the script).
+                EXTRA=()
+                if [ -n "${TICKETING_API_KEY:-}" ] && [[ "${TICKETING_API_KEY}" != \$\(* ]]; then
+                  EXTRA=(ticketingApiKey="${TICKETING_API_KEY}")
                 fi
 
                 OUT=$(az deployment group create \
                   --name "core-$(Build.BuildNumber)" \
                   --resource-group "$(azureResourceGroup)" \
                   --template-file infra/core.bicep \
-                  --parameters namePrefix="$(namePrefix)" environmentName="$(environmentName)" $EXTRA \
+                  --parameters namePrefix="$(namePrefix)" environmentName="$(environmentName)" "${EXTRA[@]}" \
                   --query properties.outputs -o json)
 
                 for key in registryName registryLoginServer keyVaultName apiKeySecretUri identityId containerAppsEnvironmentName; do

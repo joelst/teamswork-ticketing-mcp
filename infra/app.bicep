@@ -53,9 +53,12 @@ param serviceAccountEmail string = ''
 @maxValue(10)
 param minReplicas int = 0
 
+// One replica: the upstream rate limit (the vendor's 100 requests per minute for the API key), each caller's share of
+// it, and the in-flight cap are kept in the server's memory, so a second replica would double every one of them. Raise
+// this only after moving those limits to a store the replicas share.
 @minValue(1)
-@maxValue(10)
-param maxReplicas int = 2
+@maxValue(1)
+param maxReplicas int = 1
 
 param tags object = {
   workload: 'teamswork-taas-mcp'

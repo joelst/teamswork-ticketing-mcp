@@ -176,7 +176,8 @@ text an agent has read can't make it send other files. Up to 10 files per call, 
 `isPrivate: false`. Uploads are never offered by the HTTP transports.
 
 Only put files in the folder that you are willing to send. Anything you place there can be uploaded (hard links to
-files elsewhere, FIFOs, and devices are refused). Uploads are available on Windows and Linux; on macOS the server logs a
+files elsewhere, FIFOs, devices, and, on Linux, files on a mount inside the folder are refused; Linux needs kernel 5.8
+or later to identify mounts). Uploads are available on Windows and Linux; on macOS the server logs a
 warning and doesn't offer the tool, because it can't identify the file it has open there. The guard limits what this tool reads; an
 agent that also has shell or file tools could copy a file into the folder first, so keep the folder out of their reach.
 

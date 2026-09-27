@@ -57,6 +57,8 @@ static async Task RunStdioAsync(string[] args)
 {
     HostApplicationBuilder builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { Args = args, ContentRootPath = AppContext.BaseDirectory });
 
+    UseBuiltInDefaultsInsteadOfFiles(builder.Configuration);
+
     // stdout is the MCP channel; every log line must go to stderr.
     builder.Logging.ClearProviders();
     builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
@@ -102,6 +104,35 @@ static async Task RunStdioAsync(string[] args)
     await host.RunAsync();
 }
 
+// The local modes run from wherever the executable was installed, which may be a shared folder (~/.local/bin, a
+// downloads folder) where anyone or anything can leave an appsettings.json; release builds don't ship one at all. So
+// they read no settings files: the few defaults a file would add are built in here, and everything else is configured
+// through user secrets, environment variables, or the command line. The hosted server keeps the file in its image.
+static void UseBuiltInDefaultsInsteadOfFiles(IConfigurationBuilder configuration)
+{
+    List<IConfigurationSource> files = configuration.Sources
+        .OfType<Microsoft.Extensions.Configuration.Json.JsonConfigurationSource>()
+        .Where(s => s.Path?.StartsWith("appsettings", StringComparison.OrdinalIgnoreCase) == true)
+        .Cast<IConfigurationSource>()
+        .ToList();
+    int at = files.Count > 0 ? configuration.Sources.IndexOf(files[0]) : 0;
+    foreach (IConfigurationSource file in files)
+    {
+        configuration.Sources.Remove(file);
+    }
+
+    configuration.Sources.Insert(at, new Microsoft.Extensions.Configuration.Memory.MemoryConfigurationSource
+    {
+        InitialData = new Dictionary<string, string?>
+        {
+            ["Logging:LogLevel:Default"] = "Information",
+            ["Logging:LogLevel:Microsoft.AspNetCore"] = "Warning",
+            ["Logging:LogLevel:Microsoft.Identity.Web"] = "Warning",
+            ["Logging:LogLevel:System.Net.Http.HttpClient"] = "None",
+        },
+    });
+}
+
 static async Task RunHttpAsync(string[] args)
 {
     WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = AppContext.BaseDirectory });
@@ -109,6 +140,7 @@ static async Task RunHttpAsync(string[] args)
 
     if (authMode == AuthMode.Local)
     {
+        UseBuiltInDefaultsInsteadOfFiles(builder.Configuration);
         UserSecretsConfiguration.Add(builder.Configuration, Assembly.GetExecutingAssembly());
         Program.UserSecretsLoaded = true;
     }

@@ -152,11 +152,11 @@ variable overrides the same value in the user-secrets file below, as usual for .
 }
 ```
 
-This is the same file `dotnet user-secrets set` writes, so both approaches below end up in the same place. Settings
-come from that file, environment variables, the command line, and the `appsettings.json` shipped next to the
-executable (every value in it already has a built-in default, so leave it as is). A settings file in the folder the
-server is started from is never read: MCP clients start servers in your workspace, where a cloned repository or an
-agent could otherwise redirect requests, API key included, to another host.
+This is the same file `dotnet user-secrets set` writes, so both approaches below end up in the same place. With
+`--stdio` and `--local`, settings come only from that file, environment variables, and the command line; no
+`appsettings.json` is read, neither in the folder the server is started from (MCP clients start servers in your
+workspace, where a cloned repository or an agent could otherwise redirect requests, API key included, to another host)
+nor next to the executable (which may be a shared folder). Every setting has a built-in default.
 
 ## Run it locally from source
 
@@ -291,5 +291,5 @@ Estimated running cost: Container Apps consumption with scale-to-zero (mostly wi
 | `Mcp:RequestsPerMinutePerCaller` | env | Requests one caller (token tenant and object ID) may make per minute, default 60; `0` turns it off (Entra mode) |
 | `Mcp:MaxRequestBodyBytes` | env | Largest request body accepted, default 1 MiB |
 | `Ticketing:MaxResponseBytes` | env | Largest upstream response read, default 8 MiB |
-| `Ticketing:MaxConcurrentUpstreamRequests` | env | Upstream requests in flight at once across all callers, default 8, bounding the memory responses take; more wait their turn |
+| `Ticketing:MaxConcurrentUpstreamRequests` | env | Upstream requests in flight at once across all callers, default 8, bounding the memory responses take; up to 32 more wait their turn, and beyond that a request is refused as busy |
 | `KeyVault:Uri` | env (local only) | Load `Ticketing--ApiKey` from Key Vault with `DefaultAzureCredential` |

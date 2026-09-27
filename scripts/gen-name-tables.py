@@ -8,11 +8,17 @@ string.Normalize() does nothing there; these tables carry the Unicode data the c
 
 * BaseLetters: the base letter of each precomposed accented Latin, Greek and Cyrillic letter (from the canonical
   decompositions in Python's unicodedata), plus the stroke letters that have no decomposition.
-* LookAlikes: code points that display as plain Latin letters or digits, mapped to them (lower case): the compatibility
-  forms NFKC folds (full-width, mathematical, circled, ligatures, Roman numerals) and the UTS #39 confusables whose
-  prototype is plain Latin (Greek alpha, Cyrillic a, small capitals). confusables.txt is read from the path given, or
-  downloaded from unicode.org. Commit the generated files; nothing is downloaded at build or run time.
+* LookAlikes: code points that display as plain Latin letters or digits, mapped to them with their case kept: the
+  UTS #39 confusables whose prototype is plain Latin, ASCII sources included (I and 1 to l, m to rn, Greek alpha,
+  Cyrillic a), then the compatibility forms NFKC folds (full-width, mathematical, circled, ligatures, Roman numerals),
+  and small capitals. The prototypes are case-sensitive, so the name check maps a name as written and in upper and
+  lower case, and compares those; the table itself must not lower-case anything.
+
+confusables.txt is read from the path given, or downloaded from unicode.org, for the Unicode version of this Python's
+unicodedata (pinned below, with the file's SHA-256, so regenerating is reproducible). Commit the generated files;
+nothing is downloaded at build or run time.
 """
+import hashlib
 import io
 import os
 import sys
@@ -21,7 +27,11 @@ import urllib.request
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 OUT = os.path.join(ROOT, 'src', 'TeamsWork.Ticketing.Mcp', 'Tools')
-CONFUSABLES_URL = 'https://www.unicode.org/Public/security/latest/confusables.txt'
+# The confusables must come from the same Unicode version as unicodedata, or code points one knows and the other doesn't
+# are silently dropped. Regenerating with another Python means updating both values together.
+UNICODE_VERSION = '16.0.0'
+CONFUSABLES_SHA256 = '95bd0aad6dced5ebc63436f459c06ab21a8d107cd842fb57f5c3a1e91bca8611'
+CONFUSABLES_URL = 'https://www.unicode.org/Public/security/%s/confusables.txt' % UNICODE_VERSION
 
 
 def is_mark(c):
@@ -61,18 +71,18 @@ def base_letters():
 # ---- Look-alikes ----------------------------------------------------------------------------------------------------
 
 def plain_latin(text):
-    """The text as lower-case ASCII letters and digits once marks are removed, or None if it is anything else."""
+    """The text as ASCII letters and digits (case kept) once marks are removed, or None if it is anything else."""
     stripped = ''.join(c for c in unicodedata.normalize('NFD', text) if not is_mark(c))
     if 0 < len(stripped) <= 4 and all(c.isascii() and c.isalnum() for c in stripped):
-        return stripped.lower()
+        return stripped
     return None
 
 
 def confusables(path):
-    if path:
-        data = io.open(path, encoding='utf-8-sig').read()
-    else:
-        data = urllib.request.urlopen(CONFUSABLES_URL, timeout=60).read().decode('utf-8-sig')
+    raw = io.open(path, 'rb').read() if path else urllib.request.urlopen(CONFUSABLES_URL, timeout=60).read()
+    digest = hashlib.sha256(raw).hexdigest()
+    assert digest == CONFUSABLES_SHA256, 'confusables.txt is not the pinned Unicode %s file (sha256 %s)' % (UNICODE_VERSION, digest)
+    data = raw.decode('utf-8-sig')
     version = next((l.split(':', 1)[1].strip() for l in data.splitlines() if l.startswith('# Version:')), 'unknown')
     table = {}
     for line in data.splitlines():
@@ -95,7 +105,9 @@ SUPPLEMENT = dict(zip(
 
 def look_alikes(confusable):
     pairs = dict(SUPPLEMENT)
-    for cp in range(0x80, 0x20000):
+    # From '!' up: ASCII has look-alikes of its own (I and 1 look like l, m like rn), and a name typed in plain ASCII
+    # must reduce the same way as one typed with their non-ASCII look-alikes.
+    for cp in range(0x21, 0x20000):
         if not assigned(cp) or cp in SUPPLEMENT:
             continue
         c = chr(cp)
@@ -104,9 +116,20 @@ def look_alikes(confusable):
         if mapped is None:
             nfkc = unicodedata.normalize('NFKC', c)
             mapped = plain_latin(nfkc) if nfkc != c else None
-        if mapped is not None and mapped != c.lower():
+        if mapped is not None and mapped != c:
             pairs[cp] = mapped
-    return pairs
+    # A compatibility form can land on an ASCII letter that is itself a look-alike (full-width m is m, which looks like
+    # rn), so every result is mapped again through the ASCII entries until it no longer changes: the check maps each
+    # character once, so each result must already be final.
+    ascii_map = {chr(k): v for k, v in pairs.items() if k < 0x80}
+    for cp, out in list(pairs.items()):
+        while True:
+            settled = ''.join(ascii_map.get(ch, ch) for ch in out)
+            if settled == out:
+                break
+            out = settled
+        pairs[cp] = out
+    return {cp: out for cp, out in pairs.items() if out != chr(cp)}
 
 
 # ---- Output ---------------------------------------------------------------------------------------------------------
@@ -116,6 +139,8 @@ def write(name, text):
 
 
 def main():
+    assert unicodedata.unidata_version == UNICODE_VERSION, \
+        'This Python has Unicode %s; update UNICODE_VERSION and CONFUSABLES_SHA256 together' % unicodedata.unidata_version
     bases = base_letters()
     rows = []
     for i in range(0, len(bases), 16):
@@ -151,8 +176,9 @@ internal static class BaseLetters
     table, version = confusables(sys.argv[1] if len(sys.argv) > 1 else None)
     looks = look_alikes(table)
     # Examples the check must catch; a change in the data that drops one fails generation rather than weakening the check.
-    for cp, want in {0x1D409: 'j', 0x24BF: 'j', 0x1D0A: 'j', 0x0430: 'a', 0x03B1: 'a', 0xFB01: 'fi', 0x216E: 'd', 0x216D: 'c',
-                     0x04CF: 'l', 0xFF2A: 'j', 0x0456: 'i', 0x1F130: 'a'}.items():
+    for cp, want in {0x1D409: 'J', 0x24BF: 'J', 0x1D0A: 'j', 0x0430: 'a', 0x03B1: 'a', 0xFB01: 'fi', 0x216E: 'D', 0x216D: 'C',
+                     0x04CF: 'i', 0x04C0: 'l', 0xFF2A: 'J', 0x0456: 'i', 0x1F130: 'A', 0x0049: 'l', 0x0031: 'l', 0x007C: 'l',
+                     0x006D: 'rn', 0xFF4D: 'rn', 0x0406: 'l', 0x0399: 'l', 0x2160: 'l', 0x0030: 'O'}.items():
         assert looks.get(cp) == want, (hex(cp), looks.get(cp), want)
     entries = ['%X=%s' % (cp, looks[cp]) for cp in sorted(looks)]
     lines = []
@@ -168,10 +194,11 @@ using System.Collections.Frozen;
 namespace TeamsWork.Ticketing.Mcp.Tools;
 
 /// <summary>
-/// Code points that display as plain Latin letters or digits, mapped to them in lower case: the compatibility forms NFKC
-/// folds (full-width, mathematical, circled and squared letters, ligatures, Roman numerals) and the UTS #39 confusables
-/// whose prototype is plain Latin (Greek and Cyrillic look-alikes, small capitals), so the name check needs no
-/// globalisation data at run time.
+/// Code points that display as plain Latin letters or digits, mapped to them with case kept: the UTS #39 confusables
+/// whose prototype is plain Latin, ASCII included (I and 1 to l, m to rn; Greek and Cyrillic look-alikes), the
+/// compatibility forms NFKC folds (full-width, mathematical, circled and squared letters, ligatures, Roman numerals), and
+/// small capitals, so the name check needs no globalisation data at run time. The prototypes depend on case (I is l but
+/// i is i), so a name is mapped as written and in each case, never lower-cased first.
 /// </summary>
 internal static class LookAlikes
 {
@@ -184,7 +211,7 @@ internal static class LookAlikes
         .Select(e => e.Split('='))
         .ToFrozenDictionary(e => int.Parse(e[0], System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture), e => e[1]);
 
-    /// <summary>The plain lower-case letters <paramref name="c"/> looks like, or null when it isn't a look-alike.</summary>
+    /// <summary>The plain letters <paramref name="c"/> looks like, or null when it isn't a look-alike.</summary>
     public static string? Of(int c) => Map.GetValueOrDefault(c);
 }
 ''' % (unicodedata.unidata_version, version, '\n'.join(lines)))

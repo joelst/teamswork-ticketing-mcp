@@ -287,134 +287,157 @@ public sealed class TicketingClient
         CancellationToken cancellationToken)
     {
         // A request that isn't idempotent is only retried when it provably wasn't processed.
-
         for (int attempt = 1; ; attempt++)
         {
-            // One permit per upstream call, so retries count against the vendor quota too: first the caller's own share,
-            // then the process-wide quota.
-            using RateLimitLease? callerLease = _quota?.Acquire(callerKey);
-            using var lease = await _rateLimiter.AcquireAsync(cancellationToken);
-            using var inFlight = await _rateLimiter.AcquireInFlightAsync(cancellationToken);
-            using var request = new HttpRequestMessage(method, uri);
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            if (!string.IsNullOrEmpty(continuationToken))
+            (bool done, T? result, TimeSpan retryDelay) = await AttemptAsync<T>(method, path, uri, body, continuationToken, idempotent, callerKey, attempt, cancellationToken);
+            if (done)
             {
-                // TryAddWithoutValidation writes the value to the wire as is, so a CR/LF would inject headers into a
-                // request that carries the API key. Tool validation rejects such tokens too; this guards every caller.
-                if (!IsSafeHeaderValue(continuationToken))
-                {
-                    throw new TicketingApiException("The continuation token contains characters that can't be sent. Pass back the value the API returned.");
-                }
-
-                request.Headers.TryAddWithoutValidation("continuationToken", continuationToken);
+                return result!;
             }
 
-            if (body is ContentFactory factory)
+            // Waited out with every lease released, so a backoff holds no in-flight slot while others queue for one.
+            await Task.Delay(retryDelay, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// One attempt: the answer (Done), or the delay before trying again. Throws for a failure that isn't retried.
+    /// </summary>
+    private async Task<(bool Done, T? Result, TimeSpan RetryDelay)> AttemptAsync<T>(
+        HttpMethod method,
+        string path,
+        Uri uri,
+        object? body,
+        string? continuationToken,
+        bool idempotent,
+        string? callerKey,
+        int attempt,
+        CancellationToken cancellationToken)
+    {
+        // The in-flight slot is taken first because it is the only lease that is given back when released: a request
+        // refused a slot, or cancelled while waiting for one, then spends no share of either quota. Then one permit per
+        // upstream call, so retries count against the vendor quota too: the caller's own share, then the process-wide quota.
+        using var inFlight = await _rateLimiter.AcquireInFlightAsync(cancellationToken);
+        using RateLimitLease? callerLease = _quota?.Acquire(callerKey);
+        using var lease = await _rateLimiter.AcquireAsync(cancellationToken);
+        using var request = new HttpRequestMessage(method, uri);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        if (!string.IsNullOrEmpty(continuationToken))
+        {
+            // TryAddWithoutValidation writes the value to the wire as is, so a CR/LF would inject headers into a
+            // request that carries the API key. Tool validation rejects such tokens too; this guards every caller.
+            if (!IsSafeHeaderValue(continuationToken))
             {
-                request.Content = factory.Create();
-            }
-            else if (body is not null)
-            {
-                request.Content = JsonContent.Create(body, body.GetType(), options: JsonOptions);
+                throw new TicketingApiException("The continuation token contains characters that can't be sent. Pass back the value the API returned.");
             }
 
-            // HttpClient.Timeout ends once the headers arrive (ResponseHeadersRead), so this also bounds the body read:
-            // an upstream that sends headers and then stalls would otherwise hold the request open indefinitely.
-            // A request that isn't safe to repeat is seen through once it is sent: the caller's cancellation still stops the
-            // waiting before it (the rate limiter, a backoff), but not the exchange itself, which would leave a ticket or
-            // comment created with no one told. Only the server's own time limit ends it, and a time-out reports the
-            // outcome as unknown.
-            CancellationToken exchange = idempotent ? cancellationToken : CancellationToken.None;
-            using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(exchange);
-            attemptTimeout.CancelAfter(TimeSpan.FromSeconds(_options.RequestTimeoutSeconds));
+            request.Headers.TryAddWithoutValidation("continuationToken", continuationToken);
+        }
 
-            long started = _timeProvider.GetTimestamp();
-            HttpResponseMessage response;
+        if (body is ContentFactory factory)
+        {
+            request.Content = factory.Create();
+        }
+        else if (body is not null)
+        {
+            request.Content = JsonContent.Create(body, body.GetType(), options: JsonOptions);
+        }
+
+        // HttpClient.Timeout ends once the headers arrive (ResponseHeadersRead), so this also bounds the body read:
+        // an upstream that sends headers and then stalls would otherwise hold the request open indefinitely.
+        // A request that isn't safe to repeat is seen through once it is sent: the caller's cancellation still stops the
+        // waiting before it (the rate limiter, a backoff), but not the exchange itself, which would leave a ticket or
+        // comment created with no one told. Only the server's own time limit ends it, and a time-out reports the
+        // outcome as unknown.
+        CancellationToken exchange = idempotent ? cancellationToken : CancellationToken.None;
+        using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(exchange);
+        attemptTimeout.CancelAfter(TimeSpan.FromSeconds(_options.RequestTimeoutSeconds));
+
+        long started = _timeProvider.GetTimestamp();
+        HttpResponseMessage response;
+        try
+        {
+            response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attemptTimeout.Token);
+        }
+        catch (HttpRequestException ex) when (attempt < MaxAttempts && (idempotent || IsPreSendFailure(ex)))
+        {
+            _logger.LogWarning("Ticketing API {Method} /{Path} failed to connect (attempt {Attempt}); retrying. {Error}", method, path, attempt, ex.HttpRequestError);
+            return (false, default, Backoff(attempt, null));
+        }
+        catch (HttpRequestException ex)
+        {
+            throw Failure(idempotent, mayHaveBeenProcessed: !IsPreSendFailure(ex), null, $"Could not reach the Ticketing API ({ex.HttpRequestError}).", ex);
+        }
+        catch (TaskCanceledException ex) when (!exchange.IsCancellationRequested)
+        {
+            throw Failure(idempotent, mayHaveBeenProcessed: true, null, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
+        }
+
+        using (response)
+        {
+            TimeSpan elapsed = _timeProvider.GetElapsedTime(started);
+            _logger.LogDebug("Ticketing API {Method} /{Path} -> {Status} in {ElapsedMs} ms", method, path, (int)response.StatusCode, (long)elapsed.TotalMilliseconds);
+
+            if (IsRetryable(response.StatusCode, idempotent) && attempt < MaxAttempts)
+            {
+                _logger.LogWarning("Ticketing API {Method} /{Path} returned {Status} (attempt {Attempt}); retrying.", method, path, (int)response.StatusCode, attempt);
+                return (false, default, Backoff(attempt, response.Headers.RetryAfter));
+            }
+
+            ReadOnlyMemory<byte> payload;
             try
             {
-                response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attemptTimeout.Token);
+                payload = await ReadBodyAsync(response.Content, _options.MaxResponseBytes, attemptTimeout.Token);
             }
-            catch (HttpRequestException ex) when (attempt < MaxAttempts && (idempotent || IsPreSendFailure(ex)))
+            catch (OperationCanceledException ex) when (!exchange.IsCancellationRequested)
             {
-                _logger.LogWarning("Ticketing API {Method} /{Path} failed to connect (attempt {Attempt}); retrying. {Error}", method, path, attempt, ex.HttpRequestError);
-                await Task.Delay(Backoff(attempt, null), cancellationToken);
-                continue;
+                // The headers arrived, so the API received the request.
+                throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
             }
-            catch (HttpRequestException ex)
+            catch (Exception ex) when (ex is IOException or HttpRequestException)
             {
-                throw Failure(idempotent, mayHaveBeenProcessed: !IsPreSendFailure(ex), null, $"Could not reach the Ticketing API ({ex.HttpRequestError}).", ex);
+                // The connection dropped while the answer was arriving: the request was received, and may have been done.
+                throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The connection to the Ticketing API dropped while its answer was arriving.", ex);
             }
-            catch (TaskCanceledException ex) when (!exchange.IsCancellationRequested)
+            catch (TicketingApiException ex) when (!idempotent && !ex.OutcomeUnknown)
             {
-                throw Failure(idempotent, mayHaveBeenProcessed: true, null, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
+                // An answer too large to read, after the request was received.
+                throw TicketingApiException.Unknown(response.StatusCode, ex.Message, ex);
             }
 
-            using (response)
+            if (!response.IsSuccessStatusCode)
             {
-                TimeSpan elapsed = _timeProvider.GetElapsedTime(started);
-                _logger.LogDebug("Ticketing API {Method} /{Path} -> {Status} in {ElapsedMs} ms", method, path, (int)response.StatusCode, (long)elapsed.TotalMilliseconds);
-
-                if (IsRetryable(response.StatusCode, idempotent) && attempt < MaxAttempts)
-                {
-                    _logger.LogWarning("Ticketing API {Method} /{Path} returned {Status} (attempt {Attempt}); retrying.", method, path, (int)response.StatusCode, attempt);
-                    await Task.Delay(Backoff(attempt, response.Headers.RetryAfter), cancellationToken);
-                    continue;
-                }
-
-                string payload;
-                try
-                {
-                    payload = await ReadBodyAsync(response.Content, _options.MaxResponseBytes, attemptTimeout.Token);
-                }
-                catch (OperationCanceledException ex) when (!exchange.IsCancellationRequested)
-                {
-                    // The headers arrived, so the API received the request.
-                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
-                }
-                catch (Exception ex) when (ex is IOException or HttpRequestException)
-                {
-                    // The connection dropped while the answer was arriving: the request was received, and may have been done.
-                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The connection to the Ticketing API dropped while its answer was arriving.", ex);
-                }
-                catch (TicketingApiException ex) when (!idempotent && !ex.OutcomeUnknown)
-                {
-                    // An answer too large to read, after the request was received.
-                    throw TicketingApiException.Unknown(response.StatusCode, ex.Message, ex);
-                }
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    // A 4xx means the API refused the request; a 5xx can come after it already acted.
-                    throw Failure(idempotent, mayHaveBeenProcessed: (int)response.StatusCode >= 500, response.StatusCode, DescribeError(response.StatusCode, payload), null);
-                }
-
-                // Some endpoints report failures with HTTP 200 and error=true. The request reached the endpoint, and nothing
-                // says an error reported this way means nothing was done, so for a request that isn't safe to repeat it is
-                // an unknown outcome (with the API's message), like every other failure after the request arrived. Checked before
-                // the typed read, so an error response whose other fields don't fit the model still reports the API's error.
-                if (ErrorFlag(payload) is { Error.ValueKind: JsonValueKind.True } flagged)
-                {
-                    string? apiMessage = flagged.Message is { ValueKind: JsonValueKind.String } m ? m.GetString() : null;
-                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, apiMessage ?? "The Ticketing API reported an error.", null);
-                }
-
-                T? result;
-                try
-                {
-                    result = JsonSerializer.Deserialize<T>(payload, JsonOptions);
-                }
-                catch (JsonException ex)
-                {
-                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned a response that could not be parsed as JSON.", ex);
-                }
-
-                if (result is null)
-                {
-                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned an empty response.", null);
-                }
-
-                return result;
+                // A 4xx means the API refused the request; a 5xx can come after it already acted.
+                throw Failure(idempotent, mayHaveBeenProcessed: (int)response.StatusCode >= 500, response.StatusCode, DescribeError(response.StatusCode, payload.Span), null);
             }
+
+            // Some endpoints report failures with HTTP 200 and error=true. The request reached the endpoint, and nothing
+            // says an error reported this way means nothing was done, so for a request that isn't safe to repeat it is
+            // an unknown outcome (with the API's message), like every other failure after the request arrived. Checked before
+            // the typed read, so an error response whose other fields don't fit the model still reports the API's error.
+            if (ErrorFlag(payload.Span) is { Error.ValueKind: JsonValueKind.True } flagged)
+            {
+                string? apiMessage = flagged.Message is { ValueKind: JsonValueKind.String } m ? m.GetString() : null;
+                throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, apiMessage ?? "The Ticketing API reported an error.", null);
+            }
+
+            T? result;
+            try
+            {
+                // Read straight from the UTF-8 bytes: no text copy of the response (twice its size) is ever made.
+                result = JsonSerializer.Deserialize<T>(payload.Span, JsonOptions);
+            }
+            catch (JsonException ex)
+            {
+                throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned a response that could not be parsed as JSON.", ex);
+            }
+
+            if (result is null)
+            {
+                throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned an empty response.", null);
+            }
+
+            return (true, result, default);
         }
     }
 
@@ -466,11 +489,12 @@ public sealed class TicketingClient
     }
 
     /// <summary>
-    /// Reads the body as text, refusing to buffer more than <paramref name="maxBytes"/>. Decodes as
-    /// ReadAsStringAsync did: the declared charset (UTF-8 when absent or unknown), and a byte-order mark if there is
-    /// one, which is also stripped, since JSON parsing fails on a leading U+FEFF.
+    /// Reads the body as UTF-8 JSON, refusing to buffer more than <paramref name="maxBytes"/>. A byte-order mark decides
+    /// the encoding when there is one (and is removed, since JSON parsing fails on it); otherwise the declared charset
+    /// does (UTF-8 when absent or unknown), as ReadAsStringAsync decided. UTF-8, nearly every response, is used as read;
+    /// anything else is converted.
     /// </summary>
-    private static async Task<string> ReadBodyAsync(HttpContent content, int maxBytes, CancellationToken cancellationToken)
+    private static async Task<ReadOnlyMemory<byte>> ReadBodyAsync(HttpContent content, int maxBytes, CancellationToken cancellationToken)
     {
         if (content.Headers.ContentLength > maxBytes)
         {
@@ -478,7 +502,7 @@ public sealed class TicketingClient
         }
 
         await using Stream stream = await content.ReadAsStreamAsync(cancellationToken);
-        using var buffer = new MemoryStream();
+        using var buffer = new MemoryStream((int)(content.Headers.ContentLength ?? 0));
         byte[] chunk = new byte[81920];
         int read;
         while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
@@ -491,10 +515,20 @@ public sealed class TicketingClient
             buffer.Write(chunk, 0, read);
         }
 
-        buffer.Position = 0;
-        using var reader = new StreamReader(buffer, DeclaredEncoding(content.Headers.ContentType?.CharSet), detectEncodingFromByteOrderMarks: true);
-        return await reader.ReadToEndAsync(cancellationToken);
+        var data = new ReadOnlyMemory<byte>(buffer.GetBuffer(), 0, (int)buffer.Length);
+        (Encoding? marked, int markLength) = ByteOrderMark(data.Span);
+        Encoding encoding = marked ?? DeclaredEncoding(content.Headers.ContentType?.CharSet);
+        data = data[markLength..];
+        return encoding.CodePage == Encoding.UTF8.CodePage ? data : Encoding.UTF8.GetBytes(encoding.GetString(data.Span));
     }
+
+    private static (Encoding? Encoding, int Length) ByteOrderMark(ReadOnlySpan<byte> b) =>
+        b.StartsWith((ReadOnlySpan<byte>)[0xEF, 0xBB, 0xBF]) ? (Encoding.UTF8, 3)
+        : b.StartsWith((ReadOnlySpan<byte>)[0xFF, 0xFE, 0x00, 0x00]) ? (Encoding.UTF32, 4)
+        : b.StartsWith((ReadOnlySpan<byte>)[0x00, 0x00, 0xFE, 0xFF]) ? (new UTF32Encoding(bigEndian: true, byteOrderMark: false), 4)
+        : b.StartsWith((ReadOnlySpan<byte>)[0xFF, 0xFE]) ? (Encoding.Unicode, 2)
+        : b.StartsWith((ReadOnlySpan<byte>)[0xFE, 0xFF]) ? (Encoding.BigEndianUnicode, 2)
+        : (null, 0);
 
     private static Encoding DeclaredEncoding(string? charset)
     {
@@ -539,19 +573,21 @@ public sealed class TicketingClient
         (ex.HttpRequestError is HttpRequestError.ConnectionError && ex.InnerException is System.Net.Sockets.SocketException);
 
     /// <summary>
-    /// The longest one request can take, retries included: each attempt may wait behind a full rate-limiter queue (as
-    /// many windows as it takes the permits to serve it), then behind a full in-flight queue, and then its own time limit, with the longest honoured delay
-    /// between attempts. A caller that must let a request finish on its own (after the caller's token no longer applies)
-    /// bounds it by this, so it isn't cut short mid-exchange.
+    /// The longest one request can take, retries included. An attempt holds an in-flight slot while it waits for a rate
+    /// permit and then runs to its time limit, so one "hold" is at most a full rate-limiter queue (as many windows as the
+    /// permits need to serve it) plus the time limit. Each attempt waits its turn for a slot behind a full in-flight
+    /// queue (as many holds as it takes the slots to serve it) and then holds one itself; the longest honoured delay
+    /// comes between attempts, holding nothing. A caller that must let a request finish on its own (after the caller's
+    /// token no longer applies) bounds it by this, so it isn't cut short mid-exchange.
     /// </summary>
     internal static TimeSpan LongestRequest(TicketingOptions options)
     {
-        int windows = (TicketingRateLimiter.QueueLimit + 1 + options.RateLimitPermits - 1) / Math.Max(1, options.RateLimitPermits);
-        // Then a turn for an in-flight slot: each request ahead holds one for at most one attempt and its retry delay.
-        int turns = (TicketingRateLimiter.InFlightQueueLimit + options.MaxConcurrentUpstreamRequests) / Math.Max(1, options.MaxConcurrentUpstreamRequests);
-        TimeSpan perAttempt = TimeSpan.FromSeconds((windows * options.RateLimitWindowSeconds) + options.RequestTimeoutSeconds) +
-                              turns * (TimeSpan.FromSeconds(options.RequestTimeoutSeconds) + MaxRetryDelay);
-        return MaxAttempts * perAttempt + (MaxAttempts - 1) * MaxRetryDelay + TimeSpan.FromSeconds(5);
+        int permits = Math.Max(1, options.RateLimitPermits);
+        int slots = Math.Max(1, options.MaxConcurrentUpstreamRequests);
+        int windows = (TicketingRateLimiter.QueueLimit + permits) / permits;                 // ceil((queue + 1) / permits)
+        int turns = (TicketingRateLimiter.InFlightQueueLimit + slots - 1) / slots;           // ceil(queue / slots)
+        TimeSpan hold = TimeSpan.FromSeconds((windows * options.RateLimitWindowSeconds) + options.RequestTimeoutSeconds);
+        return MaxAttempts * (turns + 1) * hold + (MaxAttempts - 1) * MaxRetryDelay + TimeSpan.FromSeconds(5);
     }
 
     private static TimeSpan Backoff(int attempt, RetryConditionHeaderValue? retryAfter)
@@ -565,7 +601,7 @@ public sealed class TicketingClient
         return TimeSpan.FromMilliseconds(baseMs + Random.Shared.Next(0, 250));
     }
 
-    private static string DescribeError(HttpStatusCode status, string payload)
+    private static string DescribeError(HttpStatusCode status, ReadOnlySpan<byte> payload)
     {
         string? apiMessage = ExtractMessage(payload);
         string prefix = status switch
@@ -581,7 +617,7 @@ public sealed class TicketingClient
         return string.IsNullOrWhiteSpace(apiMessage) ? prefix : $"{prefix} API message: {apiMessage}";
     }
 
-    private static string? ExtractMessage(string payload)
+    private static string? ExtractMessage(ReadOnlySpan<byte> payload)
     {
         try
         {
@@ -599,7 +635,7 @@ public sealed class TicketingClient
     /// of the document is skipped rather than built into a second full copy; the fields are kept as JSON values, so an
     /// unexpected type in one can't hide the other. Null when the response isn't an object.
     /// </summary>
-    private static ErrorFlagFields? ErrorFlag(string payload)
+    private static ErrorFlagFields? ErrorFlag(ReadOnlySpan<byte> payload)
     {
         try
         {

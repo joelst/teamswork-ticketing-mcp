@@ -168,7 +168,8 @@ internal sealed partial class InstanceLookup
             throw new McpException($"'{paramName}' name contains invisible characters. Give the person's name as it should appear.");
         }
 
-        if (people.FirstOrDefault(p => NameSkeleton(p.Name) == NameSkeleton(given.Name)) is Persona namesake)
+        IReadOnlySet<string> givenSkeletons = NameSkeletons(given.Name);
+        if (people.FirstOrDefault(p => NameSkeletons(p.Name).Overlaps(givenSkeletons)) is Persona namesake)
         {
             throw new McpException(
                 $"'{paramName}' uses the name of {namesake.Name}, who is in the assignee list with a different ID and email. Use their " +
@@ -248,22 +249,34 @@ internal sealed partial class InstanceLookup
         Guid.TryParse(a?.Trim(), out Guid ga) && Guid.TryParse(b?.Trim(), out Guid gb) ? ga == gb : Same(a, b);
 
     /// <summary>
-    /// A name reduced to what a reader sees, using nothing that depends on globalisation data (the Linux build has none,
-    /// and Unicode normalisation there silently does nothing): invisible code points removed; accents removed from
-    /// Latin, Greek and Cyrillic letters however they are written (a precomposed "é" through <see cref="BaseLetters"/>,
-    /// or "e" and a combining accent, by dropping the mark); anything that displays as plain Latin letters mapped to them
-    /// (<see cref="LookAlikes"/>: compatibility forms and the Unicode confusables); runs of whitespace collapsed; case
-    /// ignored. In other scripts a combining mark is part of
-    /// the letter (a Devanagari vowel sign), so it is kept there. It works on whole code points, so characters outside
-    /// the basic plane aren't missed. It errs towards matching: "José" and "Jose" are the same name here, which only
-    /// means an outsider called Jose must be told apart.
+    /// What a name looks like to a reader, as written and in upper and lower case: two names that share any of these
+    /// look the same (or differ only in case). Look-alikes are defined per case (capital I looks like l, small i doesn't),
+    /// so each case of the name is reduced on its own and the results compared, rather than lower-casing first, which
+    /// would make "Ivan" and a Cyrillic "Іvan" differ, or merging case classes, which would chain unrelated letters
+    /// (Greek Η looks like H, its small η like n).
     /// </summary>
-    internal static string NameSkeleton(string? name)
+    internal static IReadOnlySet<string> NameSkeletons(string? name)
     {
-        var builder = new System.Text.StringBuilder((name ?? "").Length);
+        string n = name ?? "";
+        return new HashSet<string>(StringComparer.Ordinal) { Skeleton(n), Skeleton(n.ToUpperInvariant()), Skeleton(n.ToLowerInvariant()) };
+    }
+
+    /// <summary>
+    /// One case of a name reduced to what a reader sees, using nothing that depends on globalisation data (the Linux build
+    /// has none, and Unicode normalisation there silently does nothing): invisible code points removed; accents removed
+    /// from Latin, Greek and Cyrillic letters however they are written (a precomposed "é" through
+    /// <see cref="BaseLetters"/>, or "e" and a combining accent, by dropping the mark); every character mapped, on its own
+    /// case, to the plain Latin letters it looks like (<see cref="LookAlikes"/>: the Unicode confusables, ASCII included,
+    /// and compatibility forms); the result lower-cased; runs of whitespace collapsed. In other scripts a combining mark is
+    /// part of the letter (a Devanagari vowel sign), so it is kept there. It errs towards matching: "José" and "Jose", or
+    /// "Ian" and "lan", are the same name here, which only means an outsider with such a name must be told apart.
+    /// </summary>
+    private static string Skeleton(string name)
+    {
+        var builder = new System.Text.StringBuilder(name.Length);
         bool space = false;
         bool accentsDropped = true; // a mark here would sit on the start of the name, a space, or a Latin, Greek or Cyrillic letter
-        foreach (System.Text.Rune rune in (name ?? "").EnumerateRunes())
+        foreach (System.Text.Rune rune in name.EnumerateRunes())
         {
             if (IsInvisible(rune))
             {
@@ -290,8 +303,8 @@ internal sealed partial class InstanceLookup
             }
 
             int plain = BaseLetters.Of(rune.Value);
-            string? letters = LookAlikes.Of(plain) ?? LookAlikes.Of(System.Text.Rune.ToLowerInvariant(new System.Text.Rune(plain)).Value);
-            builder.Append(letters ?? System.Text.Rune.ToLowerInvariant(new System.Text.Rune(plain)).ToString());
+            string? letters = LookAlikes.Of(plain);
+            builder.Append((letters ?? new System.Text.Rune(plain).ToString()).ToLowerInvariant());
             if (!mark)
             {
                 // Latin, Greek and Cyrillic (with their extensions) and the phonetic and extended Latin blocks.
