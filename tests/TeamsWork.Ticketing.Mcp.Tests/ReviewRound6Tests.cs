@@ -11,7 +11,6 @@ namespace TeamsWork.Ticketing.Mcp.Tests;
 /// <summary>Behaviour added in the sixth review round.</summary>
 public sealed class ReviewRound6Tests
 {
-    private const string TicketA = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
     private static readonly TicketUser Actor = new("u1", "Jane Doe", "jane@example.test");
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
