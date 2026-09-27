@@ -198,7 +198,7 @@ public sealed class ReviewRound7Tests
         StartupConfigurationException ex = Assert.Throws<StartupConfigurationException>(() =>
             UploadFolder.Create(TestFactory.Options(o => o.UploadRoot = folder), null));
 
-        Assert.Contains("system folder", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("can't hold uploads", ex.Message, StringComparison.Ordinal); // as a kernel filesystem or a system folder
     }
 
     // ---- Upstream requests in flight, and the error flag ----------------------------------------------------------------
