@@ -94,6 +94,22 @@ public sealed class InputHardeningTests
         Assert.Equal(email, ToolValidation.RequireEmail(email, "email"));
     }
 
+    // ---- List fields: an option chosen again is sent once -------------------------------------------------------------
+
+    [Fact]
+    public void A_list_value_is_never_longer_than_the_fields_options()
+    {
+        Instance instance = JsonSerializer.Deserialize<ItemResponse<Instance>>("""
+            {"item":{"id":"i","customFields":[{"id":"11111111-1111-1111-1111-111111111111","title":"Devices","type":{"key":"list"},
+              "isMultiple":true,"options":[{"key":"opt1","text":"Laptop"},{"key":"opt2","text":"Phone"}]}]}}
+            """, TicketingClient.JsonOptions)!.Item!;
+        string[] chosen = [.. Enumerable.Repeat("opt1", 5000), "Laptop", "Phone", "opt2"];
+
+        JsonElement result = InstanceLookup.CheckCustomFields(new Dictionary<string, JsonElement> { ["Devices"] = JsonSerializer.SerializeToElement(chosen) }, instance);
+
+        Assert.Equal(["opt1", "opt2"], result.GetProperty("11111111-1111-1111-1111-111111111111").EnumerateArray().Select(e => e.GetString()));
+    }
+
     // ---- The post-create follow-up can't fail on its own timer --------------------------------------------------------
 
     [Fact]

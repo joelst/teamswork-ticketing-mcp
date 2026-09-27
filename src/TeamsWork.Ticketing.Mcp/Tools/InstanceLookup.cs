@@ -577,8 +577,14 @@ internal sealed partial class InstanceLookup
                 option = options.FirstOrDefault(o => Same(o.Key, chosen) || Same(o.Text, chosen));
             }
 
-            keys.Add(option.Key ?? throw Miss(
-                $"{label} has no option '{chosen}'. Options: {string.Join(", ", options.Select(o => o.Text is null ? o.Key : $"{o.Key} ({o.Text})"))}."));
+            string key = option.Key ?? throw Miss(
+                $"{label} has no option '{chosen}'. Options: {string.Join(", ", options.Select(o => o.Text is null ? o.Key : $"{o.Key} ({o.Text})"))}.");
+            // An option chosen twice (by key and by its text, say) is sent once, so the list is never longer than the
+            // field's own options, however long the array given.
+            if (!keys.Contains(key, StringComparer.Ordinal))
+            {
+                keys.Add(key);
+            }
         }
 
         return JsonSerializer.SerializeToElement(keys, TicketingClient.JsonOptions);
