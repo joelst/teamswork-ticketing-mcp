@@ -83,10 +83,7 @@ public sealed class UpstreamQuota : IDisposable
         throw new TicketingApiException(
             $"You have used your share of the Ticketing API quota ({_perMinute} requests a minute per caller). Wait a minute and " +
             "retry. Tools that read many tickets (list_my_tickets, list_sla_risk, count_tickets, find_ticket_by_number) use several " +
-            "requests each; narrow them with filters.")
-        {
-            QuotaRefused = true,
-        };
+            "requests each; narrow them with filters.");
     }
 
     public void Dispose() => _limiter?.Dispose();

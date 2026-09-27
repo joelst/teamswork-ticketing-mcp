@@ -143,11 +143,11 @@ public sealed class InstanceCache
 
     /// <summary>
     /// The shared logic: answer from the cache, or join a read of the current generation, or start one. Starting is
-    /// atomic: the read is reserved under the lock before its starter is charged, so two callers can't both decide to
-    /// start one. If the starter's share is used up, the reservation is withdrawn and the starter alone is refused;
-    /// callers who had joined it try again on their own account (joining another read, or starting and paying for one)
-    /// rather than inheriting that refusal. <paramref name="refreshSlot"/> is told, under the lock, when an honoured
-    /// refresh starts and when it ends however it ends, so the next caller's state sees it.
+    /// atomic: the starter is charged and the read reserved in one locked section (the quota check doesn't wait), so a
+    /// caller arriving meanwhile always joins it rather than paying for, or being refused, a read already under way. A
+    /// starter whose share is used up is refused before anything is reserved, so no one else sees that refusal.
+    /// <paramref name="refreshSlot"/> is told, under the lock, when an honoured refresh starts and when it ends however
+    /// it ends, so the next caller's state sees it.
     /// </summary>
     private async Task<T> GetAsync<TKey, T>(
         Dictionary<TKey, InFlight<T>> reads,
@@ -161,81 +161,57 @@ public sealed class InstanceCache
         where TKey : notnull
         where T : class
     {
-        while (true)
+        TaskCompletionSource<T>? mine = null;
+        Task<T> task;
+        TKey key;
+        bool honoured;
+        int generation;
+        lock (_lock)
         {
-            TaskCompletionSource<T>? mine = null;
-            Task<T> task;
-            TKey key;
-            bool honoured;
-            int generation;
-            lock (_lock)
+            (honoured, T? cached, generation) = state(refresh);
+            if (cached is not null)
             {
-                (honoured, T? cached, generation) = state(refresh);
-                if (cached is not null)
-                {
-                    return cached;
-                }
-
-                key = keyOf(honoured);
-                if (reads.TryGetValue(key, out InFlight<T>? inFlight) && inFlight.Generation == generation)
-                {
-                    task = inFlight.Task;
-                }
-                else
-                {
-                    mine = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    task = mine.Task;
-                    reads[key] = new InFlight<T>(task, generation);
-                    if (honoured)
-                    {
-                        refreshSlot(true);
-                    }
-                }
+                return cached;
             }
 
-            if (mine is not null)
+            key = keyOf(honoured);
+            if (reads.TryGetValue(key, out InFlight<T>? inFlight) && inFlight.Generation == generation)
             {
-                // Called under the lock on every path that ends this read.
-                void Forget()
-                {
-                    if (reads.TryGetValue(key, out InFlight<T>? current) && ReferenceEquals(current.Task, mine.Task))
-                    {
-                        reads.Remove(key);
-                    }
-
-                    if (honoured)
-                    {
-                        refreshSlot(false);
-                    }
-                }
-
-                try
-                {
-                    _quota?.Acquire(_caller?.Key)?.Dispose();
-                }
-                catch (TicketingApiException refused) when (refused.QuotaRefused)
-                {
-                    lock (_lock)
-                    {
-                        Forget();
-                    }
-
-                    mine.SetException(refused); // callers who joined see a refusal and try for themselves
-                    throw;
-                }
-
-                _ = ReadAsync(mine, read, value => store(value, honoured, generation), Forget);
+                task = inFlight.Task;
             }
-
-            try
+            else
             {
-                return await task.WaitAsync(cancellationToken);
-            }
-            catch (TicketingApiException ex) when (mine is null && ex.QuotaRefused)
-            {
-                // The caller who started the read was refused before it went out: try again on this caller's account.
+                _quota?.Acquire(_caller?.Key)?.Dispose(); // throws, leaving nothing reserved, if this caller's share is used up
+                mine = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+                task = mine.Task;
+                reads[key] = new InFlight<T>(task, generation);
+                if (honoured)
+                {
+                    refreshSlot(true);
+                }
             }
         }
+
+        if (mine is not null)
+        {
+            // Called under the lock on every path that ends this read.
+            void Forget()
+            {
+                if (reads.TryGetValue(key, out InFlight<T>? current) && ReferenceEquals(current.Task, mine.Task))
+                {
+                    reads.Remove(key);
+                }
+
+                if (honoured)
+                {
+                    refreshSlot(false);
+                }
+            }
+
+            _ = ReadAsync(mine, read, value => store(value, honoured, generation), Forget);
+        }
+
+        return await task.WaitAsync(cancellationToken);
     }
 
     /// <summary>

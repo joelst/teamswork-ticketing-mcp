@@ -43,9 +43,6 @@ public sealed class TicketingApiException : Exception
     /// </summary>
     public bool OutcomeUnknown { get; init; }
 
-    /// <summary>True when the caller's own share of the upstream quota refused the request before it was sent.</summary>
-    public bool QuotaRefused { get; init; }
-
     internal const string OutcomeUnknownAdvice =
         " The request may have been carried out anyway, so check before trying again (get_ticket_context shows a ticket's latest " +
         "comments and changes; find_similar_tickets finds a ticket that may have just been created): repeating it could do it twice.";
