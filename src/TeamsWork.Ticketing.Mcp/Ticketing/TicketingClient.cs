@@ -408,7 +408,7 @@ public sealed class TicketingClient
             if (!response.IsSuccessStatusCode)
             {
                 // A 4xx means the API refused the request; a 5xx can come after it already acted.
-                throw Failure(idempotent, mayHaveBeenProcessed: (int)response.StatusCode >= 500, response.StatusCode, DescribeError(response.StatusCode, payload.Span), null);
+                throw Failure(idempotent, mayHaveBeenProcessed: (int)response.StatusCode >= 500, response.StatusCode, DescribeError(response.StatusCode, CleanApiMessage(ExtractMessage(payload.Span))), null);
             }
 
             // Some endpoints report failures with HTTP 200 and error=true. The request reached the endpoint, and nothing
@@ -417,7 +417,7 @@ public sealed class TicketingClient
             // the typed read, so an error response whose other fields don't fit the model still reports the API's error.
             if (ErrorFlag(payload.Span) is { Error.ValueKind: JsonValueKind.True } flagged)
             {
-                string? apiMessage = flagged.Message is { ValueKind: JsonValueKind.String } m ? m.GetString() : null;
+                string? apiMessage = CleanApiMessage(flagged.Message is { ValueKind: JsonValueKind.String } m ? m.GetString() : null);
                 throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, apiMessage ?? "The Ticketing API reported an error.", null);
             }
 
@@ -590,6 +590,12 @@ public sealed class TicketingClient
         return MaxAttempts * (turns + 1) * hold + (MaxAttempts - 1) * MaxRetryDelay + TimeSpan.FromSeconds(5);
     }
 
+    /// <summary><paramref name="wait"/>, or the longest a timer can wait (uint.MaxValue - 1 ms) if it is longer.</summary>
+    internal static TimeSpan TimerLimit(TimeSpan wait) =>
+        wait < MaxTimer ? wait : MaxTimer;
+
+    private static readonly TimeSpan MaxTimer = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
+
     private static TimeSpan Backoff(int attempt, RetryConditionHeaderValue? retryAfter)
     {
         if (retryAfter?.Delta is TimeSpan delta && delta > TimeSpan.Zero)
@@ -601,9 +607,8 @@ public sealed class TicketingClient
         return TimeSpan.FromMilliseconds(baseMs + Random.Shared.Next(0, 250));
     }
 
-    private static string DescribeError(HttpStatusCode status, ReadOnlySpan<byte> payload)
+    private static string DescribeError(HttpStatusCode status, string? apiMessage)
     {
-        string? apiMessage = ExtractMessage(payload);
         string prefix = status switch
         {
             HttpStatusCode.Unauthorized => "The Ticketing API rejected the server's API key (401). Ask an administrator to check the key stored in Key Vault.",
@@ -616,6 +621,36 @@ public sealed class TicketingClient
 
         return string.IsNullOrWhiteSpace(apiMessage) ? prefix : $"{prefix} API message: {apiMessage}";
     }
+
+    /// <summary>
+    /// The API's own error message, as passed on to the agent: nothing checks what the vendor puts in it, so the API key
+    /// (plain or URL-escaped, in case the message quotes the request URL) is replaced, control characters are dropped,
+    /// and it is cut to <see cref="MaxApiMessageLength"/> characters (a response may be megabytes).
+    /// </summary>
+    internal string? CleanApiMessage(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return null;
+        }
+
+        if (!string.IsNullOrEmpty(_options.ApiKey))
+        {
+            message = message.Replace(_options.ApiKey, "[API key]", StringComparison.Ordinal)
+                .Replace(Uri.EscapeDataString(_options.ApiKey), "[API key]", StringComparison.OrdinalIgnoreCase);
+        }
+
+        message = new string(message.Where(c => !char.IsControl(c)).ToArray()).Trim();
+        if (message.Length <= MaxApiMessageLength)
+        {
+            return message;
+        }
+
+        int cut = char.IsHighSurrogate(message[MaxApiMessageLength - 1]) ? MaxApiMessageLength - 1 : MaxApiMessageLength;
+        return message[..cut] + "...";
+    }
+
+    internal const int MaxApiMessageLength = 500;
 
     private static string? ExtractMessage(ReadOnlySpan<byte> payload)
     {

@@ -62,6 +62,22 @@ internal static class ToolValidation
         return value.Trim();
     }
 
+    /// <summary>
+    /// <see cref="RequireText"/> for a one-line value such as a person's name: control characters (C0 and C1, tabs and
+    /// line breaks included) are refused. They render as nothing, so "Jane Doe" followed by U+0001 would display as a
+    /// listed person's name while comparing as another.
+    /// </summary>
+    public static string RequireLine(string? value, string paramName, int maxLength)
+    {
+        string text = RequireText(value, paramName, maxLength);
+        if (text.Any(char.IsControl))
+        {
+            throw new McpException($"'{paramName}' must be one line of text, without control characters.");
+        }
+
+        return text;
+    }
+
     public static string? OptionalText(string? value, string paramName, int maxLength = 20_000)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -248,21 +264,48 @@ internal static class ToolValidation
         }
     }
 
+    /// <summary>
+    /// An absolute http(s) URL that reads as what it opens: no user name or password before the host (which makes
+    /// https://sharepoint.com@evil.example open evil.example), and an ASCII host, with an internationalised name in its
+    /// xn-- form, as for email domains, so look-alike letters can't pass for a known site. Send it as
+    /// <see cref="Uri.AbsoluteUri"/>, which keeps escapes escaped: <see cref="Uri.ToString"/> would turn %22%3E into
+    /// markup and %E2%80%AE into a right-to-left override.
+    /// </summary>
     public static Uri RequireHttpUrl(string? value, string paramName)
     {
-        if (!Uri.TryCreate(value?.Trim(), UriKind.Absolute, out Uri? uri) ||
+        value = value?.Trim();
+        if (value is { Length: > MaxUrlLength })
+        {
+            throw new McpException($"'{paramName}' must be at most {MaxUrlLength} characters.");
+        }
+
+        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) ||
             (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
         {
             throw new McpException($"'{paramName}' must be an absolute http(s) URL.");
         }
 
+        if (uri.UserInfo.Length > 0)
+        {
+            throw new McpException($"'{paramName}' must not include a user name or password before the host.");
+        }
+
+        if (!System.Text.Ascii.IsValid(uri.Host))
+        {
+            throw new McpException($"'{paramName}' must have an ASCII host name; write an internationalised domain in its xn-- form.");
+        }
+
         return uri;
     }
+
+    public const int MaxUrlLength = 2048;
 
     /// <summary>
     /// Validates a single, bare email address and returns it in canonical form: the local part as given, the domain in
     /// lower case. MailAddress also accepts lists ("a@x.com, b@y.com") and display names ("Jane &lt;j@y.com&gt;"), where
-    /// the address it reports isn't the text given, so anything but one plain address is refused. The domain must be in
+    /// the address it reports isn't the text given, so anything but one plain address is refused. So is a quoted local
+    /// part ("jane@evil.com"@contoso.com), which reads as another address and can carry commas and angle brackets: the
+    /// local part must be a dot-atom, as every real mailbox is. The domain must be in
     /// ASCII (an internationalised domain in its punycode form): folding Unicode domains depends on globalisation data the
     /// Linux build doesn't carry, and a full-width "ｃontoso.com" must not pass as, or differ from, contoso.com.
     /// </summary>
@@ -290,7 +333,8 @@ internal static class ToolValidation
     {
         if (!System.Net.Mail.MailAddress.TryCreate(value, out System.Net.Mail.MailAddress? address) ||
             !string.IsNullOrEmpty(address.DisplayName) ||
-            !string.Equals(address.Address, value, StringComparison.Ordinal))
+            !string.Equals(address.Address, value, StringComparison.Ordinal) ||
+            !IsDotAtom(address.User))
         {
             return (null, EmailError.NotOneAddress);
         }
@@ -302,6 +346,15 @@ internal static class ToolValidation
 
         return IsHostName(address.Host) ? (address.User + "@" + address.Host.ToLowerInvariant(), EmailError.None) : (null, EmailError.NotHostName);
     }
+
+    /// <summary>
+    /// Whether an address's local part is a dot-atom: no quotes, backslashes, brackets, parentheses, commas, colons,
+    /// semicolons, at signs, spaces, or control characters, and dots only between other characters. Letters outside
+    /// ASCII are allowed, as internationalised mailboxes use them.
+    /// </summary>
+    private static bool IsDotAtom(string local) =>
+        local.Length > 0 && local[0] != '.' && local[^1] != '.' && !local.Contains("..", StringComparison.Ordinal) &&
+        !local.Any(c => char.IsWhiteSpace(c) || char.IsControl(c) || "\"\\()<>[],:;@".Contains(c, StringComparison.Ordinal));
 
     /// <summary>The domain of an address from <see cref="RequireEmail"/>, lower case.</summary>
     public static string EmailDomain(string address) => address[(address.LastIndexOf('@') + 1)..].ToLowerInvariant();

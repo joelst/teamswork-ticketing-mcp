@@ -150,8 +150,8 @@ public sealed record UserRef(
         !string.IsNullOrWhiteSpace(Id) && !string.IsNullOrWhiteSpace(Name) && !string.IsNullOrWhiteSpace(Email);
 
     internal TicketUser ToTicketUser(string paramName) =>
-        new(ToolValidation.RequireText(Id, $"{paramName}.id", 320),
-            ToolValidation.RequireText(Name, $"{paramName}.name", 256),
+        new(ToolValidation.RequireLine(Id, $"{paramName}.id", 320),
+            ToolValidation.RequireLine(Name, $"{paramName}.name", 256),
             ToolValidation.RequireEmail(Email, $"{paramName}.email"));
 }
 
@@ -170,6 +170,6 @@ public sealed record LinkRef(
     [property: JsonPropertyName("caption")] string Caption)
 {
     internal AttachmentLink ToAttachmentLink(int index) =>
-        new(ToolValidation.RequireHttpUrl(Url, $"links[{index}].url").ToString(),
+        new(ToolValidation.RequireHttpUrl(Url, $"links[{index}].url").AbsoluteUri,
             ToolValidation.RequireText(Caption, $"links[{index}].caption", 256));
 }
