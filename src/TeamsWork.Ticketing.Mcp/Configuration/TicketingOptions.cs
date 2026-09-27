@@ -90,8 +90,9 @@ public sealed class TicketingOptions
     public int InstanceCacheSeconds { get; set; } = 300;
 
     /// <summary>
-    /// Most tickets one call to a filtering tool (list_my_tickets, list_sla_risk, count_tickets) reads. The API has no
-    /// filter for assignee, requestor, or SLA state, so those tools page through tickets and filter them here.
+    /// Most tickets one call to a filtering tool (list_my_tickets, list_sla_risk, count_tickets) or to
+    /// find_ticket_by_number reads. The API has no filter for assignee, requestor, SLA state, or ticket number, so those
+    /// tools page through tickets and filter them here.
     /// </summary>
     [Range(1, 10_000)]
     public int MaxScanTickets { get; set; } = 1000;

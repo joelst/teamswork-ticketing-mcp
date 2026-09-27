@@ -279,7 +279,7 @@ Estimated running cost: Container Apps consumption with scale-to-zero (mostly wi
 | `Ticketing:BaseUrl` | appsettings / env | Ticketing API base URL, for an endpoint `Region` doesn't cover. Set one or the other |
 | `Ticketing:InstanceCacheSeconds` | env | How long instance settings and tags are cached, default 300; `0` turns it off |
 | `Ticketing:MaxScanTickets` | env | Most tickets one filtering tool call (or ticket-number lookup) reads, default 1000 |
-| `Ticketing:ExternalEmailDomains` | env / appsettings | Comma-separated email domains allowed for people outside the assignee list (requestors, people fields); unset allows any. Matching is exact (list each subdomain), ASCII only (punycode for an internationalised domain); startup refuses wildcards |
+| `Ticketing:ExternalEmailDomains` | env / appsettings; hosted: `externalEmailDomains` in app.bicep (pipeline variable `externalEmailDomains`) | Comma-separated email domains allowed for people outside the assignee list (requestors, people fields); unset allows any. Matching is exact (list each subdomain), ASCII only (punycode for an internationalised domain); startup refuses wildcards |
 | `Ticketing:MaxUpstreamRequestsPerCallerPerMinute` | env | Upstream requests one caller may cause per minute, counting every request a tool call makes, default 50; `0` turns it off (Entra mode) |
 | `Ticketing:UploadRoot` | env / user secrets (stdio only) | Folder `upload_ticket_files` may read; unset turns uploads off |
 | `Ticketing:MaxUploadBytes` | env | Largest total size of one upload, default 10 MiB |
@@ -292,4 +292,9 @@ Estimated running cost: Container Apps consumption with scale-to-zero (mostly wi
 | `Mcp:MaxRequestBodyBytes` | env | Largest request body accepted, default 1 MiB |
 | `Ticketing:MaxResponseBytes` | env | Largest upstream response read, default 8 MiB |
 | `Ticketing:MaxConcurrentUpstreamRequests` | env | Upstream requests in flight at once across all callers, default 8, bounding the memory responses take; up to 32 more wait their turn, and beyond that a request is refused as busy |
+| `Ticketing:RateLimitPermits`, `Ticketing:RateLimitWindowSeconds` | env | The process-wide upstream limit, default 100 requests per 60 s to match the vendor's. Keep `MaxUpstreamRequestsPerCallerPerMinute` below it |
+| `Ticketing:DefaultPageSize`, `Ticketing:MaxPageSize` | env | Page size when a tool call gives none (default 20) and the largest it may ask for (default 100); startup refuses a default above the maximum |
+| `Ticketing:RequestTimeoutSeconds` | env | Time limit for each upstream attempt, default 30 |
+| `Entra:RequiredScope`, `Entra:RequiredAppRole` | appsettings / env | What a caller's token must carry: the delegated scope (default `access_as_user`) or the app role (default `Ticketing.ReadWrite`) |
+| `Entra:Instance` | appsettings / env | Entra sign-in endpoint, default `https://login.microsoftonline.com/` |
 | `KeyVault:Uri` | env (local only) | Load `Ticketing--ApiKey` from Key Vault with `DefaultAzureCredential` |
