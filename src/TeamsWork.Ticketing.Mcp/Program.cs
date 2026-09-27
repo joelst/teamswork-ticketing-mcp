@@ -110,11 +110,7 @@ static async Task RunStdioAsync(string[] args)
 // through user secrets, environment variables, or the command line. The hosted server keeps the file in its image.
 static void UseBuiltInDefaultsInsteadOfFiles(IConfigurationBuilder configuration)
 {
-    List<IConfigurationSource> files = configuration.Sources
-        .OfType<Microsoft.Extensions.Configuration.Json.JsonConfigurationSource>()
-        .Where(s => s.Path?.StartsWith("appsettings", StringComparison.OrdinalIgnoreCase) == true)
-        .Cast<IConfigurationSource>()
-        .ToList();
+    List<IConfigurationSource> files = configuration.Sources.Where(SettingsFiles.IsSettingsFile).ToList();
     int at = files.Count > 0 ? configuration.Sources.IndexOf(files[0]) : 0;
     foreach (IConfigurationSource file in files)
     {
@@ -136,7 +132,13 @@ static void UseBuiltInDefaultsInsteadOfFiles(IConfigurationBuilder configuration
 static async Task RunHttpAsync(string[] args)
 {
     WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = AppContext.BaseDirectory });
-    AuthMode authMode = AuthModeResolver.Resolve(builder.Configuration, args);
+    // Whether the files are trusted depends on the mode, so the mode can't come from them: an appsettings.json left
+    // beside the executable could otherwise switch it to unauthenticated local mode (or stop startup).
+    AuthMode authMode;
+    using (ConfigurationRoot trusted =SettingsFiles.Without(builder.Configuration))
+    {
+        authMode = AuthModeResolver.Resolve(trusted, args);
+    }
 
     if (authMode == AuthMode.Local)
     {

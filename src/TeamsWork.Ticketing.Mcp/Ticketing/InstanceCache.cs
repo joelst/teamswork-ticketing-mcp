@@ -15,8 +15,8 @@ namespace TeamsWork.Ticketing.Mcp.Ticketing;
 ///   <item>a copy is replaced only once a fresh one has been read;</item>
 ///   <item>a refresh is honoured at most once per <see cref="MinRefreshInterval"/> for the whole cache (not per copy, so
 ///   cycling time zone offsets doesn't multiply it); within that interval it is an ordinary read. The slot is taken when
-///   a refresh starts, so while one is out, a refresh asked for at the same offset joins it and one at another offset is
-///   an ordinary read;</item>
+///   a refresh starts, so while one is out, a refresh or ordinary read asked for at the same offset joins it and a
+///   refresh at another offset is an ordinary read;</item>
 ///   <item>the caller who starts a read is charged for it against their own quota share, and refused alone if it is
 ///   used up; callers who join a read in flight share it at no charge and never see another caller's quota error;</item>
 ///   <item>a successful refresh starts a new generation: reads that began before it can't store their older copy, and new
@@ -117,7 +117,7 @@ public sealed class InstanceCache
                 bool honoured = refreshing && _time.GetUtcNow() - _lastTagRefresh >= MinRefreshInterval;
                 return (honoured, Usable(_tags, honoured), _tagGeneration);
             },
-            _ => { }, // one copy, so a refresh already out is always joined
+            _ => { }, // one copy, so a refresh already out is always joined, by refreshes and ordinary reads alike
             async () =>
             {
                 ListResponse<TagCategory> r = await client.ListTagCategoriesAsync(CancellationToken.None, shared: true);
@@ -175,7 +175,13 @@ public sealed class InstanceCache
             }
 
             key = keyOf(honoured);
-            if (reads.TryGetValue(key, out InFlight<T>? inFlight) && inFlight.Generation == generation)
+            // An ordinary read joins a refresh already out, whose copy is at least as new as its own would be. A refresh
+            // never joins an ordinary read, which may have started before the change it is meant to pick up.
+            if (!honoured && reads.TryGetValue(keyOf(true), out InFlight<T>? refreshing) && refreshing.Generation == generation)
+            {
+                task = refreshing.Task;
+            }
+            else if (reads.TryGetValue(key, out InFlight<T>? inFlight) && inFlight.Generation == generation)
             {
                 task = inFlight.Task;
             }
