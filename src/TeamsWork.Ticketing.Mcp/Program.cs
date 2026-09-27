@@ -419,7 +419,8 @@ static void ConfigureServerOptions(ModelContextProtocol.Server.McpServerOptions 
         "SLA problems list_sla_risk; for totals count_tickets; to understand one ticket get_ticket_context. Before create_ticket, call " +
         "find_similar_tickets to avoid duplicates. People can be given by email or name, tag categories by name, and custom fields by " +
         "title; get_instance (use 'section') and list_tag_categories list what exists, and custom workflow state IDs. " +
-        "Dates in filters are local to the timezone offset (default US Central). 'expectedDate' must be YYYY-MM-DD. " +
+        "Date filters take whole days (YYYY-MM-DD, no time of day): created and updated days are local to the timezone offset " +
+            "(default US Central), expected dates are calendar dates, and returned times are UTC. 'expectedDate' must be YYYY-MM-DD. " +
         "Writes are attributed to the signed-in caller, or to the configured service account for app-only callers and local (stdio) use; " +
         "whoami shows which, and tools never accept a user to impersonate. " +
         "The upstream API allows 100 requests per minute, so prefer 'select' and sensible page sizes.";

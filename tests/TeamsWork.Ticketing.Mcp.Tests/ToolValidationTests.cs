@@ -45,7 +45,7 @@ public sealed class ToolValidationTests
     public void Date_filters_are_whole_days_only()
     {
         // The API ignores a date filter with a time of day and returns every ticket, so none is passed on.
-        Assert.Equal("2026-04-01", ToolValidation.OptionalDateFilter(" 2026-04-01 ", "createdAfter"));
+        Assert.Equal(new DateOnly(2026, 4, 1), ToolValidation.OptionalDateFilter(" 2026-04-01 ", "createdAfter"));
         Assert.Null(ToolValidation.OptionalDateFilter(" ", "createdAfter"));
         Assert.Contains("whole days", Assert.Throws<McpException>(() => ToolValidation.OptionalDateFilter("2026-04-01T09:30:00", "createdAfter")).Message, StringComparison.Ordinal);
         Assert.Throws<McpException>(() => ToolValidation.OptionalDateFilter("2026-04-01T09:30:00Z", "createdAfter"));

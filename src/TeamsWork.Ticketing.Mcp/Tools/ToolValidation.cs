@@ -109,41 +109,38 @@ internal static class ToolValidation
         OptionalEnum(value, paramName, allowed) ?? throw new McpException($"'{paramName}' is required and must be one of: {string.Join(", ", allowed)}.");
 
     /// <summary>Validates a date-only value in YYYY-MM-DD form. The API silently fails on datetime values here.</summary>
-    public static string? OptionalDateOnly(string? value, string paramName)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        if (!DateOnly.TryParseExact(value.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly d))
-        {
-            throw new McpException($"'{paramName}' must be a date in YYYY-MM-DD form (no time component), for example 2026-04-01.");
-        }
-
-        return d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-    }
+    public static string? OptionalDateOnly(string? value, string paramName) =>
+        OptionalDate(value, $"'{paramName}' must be a date in YYYY-MM-DD form (no time component), for example 2026-04-01.")
+            ?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 
     /// <summary>
     /// Validates a date filter (createdAfter, lastUpdateBefore, ...): a whole day in YYYY-MM-DD form. The API filters
     /// ticket lists by whole days only, and silently ignores a filter with a time of day, returning every ticket as if
     /// none had been given, so one is refused here rather than passed on.
     /// </summary>
-    public static string? OptionalDateFilter(string? value, string paramName)
+    public static DateOnly? OptionalDateFilter(string? value, string paramName) =>
+        OptionalDate(value,
+            $"'{paramName}' must be a date in YYYY-MM-DD form, for example 2026-04-01. The Ticketing API filters by whole days and " +
+            "ignores a time of day; filter by the day, then compare the returned timestamps, which are UTC, for anything finer.");
+
+    /// <summary>The earliest and latest years a date may have: sending one needs a day's room either side.</summary>
+    public const int MinYear = 1900, MaxYear = 9998;
+
+    /// <summary>
+    /// A YYYY-MM-DD date between <see cref="MinYear"/> and <see cref="MaxYear"/>, or null when blank; anything else is
+    /// refused with <paramref name="message"/>. The one parse behind every date the server accepts.
+    /// </summary>
+    internal static DateOnly? OptionalDate(string? value, string message)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
             return null;
         }
 
-        if (!DateOnly.TryParseExact(value.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly d))
-        {
-            throw new McpException(
-                $"'{paramName}' must be a date in YYYY-MM-DD form, for example 2026-04-01. The Ticketing API filters by whole days " +
-                "and ignores a time of day; filter by the day, then compare the returned timestamps for anything finer.");
-        }
-
-        return d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        return DateOnly.TryParseExact(value.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly d) &&
+               d.Year is >= MinYear and <= MaxYear
+            ? d
+            : throw new McpException(message + $" Years {MinYear} to {MaxYear}.");
     }
 
     public static int ResolvePageSize(int? requested, int defaultSize, int maxSize)
