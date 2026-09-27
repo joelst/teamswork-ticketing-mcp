@@ -663,6 +663,28 @@ public sealed class NewToolsTests
 
         public string Path { get; }
 
-        public void Dispose() => Directory.Delete(Path, recursive: true);
+        // Windows can keep a handle for a moment after its holder is gone (a process that just exited with this as its
+        // working directory, an antivirus scan of a new file), so deleting is retried briefly; a folder that still can't
+        // be deleted is left in the temp folder rather than failing a test that has already passed.
+        public void Dispose()
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    Directory.Delete(Path, recursive: true);
+                    return;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    if (attempt == 20)
+                    {
+                        return;
+                    }
+
+                    Thread.Sleep(250);
+                }
+            }
+        }
     }
 }
