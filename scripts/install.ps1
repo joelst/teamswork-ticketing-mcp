@@ -33,7 +33,10 @@
     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.ps1))) -Clients claude,vscode
 
 .EXAMPLE
-    .\install.ps1 -Uninstall
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.ps1))) -Uninstall
+
+    Runs the script as a script block, which the execution policy doesn't apply to (a downloaded install.ps1 run as a
+    file is blocked by the default policy).
 #>
 
 # Everything runs inside this script block so that `irm | iex`, which runs a script in the caller's own scope, leaves
@@ -188,7 +191,7 @@
         if ($Client -eq 'vscode') {
             $path = Join-Path $env:APPDATA 'Code\User\mcp.json'
             if (Test-Path $path) {
-                $text = Get-Content -Raw $path
+                $text = Get-Content -Raw -Encoding UTF8 $path
                 if ($text -and $text.Contains("`"$ServerName`"")) { $text }
             }
             return
@@ -376,7 +379,9 @@
         Write-Step "Configuring $SecretsPath"
         $secrets = [ordered]@{}
         if (Test-Path $SecretsPath) {
-            try { $existing = Get-Content -Raw $SecretsPath | ConvertFrom-Json }
+            # As UTF-8 whether or not the file has a byte order mark: Windows PowerShell 5.1 would otherwise read one
+            # without it (as pwsh 7 writes it) in the ANSI code page, garbling any non-ASCII name.
+            try { $existing = Get-Content -Raw -Encoding UTF8 $SecretsPath | ConvertFrom-Json }
             catch { throw "$SecretsPath is not valid JSON ($($_.Exception.Message)). Fix or delete it, then run the installer again." }
             # A nested object ("Ticketing": { ... }) would sit beside the flat keys written below, and .NET refuses to
             # load a file where both forms name the same setting.

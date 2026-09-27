@@ -218,6 +218,10 @@ detect_rid() {
                 return
             fi ;;
         Linux)
+            # The published Linux executable is built against glibc, and doesn't start on musl (Alpine and others).
+            if [ -e /lib/ld-musl-x86_64.so.1 ] || { have ldd && ldd --version 2>&1 | grep -qi musl; }; then
+                die "This system uses musl libc, which the published Linux executable doesn't support. Use the portable release with the .NET 10 runtime: dotnet TeamsWork.Ticketing.Mcp.dll --stdio"
+            fi
             if [ "$arch" = x86_64 ]; then echo linux-x64; return; fi ;;
         MINGW*|MSYS*|CYGWIN*)
             die "This installer is for macOS and Linux. On Windows use scripts/install.ps1." ;;
@@ -287,6 +291,7 @@ find_release() {
 }
 
 install_binary() {
+    have curl || die "curl is required to download the server. Install it (for example: apt install curl), then run the installer again."
     rid=$(detect_rid)
     find_release "$rid"
     archive_name="${ARCHIVE_URL##*/}"
@@ -320,8 +325,11 @@ install_binary() {
 
 # The secrets file can only be updated safely without a JSON parser when it is a flat object with one
 # "key": "string" pair per line, which is how dotnet user-secrets and this script write it.
+# dotnet user-secrets starts the file with a UTF-8 byte order mark, which grep doesn't count as space, so it is
+# dropped first (in the C locale, where sed takes the bytes as they are).
 secrets_file_editable() {
-    ! grep -vqE '^[[:space:]]*([{}]|\{[[:space:]]*\}|"[^"]+"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?)?[[:space:]]*$' "$SECRETS_PATH"
+    ! LC_ALL=C sed "1s/^$(printf '\357\273\277')//" "$SECRETS_PATH" |
+        grep -vqE '^[[:space:]]*([{}]|\{[[:space:]]*\}|"[^"]+"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?)?[[:space:]]*$'
 }
 
 # Prints a value from the secrets file still JSON-escaped, so an unchanged value is written back exactly as it was

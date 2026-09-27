@@ -100,10 +100,21 @@ the client's config, such as `env` settings, survives an upgrade. A registration
 replaced. For VS Code the scripts check only the default profile's user `mcp.json`, and re-add the entry if they don't
 find it there. If a registration fails, the scripts end with an error that names the client.
 
-To uninstall, run the script with `-Uninstall` / `--uninstall`. It deletes only the files it installed (the
-executable and a `.version` file beside it), so an `-InstallDir` shared with other programs is safe. Quit the MCP
-clients first on Windows, where a running executable can't be deleted. VS Code has no command to remove a server:
-run **MCP: Open User Configuration** and delete the `teamswork-ticketing` entry.
+To uninstall, run the script with `-Uninstall` / `--uninstall`:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.ps1))) -Uninstall
+```
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.sh | sh -s -- --uninstall
+```
+
+Running a downloaded `install.ps1` as a file (`.\install.ps1 -Uninstall`) is blocked by Windows' default execution
+policy; the script-block form isn't. Uninstalling deletes only the files the script installed (the executable and a
+`.version` file beside it), so an `-InstallDir` shared with other programs is safe. Quit the MCP clients first
+on Windows, where a running executable can't be deleted. VS Code has no command to remove a server: run **MCP:
+Open User Configuration** and delete the `teamswork-ticketing` entry.
 
 ## Settings
 
