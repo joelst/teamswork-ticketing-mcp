@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using TeamsWork.Ticketing.Mcp.Configuration;
 using TeamsWork.Ticketing.Mcp.Ticketing.Models;
@@ -10,20 +9,27 @@ namespace TeamsWork.Ticketing.Mcp.Ticketing;
 /// get_instance, a large response. Shared by all callers: every caller uses the same API key, so they see the same
 /// instance. The client is passed in on each call rather than held, because the typed <see cref="TicketingClient"/>
 /// is transient and holding one would pin its HTTP handler for the life of the process.
+/// <para>
+/// Because the cache is shared, no caller can empty it or make it re-read at will: a copy is replaced only once a
+/// fresh one has been read, callers that need a read at the same time share one, and a refresh is honoured only when
+/// the copy is older than <see cref="MinRefreshInterval"/>.
+/// </para>
 /// </summary>
-public sealed class InstanceCache : IDisposable
+public sealed class InstanceCache
 {
+    /// <summary>How recent a copy must be for a refresh to be answered from it instead of re-read.</summary>
+    public static readonly TimeSpan MinRefreshInterval = TimeSpan.FromSeconds(30);
+
     private readonly TimeSpan _ttl;
     private readonly TimeProvider _time;
     private readonly TimeZoneOffsetResolver _timeZones;
+    private readonly object _lock = new();
 
     // Instance responses carry times in the requested offset, so each offset is cached separately.
-    private readonly ConcurrentDictionary<int, Entry<Instance>> _instances = new();
+    private readonly Dictionary<int, Entry<Instance>> _instances = [];
+    private readonly Dictionary<int, Task<Instance>> _instanceReads = [];
     private Entry<IReadOnlyList<TagCategory>>? _tags;
-
-    // One fetch at a time, so callers that miss together share one upstream request instead of each making one.
-    private readonly SemaphoreSlim _instanceGate = new(1, 1);
-    private readonly SemaphoreSlim _tagGate = new(1, 1);
+    private Task<IReadOnlyList<TagCategory>>? _tagRead;
 
     public InstanceCache(IOptions<TicketingOptions> options, TimeZoneOffsetResolver timeZones, TimeProvider? time = null)
     {
@@ -33,79 +39,133 @@ public sealed class InstanceCache : IDisposable
     }
 
     /// <summary>
-    /// The instance settings. <paramref name="refresh"/> drops every cached copy, whatever its offset, so later name
-    /// lookups (which may use another offset) see the change too.
+    /// The instance settings. <paramref name="refresh"/> re-reads them unless they were read in the last
+    /// <see cref="MinRefreshInterval"/>, and a successful re-read replaces every offset's copy, so later name lookups
+    /// (which may use another offset) see the change too.
     /// </summary>
-    public async Task<Instance> GetInstanceAsync(TicketingClient client, int? timezoneOffset, bool refresh, CancellationToken cancellationToken)
+    public Task<Instance> GetInstanceAsync(TicketingClient client, int? timezoneOffset, bool refresh, CancellationToken cancellationToken)
     {
         int offset = _timeZones.Resolve(timezoneOffset);
-        if (!refresh && Fresh(_instances.GetValueOrDefault(offset)) is Instance cached)
+        TaskCompletionSource<Instance>? mine = null;
+        Task<Instance> read;
+        lock (_lock)
         {
-            return cached;
+            if (Usable(_instances.GetValueOrDefault(offset), refresh) is Instance cached)
+            {
+                return Task.FromResult(cached);
+            }
+
+            if (!_instanceReads.TryGetValue(offset, out read!))
+            {
+                mine = new TaskCompletionSource<Instance>(TaskCreationOptions.RunContinuationsAsynchronously);
+                read = mine.Task;
+                _instanceReads[offset] = read;
+            }
         }
 
-        await _instanceGate.WaitAsync(cancellationToken);
+        if (mine is not null)
+        {
+            _ = ReadAsync(mine, () => client.GetInstanceAsync(offset, CancellationToken.None), instance =>
+            {
+                if (refresh)
+                {
+                    _instances.Clear();
+                }
+
+                if (_ttl > TimeSpan.Zero)
+                {
+                    _instances[offset] = NewEntry(instance);
+                }
+
+                _instanceReads.Remove(offset);
+            }, () => _instanceReads.Remove(offset));
+        }
+
+        return read.WaitAsync(cancellationToken);
+    }
+
+    /// <summary>Tag categories that haven't been deleted. <paramref name="refresh"/> works as for the instance.</summary>
+    public Task<IReadOnlyList<TagCategory>> GetTagCategoriesAsync(TicketingClient client, bool refresh, CancellationToken cancellationToken)
+    {
+        TaskCompletionSource<IReadOnlyList<TagCategory>>? mine = null;
+        Task<IReadOnlyList<TagCategory>> read;
+        lock (_lock)
+        {
+            if (Usable(_tags, refresh) is IReadOnlyList<TagCategory> cached)
+            {
+                return Task.FromResult(cached);
+            }
+
+            if (_tagRead is null)
+            {
+                mine = new TaskCompletionSource<IReadOnlyList<TagCategory>>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _tagRead = mine.Task;
+            }
+
+            read = _tagRead;
+        }
+
+        if (mine is not null)
+        {
+            _ = ReadAsync(mine, async () =>
+            {
+                ListResponse<TagCategory> r = await client.ListTagCategoriesAsync(CancellationToken.None);
+                return (IReadOnlyList<TagCategory>)(r.Items ?? []).Where(c => c.Deleted != true).ToList();
+            }, categories =>
+            {
+                _tags = _ttl > TimeSpan.Zero ? NewEntry(categories) : null;
+                _tagRead = null;
+            }, () => _tagRead = null);
+        }
+
+        return read.WaitAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Performs one shared read. It isn't tied to the token of the caller that started it, since others may be waiting
+    /// for the same answer and one caller giving up mustn't cancel theirs; the client's request timeout bounds it. A
+    /// failed read leaves the cached copy in place.
+    /// </summary>
+    private async Task ReadAsync<T>(TaskCompletionSource<T> result, Func<Task<T>> read, Action<T> store, Action forget)
+    {
         try
         {
-            if (refresh)
+            T value = await read();
+            lock (_lock)
             {
-                _instances.Clear();
-            }
-            else if (Fresh(_instances.GetValueOrDefault(offset)) is Instance fetchedMeanwhile)
-            {
-                return fetchedMeanwhile;
+                store(value);
             }
 
-            Instance instance = await client.GetInstanceAsync(offset, cancellationToken);
-            if (_ttl > TimeSpan.Zero)
-            {
-                _instances[offset] = new Entry<Instance>(instance, _time.GetUtcNow() + _ttl);
-            }
-
-            return instance;
+            result.SetResult(value);
         }
-        finally
+        catch (Exception ex)
         {
-            _instanceGate.Release();
+            lock (_lock)
+            {
+                forget();
+            }
+
+            result.SetException(ex);
         }
     }
 
-    /// <summary>Tag categories that haven't been deleted.</summary>
-    public async Task<IReadOnlyList<TagCategory>> GetTagCategoriesAsync(TicketingClient client, bool refresh, CancellationToken cancellationToken)
+    private T? Usable<T>(Entry<T>? entry, bool refresh)
+        where T : class
     {
-        if (!refresh && Fresh(_tags) is IReadOnlyList<TagCategory> cached)
+        if (entry is null)
         {
-            return cached;
+            return null;
         }
 
-        await _tagGate.WaitAsync(cancellationToken);
-        try
-        {
-            if (!refresh && Fresh(_tags) is IReadOnlyList<TagCategory> fetchedMeanwhile)
-            {
-                return fetchedMeanwhile;
-            }
-
-            ListResponse<TagCategory> r = await client.ListTagCategoriesAsync(cancellationToken);
-            List<TagCategory> categories = (r.Items ?? []).Where(c => c.Deleted != true).ToList();
-            _tags = _ttl > TimeSpan.Zero ? new Entry<IReadOnlyList<TagCategory>>(categories, _time.GetUtcNow() + _ttl) : null;
-            return categories;
-        }
-        finally
-        {
-            _tagGate.Release();
-        }
+        DateTimeOffset now = _time.GetUtcNow();
+        return (refresh ? now - entry.Read < MinRefreshInterval : entry.Expires > now) ? entry.Value : null;
     }
 
-    public void Dispose()
+    private Entry<T> NewEntry<T>(T value)
     {
-        _instanceGate.Dispose();
-        _tagGate.Dispose();
+        DateTimeOffset now = _time.GetUtcNow();
+        return new Entry<T>(value, now + _ttl, now);
     }
 
-    private T? Fresh<T>(Entry<T>? entry)
-        where T : class =>
-        entry is not null && entry.Expires > _time.GetUtcNow() ? entry.Value : null;
-
-    private sealed record Entry<T>(T Value, DateTimeOffset Expires);
+    private sealed record Entry<T>(T Value, DateTimeOffset Expires, DateTimeOffset Read);
 }

@@ -179,13 +179,18 @@ public sealed class NewToolsTests
         var handler = new FakeHttpHandler()
             .Enqueue(HttpStatusCode.OK, InstanceJson)
             .Enqueue(HttpStatusCode.OK, InstanceJson);
-        (TicketingClient client, InstanceCache cache, _) = Build(handler);
+        var time = new MutableTime(Time.GetUtcNow());
+        (TicketingClient client, InstanceCache cache, _) = Build(handler, time: time);
         var tools = new InstanceTools(client, cache);
 
         await tools.GetInstance(cancellationToken: Ct);
         await tools.GetInstance(section: "assignees", cancellationToken: Ct);
         Assert.Single(handler.Requests);
 
+        await tools.GetInstance(refresh: true, cancellationToken: Ct);
+        Assert.Single(handler.Requests); // read moments ago: a refresh is answered from the copy
+
+        time.Advance(InstanceCache.MinRefreshInterval + TimeSpan.FromSeconds(1));
         await tools.GetInstance(refresh: true, cancellationToken: Ct);
         Assert.Equal(2, handler.Requests.Count);
     }
@@ -348,14 +353,14 @@ public sealed class NewToolsTests
     {
         var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, """
             {"items":[
-              {"id":"a","title":"Mine","assignee":{"id":"x","name":"Jane","email":"JANE@example.test"}},
+              {"id":"a","title":"Mine","assignee":{"id":"U1","name":"Jane","email":"JANE@example.test"}},
               {"id":"b","title":"Johns","assignee":{"id":"u2","name":"John","email":"john@example.test"}},
               {"id":"c","title":"Raised","requestor":{"id":"u1","name":"Jane","email":"other@example.test"}}],
              "itemCount":3}
             """);
-        (TicketingClient client, _, IOptions<TicketingOptions> options) = Build(handler);
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
 
-        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), options).ListMyTickets(role, cancellationToken: Ct));
+        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), cache, options).ListMyTickets(role, cancellationToken: Ct));
 
         Assert.Equal(expected, doc.RootElement.GetProperty("matched").GetInt32());
         Dictionary<string, string> q = TestFactory.Query(handler.Requests[0].Uri);
@@ -364,18 +369,22 @@ public sealed class NewToolsTests
         Assert.Contains("assignee", q["select"], StringComparison.Ordinal);
     }
 
+    internal const string SlaOnInstanceJson = """{"item":{"id":"i","sla":{"frt":{"urgent":{"enabled":true}},"rt":{"urgent":{"enabled":false}}}}}""";
+
     [Fact]
     public async Task Sla_risk_reads_whole_tickets_for_breach_flags()
     {
-        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, """
+        var handler = new FakeHttpHandler()
+            .Enqueue(HttpStatusCode.OK, SlaOnInstanceJson)
+            .Enqueue(HttpStatusCode.OK, """
             {"items":[{"id":"a","isRtBreached":true},{"id":"b","isFrtEscalated":true},{"id":"c"}],"itemCount":3}
             """);
-        (TicketingClient client, _, IOptions<TicketingOptions> options) = Build(handler);
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
 
-        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), options).ListSlaRisk(cancellationToken: Ct));
+        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), cache, options).ListSlaRisk(cancellationToken: Ct));
 
         Assert.Equal(2, doc.RootElement.GetProperty("matched").GetInt32());
-        Dictionary<string, string> q = TestFactory.Query(handler.Requests[0].Uri);
+        Dictionary<string, string> q = TestFactory.Query(handler.Requests[1].Uri);
         Assert.False(q.ContainsKey("select"));
         Assert.Equal("200", q["limit"]);
     }
@@ -386,9 +395,9 @@ public sealed class NewToolsTests
         var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, """
             {"items":[{"id":"a","priority":"Urgent"},{"id":"b","priority":"Low"},{"id":"c","priority":"Urgent"}],"itemCount":3}
             """);
-        (TicketingClient client, _, IOptions<TicketingOptions> options) = Build(handler);
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
 
-        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), options).CountTickets("priority", cancellationToken: Ct));
+        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), cache, options).CountTickets("priority", cancellationToken: Ct));
 
         JsonElement groups = doc.RootElement.GetProperty("groups");
         Assert.Equal("Urgent", groups[0].GetProperty("key").GetString());
@@ -400,9 +409,9 @@ public sealed class NewToolsTests
     [Fact]
     public async Task Whoami_reports_the_acting_user()
     {
-        (TicketingClient client, _, IOptions<TicketingOptions> options) = Build(new FakeHttpHandler());
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(new FakeHttpHandler());
 
-        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), options).WhoAmI(Ct));
+        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), cache, options).WhoAmI(Ct));
 
         Assert.Equal("jane@example.test", doc.RootElement.GetProperty("email").GetString());
         Assert.Equal("DelegatedToken", doc.RootElement.GetProperty("source").GetString());
@@ -441,8 +450,8 @@ public sealed class NewToolsTests
         Assert.Equal("DESC", newest["order"]);
         Dictionary<string, string> window = TestFactory.Query(handler.Requests[2].Uri);
         // Number 42 sits at position 58 at most (100 - 42); the page ending there starts at 0, and it takes what is left
-        // of the MaxScanTickets budget (1000, less the newest-ticket read).
-        Assert.Equal("999", window["limit"]);
+        // of the MaxScanTickets budget (1000, less the 50 the search asked for and the newest-ticket read).
+        Assert.Equal("949", window["limit"]);
         Assert.False(window.ContainsKey("offset")); // offset 0 isn't sent
         Assert.EndsWith($"/tickets/{TicketA}", handler.Requests[3].Uri.AbsolutePath, StringComparison.Ordinal);
     }
@@ -595,12 +604,23 @@ public sealed class NewToolsTests
 
     // ---- Helpers ----------------------------------------------------------------------------------------------
 
-    internal static (TicketingClient Client, InstanceCache Cache, IOptions<TicketingOptions> Options) Build(FakeHttpHandler handler, TicketingOptions? options = null)
+    internal static (TicketingClient Client, InstanceCache Cache, IOptions<TicketingOptions> Options) Build(FakeHttpHandler handler, TicketingOptions? options = null, TimeProvider? time = null)
     {
         options ??= TestFactory.Options();
+        time ??= Time;
         IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(options);
-        TicketingClient client = TestFactory.Client(handler, options, Time);
-        return (client, new InstanceCache(opts, new TimeZoneOffsetResolver(opts, Time), Time), opts);
+        TicketingClient client = TestFactory.Client(handler, options, time);
+        return (client, new InstanceCache(opts, new TimeZoneOffsetResolver(opts, time), time), opts);
+    }
+
+    /// <summary>A clock a test can move forward.</summary>
+    internal sealed class MutableTime(DateTimeOffset start) : TimeProvider
+    {
+        private DateTimeOffset _now = start;
+
+        public void Advance(TimeSpan by) => _now += by;
+
+        public override DateTimeOffset GetUtcNow() => _now;
     }
 
     internal static LookupTools Lookup(TicketingClient client, TicketingOptions? options = null) =>

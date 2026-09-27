@@ -112,7 +112,8 @@ public sealed class TicketingClient
     public async Task<Ticket> UpdateTicketStatusAsync(Guid ticketId, string status, string? resolution, string? comment, TicketUser actor, int? timezoneOffset, CancellationToken cancellationToken)
     {
         var body = new UpdateTicketStatusRequest(status, resolution, comment, actor);
-        ItemResponse<Ticket> r = await SendAsync<ItemResponse<Ticket>>(HttpMethod.Put, $"tickets/{ticketId:D}/status", [], body, null, true, timezoneOffset, cancellationToken);
+        // Moving to the same state twice is harmless, but a status change with a note records the note each time.
+        ItemResponse<Ticket> r = await SendAsync<ItemResponse<Ticket>>(HttpMethod.Put, $"tickets/{ticketId:D}/status", [], body, null, true, timezoneOffset, cancellationToken, idempotent: comment is null);
         return r.Item ?? throw new TicketingApiException("The Ticketing API reported success but returned no ticket.");
     }
 
@@ -254,13 +255,25 @@ public sealed class TicketingClient
         string? continuationToken,
         bool includeTimezone,
         int? timezoneOffset,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool? idempotent = null)
     {
         Uri uri = BuildUri(path, query, includeTimezone, timezoneOffset);
+        // Whether repeating a request is harmless belongs to the operation, not the HTTP method. By default a POST (which
+        // creates tickets, comments and attachments) isn't, and anything else is; callers say otherwise.
+        return await SendCoreAsync<T>(method, path, uri, body, continuationToken, idempotent ?? method != HttpMethod.Post, cancellationToken);
+    }
 
-        // POST creates tickets, comments and attachments. Retrying it after the request may have reached the
-        // vendor could create duplicates, so it is only retried when the request provably was not processed.
-        bool idempotent = method != HttpMethod.Post;
+    private async Task<T> SendCoreAsync<T>(
+        HttpMethod method,
+        string path,
+        Uri uri,
+        object? body,
+        string? continuationToken,
+        bool idempotent,
+        CancellationToken cancellationToken)
+    {
+        // A request that isn't idempotent is only retried when it provably wasn't processed.
 
         for (int attempt = 1; ; attempt++)
         {
@@ -338,6 +351,16 @@ public sealed class TicketingClient
                 {
                     // The headers arrived, so the API received the request.
                     throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
+                }
+                catch (Exception ex) when (ex is IOException or HttpRequestException)
+                {
+                    // The connection dropped while the answer was arriving: the request was received, and may have been done.
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The connection to the Ticketing API dropped while its answer was arriving.", ex);
+                }
+                catch (TicketingApiException ex) when (!idempotent && !ex.OutcomeUnknown)
+                {
+                    // An answer too large to read, after the request was received.
+                    throw TicketingApiException.Unknown(response.StatusCode, ex.Message, ex);
                 }
 
                 if (!response.IsSuccessStatusCode)

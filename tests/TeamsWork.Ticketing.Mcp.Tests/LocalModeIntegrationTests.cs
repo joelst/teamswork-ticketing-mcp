@@ -42,7 +42,7 @@ public sealed class LocalModeFactory : WebApplicationFactory<Program>
         builder.UseSetting("Ticketing:BaseUrl", "https://ticketing.invalid/v1");
 
         // Set even when excluded, so Ticketing__ServiceAccount__* variables on a developer machine cannot fill them in.
-        builder.UseSetting("Ticketing:ServiceAccount:Id", IncludeServiceAccount ? "local-oid" : "");
+        builder.UseSetting("Ticketing:ServiceAccount:Id", IncludeServiceAccount ? "44444444-4444-4444-4444-444444444444" : "");
         builder.UseSetting("Ticketing:ServiceAccount:Name", IncludeServiceAccount ? "Local Dev" : "");
         builder.UseSetting("Ticketing:ServiceAccount:Email", IncludeServiceAccount ? "dev@example.test" : "");
 
@@ -211,6 +211,27 @@ public sealed class LocalModeIntegrationTests
 
         Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
         Assert.Contains("Ticketing:DefaultTimeZoneId", report, StringComparison.Ordinal);
+    }
+
+    // Seen live: an ID that isn't an object ID attributed every write to someone the help desk didn't know.
+    [Theory]
+    [InlineData("not-an-object-id", false)]
+    [InlineData("dev@example.test", true)] // the email-to-ticket form
+    [InlineData("44444444-4444-4444-4444-444444444444", true)]
+    public async Task Service_account_id_must_be_an_object_id_or_the_email(string id, bool starts)
+    {
+        await using var factory = new LocalModeFactory { Settings = { ["Ticketing:ServiceAccount:Id"] = id } };
+
+        if (starts)
+        {
+            factory.CreateClient().Dispose();
+            return;
+        }
+
+        Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+        Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
+        Assert.Contains("Entra object ID", report, StringComparison.Ordinal);
+        Assert.DoesNotContain(id, report, StringComparison.Ordinal);
     }
 
     [Theory]

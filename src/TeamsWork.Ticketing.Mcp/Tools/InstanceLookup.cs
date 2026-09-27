@@ -21,14 +21,17 @@ internal sealed partial class InstanceLookup
     private readonly InstanceCache _cache;
     private readonly int? _timezoneOffset;
     private readonly CancellationToken _cancellationToken;
+    private readonly IReadOnlySet<string> _externalDomains;
+    private Instance? _instance;
     private bool _refreshed;
 
-    public InstanceLookup(TicketingClient client, InstanceCache cache, int? timezoneOffset, CancellationToken cancellationToken)
+    public InstanceLookup(TicketingClient client, InstanceCache cache, int? timezoneOffset, CancellationToken cancellationToken, IReadOnlySet<string>? externalDomains = null)
     {
         _client = client;
         _cache = cache;
         _timezoneOffset = timezoneOffset;
         _cancellationToken = cancellationToken;
+        _externalDomains = externalDomains ?? new HashSet<string>();
     }
 
     /// <summary>
@@ -42,7 +45,7 @@ internal sealed partial class InstanceLookup
             return null;
         }
 
-        return await WithInstanceAsync(instance => ResolvePerson(person, paramName, instance, assigneeOnly));
+        return await WithInstanceAsync(instance => ResolvePerson(person, paramName, instance, assigneeOnly, _externalDomains));
     }
 
     public async Task<List<TicketTag>?> TagsAsync(IReadOnlyList<TagRef>? tags)
@@ -77,7 +80,7 @@ internal sealed partial class InstanceLookup
             return null;
         }
 
-        return await WithInstanceAsync(instance => CheckCustomFields(customFields, instance));
+        return await WithInstanceAsync(instance => CheckCustomFields(customFields, instance, _externalDomains));
     }
 
     /// <summary>
@@ -86,16 +89,17 @@ internal sealed partial class InstanceLookup
     /// </summary>
     private async Task<T> WithInstanceAsync<T>(Func<Instance, T> resolve)
     {
-        Instance instance = await _cache.GetInstanceAsync(_client, _timezoneOffset, refresh: false, _cancellationToken);
+        // Read once per call, so a call that resolves several things uses one copy (and one request when uncached).
+        _instance ??= await _cache.GetInstanceAsync(_client, _timezoneOffset, refresh: false, _cancellationToken);
         try
         {
-            return resolve(instance);
+            return resolve(_instance);
         }
         catch (McpException ex) when (IsMiss(ex) && !_refreshed)
         {
             _refreshed = true;
-            instance = await _cache.GetInstanceAsync(_client, _timezoneOffset, refresh: true, _cancellationToken);
-            return resolve(instance);
+            _instance = await _cache.GetInstanceAsync(_client, _timezoneOffset, refresh: true, _cancellationToken);
+            return resolve(_instance);
         }
     }
 
@@ -109,18 +113,27 @@ internal sealed partial class InstanceLookup
     ///   <item>a complete {id, name, email} whose ID or email belongs to someone in that list must match that person
     ///   (their own name is then used);</item>
     ///   <item>anyone else is accepted as given only where people outside the list make sense (requestors and
-    ///   people-picker fields), and refused for the assignee.</item>
+    ///   people-picker fields), and refused for the assignee. They may not use the name of someone on the list, and
+    ///   when Ticketing:ExternalEmailDomains is set, their email must be in one of those domains.</item>
     /// </list>
     /// </summary>
-    internal static TicketUser ResolvePerson(UserRef person, string paramName, Instance instance, bool assigneeOnly)
+    internal static TicketUser ResolvePerson(UserRef person, string paramName, Instance instance, bool assigneeOnly, IReadOnlySet<string>? externalDomains = null)
     {
+        List<Persona> people = AssigneesOf(instance);
+        if (assigneeOnly && people.Count == 0)
+        {
+            // Nothing to check an assignee against; an empty list doesn't mean anyone goes.
+            throw new McpException(
+                $"'{paramName}' can't be checked: the instance's assignee list is empty or unreadable, so this server can't assign tickets. " +
+                "Assign it in the Ticketing app.");
+        }
+
         if (!person.IsComplete)
         {
             return MatchPerson(person, paramName, instance);
         }
 
         TicketUser given = person.ToTicketUser(paramName);
-        List<Persona> people = AssigneesOf(instance);
         Persona? byId = people.FirstOrDefault(p => Same(p.Id, given.Id));
         Persona? byEmail = people.FirstOrDefault(p => Same(p.Email, given.Email));
 
@@ -138,11 +151,27 @@ internal sealed partial class InstanceLookup
                 "details). Use the id, name, and email exactly as get_instance lists them, or just the email.");
         }
 
-        if (assigneeOnly && people.Count > 0)
+        if (assigneeOnly)
         {
             throw Miss(
                 $"'{paramName}' '{given.Email}' isn't in the instance's assignee list, and a ticket can only be assigned to someone " +
                 "in it. Use a name or email from get_instance (section 'assignees').");
+        }
+
+        // Someone outside the list can't appear under a listed person's name.
+        if (people.FirstOrDefault(p => Same(p.Name, given.Name)) is Persona namesake)
+        {
+            throw new McpException(
+                $"'{paramName}' uses the name of {namesake.Name}, who is in the assignee list with a different ID and email. Use their " +
+                "details from get_instance, or the outside person's own name.");
+        }
+
+        string domain = given.Email[(given.Email.LastIndexOf('@') + 1)..];
+        if (externalDomains is { Count: > 0 } && !externalDomains.Contains(domain))
+        {
+            throw new McpException(
+                $"'{paramName}' '{given.Email}' is outside the email domains allowed for people not in the assignee list " +
+                $"(Ticketing:ExternalEmailDomains: {string.Join(", ", externalDomains.Order(StringComparer.OrdinalIgnoreCase))}).");
         }
 
         return given;
@@ -231,7 +260,7 @@ internal sealed partial class InstanceLookup
     /// JSON null clears a field and is always allowed. A field of a type this server can't check is refused, so nothing
     /// unchecked reaches the API.
     /// </summary>
-    internal static JsonElement CheckCustomFields(Dictionary<string, JsonElement> values, Instance instance)
+    internal static JsonElement CheckCustomFields(Dictionary<string, JsonElement> values, Instance instance, IReadOnlySet<string>? externalDomains = null)
     {
         List<FieldDefinition> fields = CustomFieldsOf(instance);
 
@@ -252,7 +281,19 @@ internal sealed partial class InstanceLookup
                     "Leave it out, or ask a Ticketing administrator to show the field.");
             }
 
-            result[field.Field.Id!] = CheckValue(field.Field, value, instance);
+            if (field.Conflicting)
+            {
+                throw new McpException(
+                    $"Custom field '{field.Field.Title ?? field.Field.Id}' is defined differently in different parts of the instance settings, " +
+                    "so its value can't be checked. Ask a Ticketing administrator to review the field.");
+            }
+
+            if (result.ContainsKey(field.Field.Id!))
+            {
+                throw new McpException($"Custom field '{field.Field.Title ?? field.Field.Id}' is given more than once (by ID and by title). Give it once.");
+            }
+
+            result[field.Field.Id!] = CheckValue(field.Field, value, instance, externalDomains);
         }
 
         return JsonSerializer.SerializeToElement(result, TicketingClient.JsonOptions);
@@ -271,7 +312,9 @@ internal sealed partial class InstanceLookup
             .GroupBy(f => f.Id!, StringComparer.OrdinalIgnoreCase)
             .Select(copies => new FieldDefinition(
                 copies.First(),
-                copies.Select(c => c.Status).FirstOrDefault(status => status is not null && UnusableStatuses.Contains(status))))
+                copies.Select(c => c.Status).FirstOrDefault(status => status is not null && UnusableStatuses.Contains(status)),
+                // Copies that disagree on what the field is leave no definition to check a value against.
+                copies.Select(c => (TypeKey(c), c.IsMultiple ?? false)).Distinct().Count() > 1))
             .ToList();
 
     /// <summary>A title matches usable fields first, so a hidden field doesn't make a visible one of the same name ambiguous.</summary>
@@ -287,7 +330,7 @@ internal sealed partial class InstanceLookup
         };
     }
 
-    private sealed record FieldDefinition(CustomField Field, string? UnusableStatus);
+    private sealed record FieldDefinition(CustomField Field, string? UnusableStatus, bool Conflicting);
 
     // Matches the limit on descriptions and comments.
     private const int MaxTextLength = 20_000;
@@ -296,7 +339,7 @@ internal sealed partial class InstanceLookup
     /// Checks the value itself, not only its JSON kind, and returns what should be sent: dates in YYYY-MM-DD form,
     /// list options as keys, and people as complete {id, name, email} references.
     /// </summary>
-    private static JsonElement CheckValue(CustomField field, JsonElement value, Instance instance)
+    private static JsonElement CheckValue(CustomField field, JsonElement value, Instance instance, IReadOnlySet<string>? externalDomains)
     {
         if (value.ValueKind == JsonValueKind.Null)
         {
@@ -332,7 +375,7 @@ internal sealed partial class InstanceLookup
                 return CheckListValue(field, value, label);
 
             case "peoplepicker" or "emailpicker":
-                return CheckPeopleValue(field, value, label, instance);
+                return CheckPeopleValue(field, value, label, instance, externalDomains);
 
             default:
                 throw new McpException(
@@ -344,7 +387,7 @@ internal sealed partial class InstanceLookup
     /// Each entry is resolved by <see cref="ResolvePerson"/>, like a requestor. A bare email string is shorthand for
     /// {email}.
     /// </summary>
-    private static JsonElement CheckPeopleValue(CustomField field, JsonElement value, string label, Instance instance)
+    private static JsonElement CheckPeopleValue(CustomField field, JsonElement value, string label, Instance instance, IReadOnlySet<string>? externalDomains)
     {
         if (value.ValueKind != JsonValueKind.Array)
         {
@@ -366,7 +409,7 @@ internal sealed partial class InstanceLookup
                 _ => throw new McpException($"{param} must be an email or {{\"id\",\"name\",\"email\"}}."),
             };
 
-            people.Add(ResolvePerson(person, param, instance, assigneeOnly: false));
+            people.Add(ResolvePerson(person, param, instance, assigneeOnly: false, externalDomains));
         }
 
         return JsonSerializer.SerializeToElement(people, TicketingClient.JsonOptions);

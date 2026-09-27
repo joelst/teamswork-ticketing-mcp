@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Server;
@@ -18,7 +19,7 @@ public sealed class WorkloadTools
 {
     private const string SummaryFields = "id,ticketId,title,status,priority,assignee,requestor,expectedDate,createdOn,lastUpdatedOn";
 
-    // Breach flags aren't selectable, so a breach scan reads whole tickets, in smaller pages to keep responses modest.
+    // SLA flags aren't all selectable, so an SLA scan reads whole tickets, in smaller pages to keep responses modest.
     private const int FullTicketPageSize = 200;
 
     private static readonly string[] Roles = ["assignee", "requestor", "either"];
@@ -27,12 +28,14 @@ public sealed class WorkloadTools
 
     private readonly TicketingClient _client;
     private readonly IActingUserProvider _actingUser;
+    private readonly InstanceCache _cache;
     private readonly TicketingOptions _options;
 
-    public WorkloadTools(TicketingClient client, IActingUserProvider actingUser, IOptions<TicketingOptions> options)
+    public WorkloadTools(TicketingClient client, IActingUserProvider actingUser, InstanceCache cache, IOptions<TicketingOptions> options)
     {
         _client = client;
         _actingUser = actingUser;
+        _cache = cache;
         _options = options.Value;
     }
 
@@ -95,9 +98,10 @@ public sealed class WorkloadTools
     [McpServerTool(Name = "list_sla_risk", Title = "List SLA risks", ReadOnly = true, Idempotent = true, OpenWorld = false)]
     [Description(
         "List unresolved tickets that have breached or been escalated for their first-response (FRT) or resolution (RT) SLA, newest " +
-        "first. Returns ticket summaries with the isFrtBreached, isRtBreached, isFrtEscalated, and isRtEscalated flags.")]
+        "first, with the isFrtBreached, isRtBreached, isFrtEscalated, and isRtEscalated flags. If the instance has SLA tracking turned " +
+        "off, says so instead of listing nothing.")]
     public Task<string> ListSlaRisk(
-        [Description("any (default): breached or escalated; breached: breached only; escalated: escalated only (fastest).")] string? kind = null,
+        [Description("any (default): breached or escalated; breached: breached only; escalated: escalated only.")] string? kind = null,
         [Description("Only this priority: Low, Medium, Important, or Urgent.")] string? priority = null,
         [Description("Only tickets created after this local datetime (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss).")] string? createdAfter = null,
         [Description("Maximum tickets to return (default 20, max 100).")] int? limit = null,
@@ -108,16 +112,23 @@ public sealed class WorkloadTools
         {
             string which = ToolValidation.OptionalEnum(kind, "kind", SlaKinds) ?? "any";
             int max = ToolValidation.ResolvePageSize(limit, _options.DefaultPageSize, _options.MaxPageSize);
-            bool escalatedOnly = which == "escalated";
             var query = new TicketListQuery
             {
                 IsResolved = false,
                 Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
                 CreatedAfter = ToolValidation.OptionalDateTime(createdAfter, "createdAfter"),
-                // Escalation flags can be selected; breach flags can't, so any other scan needs whole tickets.
-                Select = escalatedOnly ? SummaryFields + ",isFrtEscalated,isRtEscalated" : null,
                 TimezoneOffset = timezoneOffset,
             };
+
+            // With every SLA rule off, the API reports no SLA flags at all, so a scan would find nothing and look like
+            // "nothing at risk". Say what is actually true, and save the requests.
+            Instance instance = await _cache.GetInstanceAsync(_client, timezoneOffset, refresh: false, cancellationToken);
+            if (SlaEnabled(instance.Sla) == false)
+            {
+                return new ScanResult<TicketSummary>([], 0, 0, 0, null, false,
+                    "SLA tracking is turned off on this instance (no first-response or resolution rule is enabled), so no ticket can breach " +
+                    "or escalate an SLA. A Ticketing administrator can turn it on in the instance's SLA settings.");
+            }
 
             bool AtRisk(Ticket t)
             {
@@ -131,11 +142,64 @@ public sealed class WorkloadTools
                 };
             }
 
-            int pageSize = escalatedOnly ? TicketScan.MaxApiPageSize : FullTicketPageSize;
+            // Every mode reads whole tickets, so every result carries all four flags.
+            bool anyFlags = false;
             TicketScan.Result<TicketSummary> scan = await TicketScan.RunAsync(
-                _client, query, t => AtRisk(t) ? TicketSummary.From(t) : null, _options.MaxScanTickets, pageSize, cancellationToken);
-            return Summaries(scan, max);
+                _client,
+                query,
+                t =>
+                {
+                    anyFlags |= t.IsFrtBreached is not null || t.IsRtBreached is not null || t.IsFrtEscalated is not null || t.IsRtEscalated is not null;
+                    return AtRisk(t) ? TicketSummary.From(t) : null;
+                },
+                _options.MaxScanTickets,
+                FullTicketPageSize,
+                cancellationToken);
+
+            ScanResult<TicketSummary> result = Summaries(scan, max);
+            return scan.Scanned > 0 && !anyFlags
+                ? result with
+                {
+                    Hint = "SLA tracking is on, but none of the tickets read carried SLA flags, so this can't tell which are at risk. " +
+                           (result.Hint ?? ""),
+                }
+                : result;
         });
+    }
+
+    /// <summary>
+    /// Whether any first-response or resolution rule (including escalation) is enabled: true or false when the settings
+    /// say so, null when they're in a shape this server doesn't recognise (then the tool scans rather than guess "off").
+    /// </summary>
+    internal static bool? SlaEnabled(JsonElement? sla)
+    {
+        if (sla is not { ValueKind: JsonValueKind.Object } settings)
+        {
+            return null;
+        }
+
+        bool sawRule = false;
+        foreach (string part in (string[])["frt", "rt"])
+        {
+            if (!settings.TryGetProperty(part, out JsonElement rules) || rules.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            foreach (JsonProperty rule in rules.EnumerateObject())
+            {
+                if (rule.Value.ValueKind == JsonValueKind.Object && rule.Value.TryGetProperty("enabled", out JsonElement enabled))
+                {
+                    sawRule = true;
+                    if (enabled.ValueKind == JsonValueKind.True)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return sawRule ? false : null;
     }
 
     [McpServerTool(Name = "count_tickets", Title = "Count tickets", ReadOnly = true, Idempotent = true, OpenWorld = false)]
@@ -202,10 +266,27 @@ public sealed class WorkloadTools
 
     private sealed record GroupKey(string Identity, string Label);
 
-    private static bool IsPerson(TicketUser? user, ActingUser me) =>
-        user is not null &&
-        ((!string.IsNullOrWhiteSpace(user.Email) && string.Equals(user.Email.Trim(), me.Email.Trim(), StringComparison.OrdinalIgnoreCase)) ||
-         (!string.IsNullOrWhiteSpace(user.Id) && string.Equals(user.Id.Trim(), me.Id.Trim(), StringComparison.OrdinalIgnoreCase)));
+    /// <summary>
+    /// Whether a ticket's person is the caller. The object ID decides when the ticket has one, so a ticket naming
+    /// someone else's ID with the caller's email (or the reverse) isn't counted as theirs; the email decides only for
+    /// people recorded without an ID, or in the email-to-ticket form where the ID is the email.
+    /// </summary>
+    private static bool IsPerson(TicketUser? user, ActingUser me)
+    {
+        if (user is null)
+        {
+            return false;
+        }
+
+        string? id = string.IsNullOrWhiteSpace(user.Id) ? null : user.Id.Trim();
+        bool sameEmail = !string.IsNullOrWhiteSpace(user.Email) && string.Equals(user.Email.Trim(), me.Email.Trim(), StringComparison.OrdinalIgnoreCase);
+        if (id is null || string.Equals(id, user.Email?.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return sameEmail || string.Equals(id, me.Id.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        return string.Equals(id, me.Id.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
 
     private static ScanResult<TicketSummary> Summaries(TicketScan.Result<TicketSummary> scan, int max)
     {

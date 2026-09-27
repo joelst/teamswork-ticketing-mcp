@@ -21,6 +21,10 @@ public sealed class LookupTools
     // Tickets the number search reads before it falls back to paging through tickets sorted by number.
     private const int NumberSearchSize = 50;
 
+    // Every page request costs at least this much of the budget, so pages that come back empty or short still use it up
+    // and one lookup makes at most MaxScanTickets / 50 requests (20 by default).
+    private const int MinPageCharge = 50;
+
     private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
     {
         "the", "and", "for", "with", "not", "but", "are", "was", "has", "have", "can", "cannot", "can't", "cant", "from",
@@ -183,19 +187,22 @@ public sealed class LookupTools
 
     /// <summary>
     /// Finds a ticket's UUID from its number. The API can't filter by number, so this tries full-text search (which
-    /// matches most numbers) and then pages through tickets sorted by number, newest first, reading no more than
-    /// Ticketing:MaxScanTickets tickets in all. A number is reported absent only when that is certain: it is above
-    /// the highest number, or the tickets on either side of where it would be have been seen.
+    /// matches most numbers) and then pages through tickets sorted by number, newest first. Each request is charged the
+    /// rows it returns, and at least <see cref="MinPageCharge"/>, against Ticketing:MaxScanTickets, so an empty page isn't
+    /// free and the number of requests is bounded. A number is reported absent only on the evidence of one response: above the newest number, numbers on
+    /// both sides of it on one contiguous page, or the list reported to end before it. Tickets created or deleted
+    /// between requests shift positions, so evidence is never combined across responses.
     /// </summary>
     private async Task<NumberLookup> FindIdByNumberAsync(int number, int? timezoneOffset, CancellationToken cancellationToken)
     {
         int budget = _options.MaxScanTickets;
 
-        ListResponse<Ticket> searched = await ListByNumberAsync(null, Math.Min(NumberSearchSize, budget), search: number, timezoneOffset, cancellationToken);
-        budget -= searched.Items?.Count ?? 0;
-        if (IdOf(searched.Items, number) is string found)
+        int searchSize = Math.Min(NumberSearchSize, budget);
+        ListResponse<Ticket> searched = await ListByNumberAsync(null, searchSize, search: number, timezoneOffset, cancellationToken);
+        budget -= searchSize;
+        if (Match(searched.Items, number) is NumberLookup found)
         {
-            return new NumberLookup(found, true);
+            return found;
         }
 
         if (budget <= 0)
@@ -205,9 +212,14 @@ public sealed class LookupTools
 
         ListResponse<Ticket> newest = await ListByNumberAsync(null, 1, search: null, timezoneOffset, cancellationToken);
         budget--;
+        if (newest.Items is { Count: 0 })
+        {
+            return new NumberLookup(null, true); // no tickets at all
+        }
+
         if (newest.Items is not [Ticket top] || TicketSummary.TicketNumber(top) is not int highest)
         {
-            return new NumberLookup(null, newest.Items is { Count: 0 }); // no tickets at all is a certain answer
+            return new NumberLookup(null, false);
         }
 
         if (number > highest)
@@ -217,69 +229,101 @@ public sealed class LookupTools
 
         if (number == highest)
         {
-            return new NumberLookup(top.Id, true);
+            return Match(newest.Items, number)!;
         }
 
-        // Tickets numbered above this one come before it, so it sits at position (highest - number) or earlier;
-        // deleted tickets only move it earlier. Start with the page that ends at that position and move toward the
-        // start while every number seen is still below it.
-        // The first page ends exactly at that position, sized by what is left of the budget, so a small budget still
-        // reads where the ticket most likely is.
+        // Tickets numbered above this one come before it, so it sits at position (highest - number) or earlier: deleted
+        // or skipped numbers only move it earlier. It can't be past the last position either, which matters when
+        // numbering doesn't start at 1. The first page ends at that position, sized by what is left of the budget.
         int page = Math.Min(TicketScan.MaxApiPageSize, _options.MaxScanTickets);
-        int offset = Math.Max(0, highest - number - Math.Min(page, budget) + 1);
+        int likeliest = highest - number;
+        if (newest.ItemCount is int count && count > 0)
+        {
+            likeliest = Math.Min(likeliest, count - 1);
+        }
+
+        int offset = Math.Max(0, likeliest - Math.Min(page, budget) + 1);
         var visited = new HashSet<int>();
-        int? belowFrom = null; // first position known to hold only numbers below it
         while (budget > 0 && visited.Add(offset))
         {
             int size = Math.Min(page, budget);
             ListResponse<Ticket> window = await ListByNumberAsync(offset, size, search: null, timezoneOffset, cancellationToken);
             IReadOnlyList<Ticket> items = window.Items ?? [];
-            budget -= items.Count;
+            budget -= Math.Max(items.Count, MinPageCharge);
 
-            if (IdOf(items, number) is string id)
+            if (Match(items, number) is NumberLookup hit)
             {
-                return new NumberLookup(id, true);
+                return hit;
             }
 
+            // A row without its number could be the ticket, so a page with one proves nothing about absence.
             List<int> numbers = items.Select(TicketSummary.TicketNumber).OfType<int>().ToList();
-            if (numbers.Count == 0)
+            bool complete = numbers.Count == items.Count && items.Count > 0;
+            bool atEnd = window.ItemCount is int total && offset + items.Count >= total;
+
+            if (items.Count == 0)
             {
                 if (offset == 0)
                 {
                     return new NumberLookup(null, false);
                 }
 
-                offset = Math.Max(0, offset - size); // past the end: step back
+                offset = Math.Max(0, offset - size); // past the end, as the list shrank: step back
                 continue;
             }
 
-            if (numbers.Max() < number)
+            if (numbers.Count > 0 && numbers.Max() < number)
             {
                 if (offset == 0)
                 {
-                    return new NumberLookup(null, true); // it would be above everything, which the newest check ruled out
+                    // This page starts at the newest ticket and every number on it is below this one.
+                    return new NumberLookup(null, complete);
                 }
 
-                belowFrom = Math.Min(belowFrom ?? offset, offset);
-                offset = Math.Max(0, offset - size);
+                // It is earlier. Step back so the next page overlaps this one by a row: if this page's first number and
+                // the previous one straddle it, the next page shows both, and one response settles it.
+                offset = Math.Max(0, offset - Math.Max(1, size - 1));
             }
-            else if (numbers.Min() > number)
+            else if (numbers.Count > 0 && numbers.Min() > number)
             {
-                // Everything up to here is above it; if the region below it starts right after, there's no gap for it.
-                if (items.Count < size || offset + items.Count >= belowFrom)
+                if (complete && atEnd)
                 {
-                    return new NumberLookup(null, true);
+                    return new NumberLookup(null, true); // the list ends here, still above it
                 }
 
-                offset += items.Count;
+                if (atEnd)
+                {
+                    return new NumberLookup(null, false);
+                }
+
+                // It is later. Step forward overlapping by a row, for the same reason.
+                offset += Math.Max(1, items.Count - 1);
             }
             else
             {
-                return new NumberLookup(null, true); // numbers on both sides of it were seen, and it wasn't between them
+                // Numbers on both sides of it on one contiguous page, and it isn't there.
+                return new NumberLookup(null, complete);
             }
         }
 
         return new NumberLookup(null, false);
+    }
+
+    /// <summary>
+    /// The lookup result if a row carries the number: its UUID, or an error when the API gave that row no usable ID
+    /// (reporting such a ticket as missing would be wrong).
+    /// </summary>
+    private static NumberLookup? Match(IReadOnlyList<Ticket>? tickets, int number)
+    {
+        Ticket? row = tickets?.FirstOrDefault(t => TicketSummary.TicketNumber(t) == number);
+        if (row is null)
+        {
+            return null;
+        }
+
+        return Guid.TryParse(row.Id, out _)
+            ? new NumberLookup(row.Id, true)
+            : throw new McpException($"Ticket number {number} exists, but the Ticketing API returned no usable ID for it. Try list_tickets with a search for it.");
     }
 
     private Task<ListResponse<Ticket>> ListByNumberAsync(int? offset, int limit, int? search, int? timezoneOffset, CancellationToken cancellationToken) =>
@@ -296,9 +340,6 @@ public sealed class LookupTools
 
     /// <summary>The ticket's UUID when found; otherwise whether its absence is certain.</summary>
     private sealed record NumberLookup(string? Id, bool Conclusive);
-
-    private static string? IdOf(IReadOnlyList<Ticket>? tickets, int number) =>
-        tickets?.FirstOrDefault(t => TicketSummary.TicketNumber(t) == number && Guid.TryParse(t.Id, out _))?.Id;
 
     internal static int ParseTicketNumber(string? value)
     {

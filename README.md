@@ -48,19 +48,23 @@ argument, so an agent cannot impersonate someone else. App-only callers (for exa
 attributed to the configured service account.
 
 Writes accept names where the API wants IDs: a person by email or name (looked up in the instance's assignee list),
-a tag category by name, and a custom field by title. Every person is checked against the assignee list, so a
-reference can't pair one person's ID with another's email, and an assignee must be someone on it. Custom field values
-are checked against the field's type and options before they are sent, and a field the server can't check is refused.
-Instance settings and tags are cached for `Ticketing:InstanceCacheSeconds`, and a name not found in the cache is
-looked up once more before the call fails.
+a tag category by name, and a custom field by title. Every person is checked against the assignee list: a reference
+can't pair one listed person's ID with another email, an outsider can't use a listed person's name, and an assignee must
+be on the list. People outside the list (requestors, people fields) are otherwise accepted as given; set
+`Ticketing:ExternalEmailDomains` to limit them to your own domains. Custom field values are checked against the field's
+type and options before they are sent, and a field the server can't check is refused. Instance settings and tags are
+cached for `Ticketing:InstanceCacheSeconds`; a name not found in the cache is looked up once more, and a refresh is
+honoured only when the cached copy is over 30 seconds old.
 
 The API can't filter by assignee, requestor, ticket number, or SLA state, so `list_my_tickets`, `list_sla_risk`,
 `count_tickets`, and `find_ticket_by_number` read tickets and filter them in the server. One call reads at most
 `Ticketing:MaxScanTickets` tickets (default 1000, usually a single request) and says when it stopped early;
-`find_ticket_by_number` says when a number may exist beyond that limit rather than reporting it missing.
+`find_ticket_by_number` reports a number missing only when one response proves it, and otherwise says it may exist.
+`list_sla_risk` says so when the instance has SLA tracking turned off, rather than reporting nothing at risk.
 
-A create that fails after it may have reached the API (a timeout, a 5xx, a dropped connection) says the ticket may
-exist, so an agent checks before retrying instead of filing it twice.
+A write that fails after it may have reached the API (a timeout, a 5xx, a connection dropped before or while the
+answer arrived) says it may have gone through, so an agent checks before retrying instead of doing it twice. Only
+writes that are safe to repeat are retried automatically; a status change with a comment isn't.
 
 File uploads are offered only over stdio, and only from the folder named by `Ticketing:UploadRoot`, so an agent can't
 send arbitrary local files; uploads are private unless the agent asks otherwise. See
@@ -273,11 +277,12 @@ Estimated running cost: Container Apps consumption with scale-to-zero (mostly wi
 | `Ticketing:BaseUrl` | appsettings / env | Ticketing API base URL, for an endpoint `Region` doesn't cover. Set one or the other |
 | `Ticketing:InstanceCacheSeconds` | env | How long instance settings and tags are cached, default 300; `0` turns it off |
 | `Ticketing:MaxScanTickets` | env | Most tickets one filtering tool call (or ticket-number lookup) reads, default 1000 |
+| `Ticketing:ExternalEmailDomains` | env / appsettings | Comma-separated email domains allowed for people outside the assignee list (requestors, people fields); unset allows any |
 | `Ticketing:MaxUpstreamRequestsPerCallerPerMinute` | env | Upstream requests one caller may cause per minute, counting every request a tool call makes, default 50; `0` turns it off (Entra mode) |
 | `Ticketing:UploadRoot` | env / user secrets (stdio only) | Folder `upload_ticket_files` may read; unset turns uploads off |
 | `Ticketing:MaxUploadBytes` | env | Largest total size of one upload, default 10 MiB |
 | `Ticketing:DefaultTimeZoneId` | appsettings / env | IANA zone for the API's required `timezone` offset (default `America/Chicago`) |
-| `Ticketing:ServiceAccount:{Id,Name,Email}` | env / user secrets | Actor for app-only callers; **required** in stdio and `--local` modes |
+| `Ticketing:ServiceAccount:{Id,Name,Email}` | env / user secrets | Actor for app-only callers; **required** in stdio and `--local` modes. `Id` must be the account's Entra object ID (a GUID), or its email in the email-to-ticket form; startup refuses anything else |
 | `Auth:Mode` / `--local` | CLI / env (dev only) | `Local` = unauthenticated loopback HTTP on `Local:Port` (default 5188). Unset means `Entra`; any other value stops startup |
 | `Entra:TenantId`, `Entra:ClientId` | env | Server app registration (Entra HTTP mode) |
 | `Entra:PublicBaseUrl` | env | Optional custom domain for protected-resource metadata |

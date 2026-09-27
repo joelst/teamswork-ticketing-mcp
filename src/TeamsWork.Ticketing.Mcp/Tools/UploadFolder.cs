@@ -35,10 +35,15 @@ public sealed class UploadFolder
 
     private readonly int _maxBytes;
 
-    private UploadFolder(string root, int maxBytes)
+    // Where the folder really is, as the operating system reports the path of an open handle: the Windows final path,
+    // or the canonical path on Linux (compared with /proc/self/fd). Null where no such check is available (macOS).
+    private readonly string? _realRoot;
+
+    private UploadFolder(string root, int maxBytes, string? realRoot)
     {
         Root = root;
         _maxBytes = maxBytes;
+        _realRoot = realRoot;
     }
 
     /// <summary>Full path of the folder, ending in a directory separator.</summary>
@@ -84,15 +89,56 @@ public sealed class UploadFolder
 
         foreach ((string path, string what) in guarded.Where(g => g.Path.Length > 0))
         {
-            string protectedPath = Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(path)));
-            if (string.Equals(protectedPath, root, OverlapComparison) ||
-                protectedPath.StartsWith(root + Path.DirectorySeparatorChar, OverlapComparison))
+            if (IsWithin(Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(path))), root))
             {
                 throw new StartupConfigurationException($"Ticketing:UploadRoot must be a dedicated folder that doesn't contain {what}. Choose a folder of its own.");
             }
         }
 
-        return new UploadFolder(root + Path.DirectorySeparatorChar, options.MaxUploadBytes);
+        // Nor may it sit inside a folder where applications keep settings and credentials (an MCP client's config can hold
+        // the API key), or a hidden folder in the home folder (~/.ssh). The temporary folder, inside the local application
+        // data folder on Windows, is fine.
+        string temp = Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(Path.GetTempPath())));
+        var settingsFolders = new List<string>
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        };
+        if (home.Length > 0)
+        {
+            settingsFolders.Add(Path.Combine(home, ".config"));
+        }
+
+        foreach (string folder in settingsFolders.Where(f => f.Length > 0))
+        {
+            string settings = Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(folder)));
+            if (IsWithin(root, settings) && !IsWithin(root, temp))
+            {
+                throw new StartupConfigurationException(
+                    "Ticketing:UploadRoot must not be inside an application settings folder (such as AppData or ~/.config), where client " +
+                    "configurations and credentials live. Choose a folder of its own.");
+            }
+        }
+
+        if (home.Length > 0)
+        {
+            string canonicalHome = Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(home)));
+            if (IsWithin(root, canonicalHome) && !IsWithin(root, temp) &&
+                root[canonicalHome.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries).Any(s => s.StartsWith('.')))
+            {
+                throw new StartupConfigurationException("Ticketing:UploadRoot must not be inside a hidden folder (such as ~/.ssh). Choose a folder of its own.");
+            }
+        }
+
+        string? realRoot = OperatingSystem.IsWindows() ? NativeMethods.DirectoryFinalPath(root)
+            : OperatingSystem.IsLinux() ? root
+            : null;
+        if (OperatingSystem.IsWindows() && realRoot is null)
+        {
+            throw new StartupConfigurationException($"Ticketing:UploadRoot '{root}' can't be opened to check where it is.");
+        }
+
+        return new UploadFolder(root + Path.DirectorySeparatorChar, options.MaxUploadBytes, realRoot is null ? null : Path.TrimEndingDirectorySeparator(realRoot));
     }
 
     /// <summary>Reads the files for an upload, after checking every path and the total size.</summary>
@@ -151,6 +197,8 @@ public sealed class UploadFolder
                 throw new McpException($"'{param}' changed while it was being read. Try again.");
             }
 
+            VerifyOpenFile(stream, param);
+
             using var buffer = new MemoryStream();
             byte[] chunk = new byte[81920];
             int read;
@@ -171,6 +219,43 @@ public sealed class UploadFolder
             throw new McpException($"'{file.Name}' could not be read: it may be open in another program, or you may not have access to it.");
         }
     }
+
+    /// <summary>
+    /// Checks the file that is actually open, not the path used to open it: where the operating system says the handle
+    /// points must be inside the folder, with no hidden segment, and (on Windows) the file must have a single name, so a
+    /// hard link to a file elsewhere is refused. On macOS, which has no managed way to ask, the path check stands alone.
+    /// </summary>
+    private void VerifyOpenFile(FileStream stream, string param)
+    {
+        if (_realRoot is null)
+        {
+            return;
+        }
+
+        string? real = null;
+        if (OperatingSystem.IsWindows())
+        {
+            real = NativeMethods.FinalPath(stream.SafeFileHandle);
+            if (NativeMethods.LinkCount(stream.SafeFileHandle) is not 1)
+            {
+                throw new McpException($"'{param}' has more than one name on disk (a hard link), so it can't be uploaded. Copy the file into the folder instead.");
+            }
+        }
+        else if (OperatingSystem.IsLinux())
+        {
+            real = File.ResolveLinkTarget($"/proc/self/fd/{stream.SafeFileHandle.DangerousGetHandle()}", returnFinalTarget: false)?.FullName;
+        }
+
+        if (real is null || !IsWithin(real, _realRoot, InsideComparison) || string.Equals(real, _realRoot, InsideComparison) ||
+            real[_realRoot.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries).Any(s => s.StartsWith('.')))
+        {
+            throw new McpException($"'{param}' turned out, once open, not to be a file in the upload folder, so it wasn't read.");
+        }
+    }
+
+    /// <summary>True when <paramref name="path"/> is <paramref name="folder"/> or inside it.</summary>
+    private static bool IsWithin(string path, string folder, StringComparison comparison = OverlapComparison) =>
+        string.Equals(path, folder, comparison) || path.StartsWith(folder + Path.DirectorySeparatorChar, comparison);
 
     /// <summary>
     /// Resolves a path (relative paths are taken from the upload folder) to a file inside it. Each segment below the
@@ -262,25 +347,56 @@ public sealed class UploadFolder
     }
 
     /// <summary>
+    /// The entry <paramref name="segment"/> names, as the file system resolves it. An exact match wins. Otherwise the
+    /// stored spelling is recovered only when the written spelling itself resolves (a case-insensitive volume) and one
+    /// entry differs from it only in case; on a case-sensitive volume a wrong-case name resolves to nothing, rather
+    /// than to whichever sibling (Inbox or INBOX) the directory listing happens to return first.
+    /// </summary>
+    private static FileSystemInfo? StoredEntry(DirectoryInfo directory, string segment)
+    {
+        if (FindEntry(directory, segment, ignoreCase: false) is FileSystemInfo exact)
+        {
+            return exact;
+        }
+
+        string written = Path.Combine(directory.FullName, segment);
+        if (!Path.Exists(written) || segment.IndexOfAny(ForbiddenNameChars) >= 0)
+        {
+            return null;
+        }
+
+        var options = new EnumerationOptions { MatchType = MatchType.Simple, MatchCasing = MatchCasing.CaseInsensitive, AttributesToSkip = 0, IgnoreInaccessible = true };
+        List<FileSystemInfo> candidates = directory.EnumerateFileSystemInfos(segment, options)
+            .Where(e => string.Equals(e.Name, segment, StringComparison.OrdinalIgnoreCase))
+            .Take(2)
+            .ToList();
+        return candidates.Count == 1 ? candidates[0] : null;
+    }
+
+    /// <summary>
     /// The path with each existing segment spelled as the file system stores it and any symbolic link or junction
     /// replaced by its target, so a short name, a different spelling, or a linked parent can't disguise where a folder
     /// is. Segments that don't exist are kept as written.
     /// </summary>
-    internal static string Canonical(string fullPath)
+    internal static string Canonical(string fullPath) => Canonical(fullPath, depth: 0);
+
+    private static string Canonical(string fullPath, int depth)
     {
         string root = Path.GetPathRoot(fullPath) ?? "";
         string current = root;
         foreach (string segment in fullPath[root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
         {
-            FileSystemInfo? entry = FindEntry(new DirectoryInfo(current), segment, ignoreCase: true);
+            FileSystemInfo? entry = StoredEntry(new DirectoryInfo(current), segment);
             if (entry is null)
             {
                 current = Path.Combine(current, segment);
                 continue;
             }
 
-            current = entry.LinkTarget is not null
-                ? entry.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? entry.FullName
+            // A link's target is canonicalized in turn, since its own parents may be links or short names (bounded, in
+            // case of a loop).
+            current = entry.LinkTarget is not null && depth < 8
+                ? Canonical(entry.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? entry.FullName, depth + 1)
                 : entry.FullName;
         }
 

@@ -379,7 +379,8 @@ static void ConfigureServerOptions(ModelContextProtocol.Server.McpServerOptions 
         "find_similar_tickets to avoid duplicates. People can be given by email or name, tag categories by name, and custom fields by " +
         "title; get_instance (use 'section') and list_tag_categories list what exists, and custom workflow state IDs. " +
         "Dates in filters are local to the timezone offset (default US Central). 'expectedDate' must be YYYY-MM-DD. " +
-        "All writes are attributed to the authenticated caller; tools never accept a user to impersonate. " +
+        "Writes are attributed to the signed-in caller, or to the configured service account for app-only callers and local (stdio) use; " +
+        "whoami shows which, and tools never accept a user to impersonate. " +
         "The upstream API allows 100 requests per minute, so prefer 'select' and sensible page sizes.";
 }
 
@@ -449,6 +450,13 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
         .Validate(o => !string.IsNullOrWhiteSpace(o.DefaultTimeZoneId) && TimeZoneInfo.TryFindSystemTimeZoneById(o.DefaultTimeZoneId, out _),
             "Ticketing:DefaultTimeZoneId is not a time zone this machine knows. Use an IANA name such as America/Chicago " +
             "(on Linux, the tzdata package provides them).")
+        // The ID is what the help desk records and matches people by. Anything but an Entra object ID (or the email, in
+        // the email-to-ticket form) attributes every write to someone the help desk doesn't know, silently.
+        .Validate(o => o.ServiceAccount?.IsConfigured != true ||
+                       Guid.TryParse(o.ServiceAccount.Id, out _) ||
+                       string.Equals(o.ServiceAccount.Id!.Trim(), o.ServiceAccount.Email!.Trim(), StringComparison.OrdinalIgnoreCase),
+            "Ticketing:ServiceAccount:Id must be the account's Entra object ID (a GUID, from 'az ad signed-in-user show --query id' " +
+            "or the Entra admin center), or its email address in the email-to-ticket form.")
         .Validate(o => !requireServiceAccount || o.ServiceAccount?.IsConfigured == true,
             "Ticketing:ServiceAccount:Id, :Name and :Email must all be set when running with --stdio or --local. " +
             "Ticket changes are attributed to this account (Id is your Entra object ID).")

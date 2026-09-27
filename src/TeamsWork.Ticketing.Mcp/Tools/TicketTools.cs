@@ -133,7 +133,7 @@ public sealed class TicketTools
             string? validDate = ToolValidation.OptionalDateOnly(expectedDate, "expectedDate");
             CheckSizes(tags, customFields);
 
-            var lookup = new InstanceLookup(_client, _cache, timezoneOffset, cancellationToken);
+            var lookup = new InstanceLookup(_client, _cache, timezoneOffset, cancellationToken, _options.ExternalEmailDomainSet());
             var ticket = new TicketWrite
             {
                 Title = validTitle,
@@ -166,9 +166,12 @@ public sealed class TicketTools
                     {
                         created = await _client.UpdateTicketAsync(createdId, new TicketWrite { Priority = validPriority }, actor.ToTicketUser(), includeHtml, timezoneOffset, cancellationToken);
                     }
-                    catch (TicketingApiException ex)
+                    catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        warning = $"Ticket #{created.TicketNo} was created, but setting its priority to {validPriority} failed: {ex.Message} " +
+                        // Only the API's own messages are written for the agent; anything else stays generic.
+                        string reason = ex is TicketingApiException api ? api.Message : "the request failed.";
+                        string which = created.TicketNo is int no ? $"Ticket #{no}" : $"Ticket {created.Id}";
+                        warning = $"{which} was created, but setting its priority to {validPriority} failed: {reason} " +
                                   $"Don't create it again; call update_ticket with ticketId {created.Id} and the priority.";
                     }
                 }
@@ -208,7 +211,7 @@ public sealed class TicketTools
             string? validDate = ToolValidation.OptionalDateOnly(expectedDate, "expectedDate");
             CheckSizes(tags, customFields);
 
-            var lookup = new InstanceLookup(_client, _cache, timezoneOffset, cancellationToken);
+            var lookup = new InstanceLookup(_client, _cache, timezoneOffset, cancellationToken, _options.ExternalEmailDomainSet());
             var ticket = new TicketWrite
             {
                 Title = validTitle,
@@ -233,7 +236,8 @@ public sealed class TicketTools
         });
     }
 
-    [McpServerTool(Name = "update_ticket_status", Title = "Change ticket status", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false)]
+    // Not idempotent: a status change with a comment records the comment each time.
+    [McpServerTool(Name = "update_ticket_status", Title = "Change ticket status", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
     [Description(
         "Move a ticket to another workflow state (for example resolve, close, or reopen it). The target must be one of the allowed " +
         "next steps for the ticket's current state: check the 'workflow' and 'status' fields from get_ticket first. For default workflows " +
@@ -276,7 +280,7 @@ public sealed class TicketTools
             ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);
 
             UserRef person = who.Contains('@', StringComparison.Ordinal) ? new UserRef(Email: who) : new UserRef(Name: who);
-            TicketUser? resolved = await new InstanceLookup(_client, _cache, timezoneOffset, cancellationToken).PersonAsync(person, "assignee", assigneeOnly: true);
+            TicketUser? resolved = await new InstanceLookup(_client, _cache, timezoneOffset, cancellationToken, _options.ExternalEmailDomainSet()).PersonAsync(person, "assignee", assigneeOnly: true);
 
             Ticket updated = await _client.UpdateTicketAsync(id, new TicketWrite { Assignee = resolved }, actor.ToTicketUser(), includeHtml: false, timezoneOffset, cancellationToken);
             return new WriteResult<Ticket>(updated, ActedAs.From(actor));

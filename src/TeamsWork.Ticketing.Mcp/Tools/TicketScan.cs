@@ -53,6 +53,7 @@ internal static class TicketScan
             read += items.Count;
 
             // Counted once each, so an API that repeats tickets across pages (or ignores offset) can't inflate results.
+            int before = scanned;
             foreach (Ticket t in items.Where(x => x.Id is null || seen.Add(x.Id)))
             {
                 scanned++;
@@ -63,20 +64,30 @@ internal static class TicketScan
             }
 
             token = r.ContinuationToken;
-            // Another page exists if the API says so (a token, or a total not yet reached). Without either, a full page
-            // means there may be more; a short page is the end. The API may return fewer than asked for, so page fullness
-            // alone never ends a scan that a total says isn't finished.
-            more = items.Count > 0 && (token is not null || (total is int known ? known > read : items.Count == size));
+            // Another page exists if the API says so (a token, or a total not yet reached by distinct tickets). Without
+            // either, a full page means there may be more; a short page is the end. The API may return fewer than asked
+            // for, so page fullness alone never ends a scan that a total says isn't finished.
+            more = items.Count > 0 && (token is not null || (total is int known ? known > scanned : items.Count == size));
+
+            // A page of tickets already seen is no progress: the API is repeating itself (ignoring offset, or a token that
+            // loops), so paging further can't reach the rest. Stop, and report the scan as incomplete if more was expected.
+            if (items.Count > 0 && scanned == before)
+            {
+                break;
+            }
         }
         while (more && read < maxTickets);
 
-        return new Result<T>(matches, scanned, total, Truncated: more);
+        // Incomplete if more was expected, or if fewer distinct tickets were seen than the API said there are (a scan
+        // cut short by an empty or repeated page).
+        return new Result<T>(matches, scanned, total, Truncated: more || (total is int expected && scanned < expected));
     }
 
     /// <summary>The hint shown when a scan stopped before reading every ticket.</summary>
     public static string? TruncationHint<T>(Result<T> result) =>
         result.Truncated
-            ? $"Only the first {result.Scanned} of {(result.Total is int t ? t.ToString(System.Globalization.CultureInfo.InvariantCulture) : "the")} tickets were checked " +
-              "(Ticketing:MaxScanTickets). Narrow the search with the date or priority filters to see the rest."
+            ? $"Only {result.Scanned} of {(result.Total is int t ? t.ToString(System.Globalization.CultureInfo.InvariantCulture) : "the")} tickets were checked: the " +
+              "scan stops at Ticketing:MaxScanTickets, or when the API stops returning new tickets. Narrow it with the date or " +
+              "priority filters to see the rest."
             : null;
 }

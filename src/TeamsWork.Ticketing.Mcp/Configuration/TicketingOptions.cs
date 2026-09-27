@@ -106,6 +106,20 @@ public sealed class TicketingOptions
     [Range(1, 100 * 1024 * 1024)]
     public int MaxUploadBytes { get; set; } = 10 * 1024 * 1024;
 
+    /// <summary>
+    /// Comma-separated email domains (for example "contoso.com, contoso.co.uk") that people outside the instance's
+    /// assignee list may have when named as a requestor or in a people field. Unset allows any domain. Set it so text an
+    /// agent has read can't make an outside address the requestor of a ticket, and so receive its notifications.
+    /// </summary>
+    public string? ExternalEmailDomains { get; set; }
+
+    /// <summary>The domains in <see cref="ExternalEmailDomains"/>, compared without regard to case.</summary>
+    public IReadOnlySet<string> ExternalEmailDomainSet() =>
+        (ExternalEmailDomains ?? "")
+            .Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(d => d.TrimStart('@'))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>The endpoint <see cref="Region"/> names, or null when it is unset or not a known region.</summary>
     public string? RegionBaseUrl() =>
         string.IsNullOrWhiteSpace(Region) ? null : RegionBaseUrls.GetValueOrDefault(Region.Trim());

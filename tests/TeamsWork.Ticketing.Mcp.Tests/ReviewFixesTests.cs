@@ -192,12 +192,15 @@ public sealed class ReviewFixesTests
     public async Task A_name_missing_from_the_cache_is_looked_up_again()
     {
         const string before = """{"item":{"id":"i","assignees":{"peoples":[{"id":"u1","name":"Jane Doe","email":"jane@example.test"}]}}}""";
+        var time = new MutableTime(DateTimeOffset.UtcNow);
         const string after = """{"item":{"id":"i","assignees":{"peoples":[{"id":"u1","name":"Jane Doe","email":"jane@example.test"},{"id":"u9","name":"New Hire","email":"new@example.test"}]}}}""";
         var handler = new FakeHttpHandler()
             .Enqueue(HttpStatusCode.OK, before)
             .Enqueue(HttpStatusCode.OK, after)
             .Enqueue(HttpStatusCode.OK, $$$"""{"item":{"id":"{{{TicketA}}}"}}""");
-        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler, time: time);
+        await cache.GetInstanceAsync(client, null, refresh: false, Ct); // cached a while ago...
+        time.Advance(InstanceCache.MinRefreshInterval + TimeSpan.FromSeconds(1)); // ...long enough for a refresh to be honoured
 
         await new TicketTools(client, new FixedActor(Jane), cache, options).AssignTicket(TicketA, "new@example.test", cancellationToken: Ct);
 
@@ -273,6 +276,7 @@ public sealed class ReviewFixesTests
 
         Assert.Equal(2, r.Scanned);
         Assert.Equal(2, r.Matches.Count);
+        Assert.True(r.Truncated); // the API said 4 and repeated itself, so the rest couldn't be reached
     }
 
     [Fact]
@@ -285,9 +289,9 @@ public sealed class ReviewFixesTests
               {"id":"c","assignee":{"id":"u3","name":"No Mail","email":""}},
               {"id":"d"}],"itemCount":4}
             """);
-        (TicketingClient client, _, IOptions<TicketingOptions> options) = Build(handler);
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
 
-        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), options).CountTickets("assignee", cancellationToken: Ct));
+        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), cache, options).CountTickets("assignee", cancellationToken: Ct));
 
         JsonElement groups = doc.RootElement.GetProperty("groups");
         Assert.Equal(3, groups.GetArrayLength());
@@ -362,7 +366,7 @@ public sealed class ReviewFixesTests
         McpException ex = await Assert.ThrowsAsync<McpException>(() => Lookup(TestFactory.Client(handler, options), options).FindTicketByNumber("42", cancellationToken: Ct));
 
         Assert.Contains("may still exist", ex.Message, StringComparison.Ordinal);
-        Assert.Equal(3, handler.Requests.Count); // 1 + 1 + 1 tickets: the whole budget, and no more
+        Assert.Single(handler.Requests); // each request is charged what it asks for: the search took the whole budget of 3
     }
 
     // ---- Similar tickets and context ------------------------------------------------------------------------------
@@ -511,7 +515,8 @@ public sealed class ReviewFixesTests
     public void Upload_folder_may_not_contain_protected_folders()
     {
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        Assert.SkipWhen(string.IsNullOrEmpty(home) || Path.GetDirectoryName(home) is null, "No home folder.");
+        string? parent = string.IsNullOrEmpty(home) ? null : Path.GetDirectoryName(home);
+        Assert.SkipWhen(parent is null || Path.GetPathRoot(parent) == parent, "The home folder's parent is a drive root (HOME=/root), which is refused for that reason first.");
 
         StartupConfigurationException ex = Assert.Throws<StartupConfigurationException>(() =>
             UploadFolder.Create(TestFactory.Options(o => o.UploadRoot = Path.GetDirectoryName(home)), null));
