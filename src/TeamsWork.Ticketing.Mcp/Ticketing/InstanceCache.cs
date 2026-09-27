@@ -150,57 +150,49 @@ public sealed class InstanceCache
         where TKey : notnull
         where T : class
     {
-        bool charged = false;
-        while (true)
+        TaskCompletionSource<T>? mine = null;
+        Task<T> task;
+        TKey key;
+        bool honoured;
+        int generation;
+        lock (_lock)
         {
-            TaskCompletionSource<T>? mine = null;
-            Task<T>? task = null;
-            TKey key;
-            bool honoured;
-            int generation;
-            lock (_lock)
+            (honoured, T? cached, generation) = state(refresh);
+            if (cached is not null)
             {
-                (honoured, T? cached, generation) = state(refresh);
-                if (cached is not null)
-                {
-                    return cached;
-                }
-
-                key = keyOf(honoured);
-                if (reads.TryGetValue(key, out InFlight<T>? inFlight) && inFlight.Generation == generation)
-                {
-                    task = inFlight.Task;
-                }
-                else if (charged)
-                {
-                    mine = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    task = mine.Task;
-                    reads[key] = new InFlight<T>(task, generation);
-                }
+                return cached;
             }
 
-            if (task is null)
+            key = keyOf(honoured);
+            if (reads.TryGetValue(key, out InFlight<T>? inFlight) && inFlight.Generation == generation)
+            {
+                task = inFlight.Task;
+            }
+            else
             {
                 // Starting a read: this caller pays for it, and is refused alone if their share is used up. Charged
-                // outside the lock, then the state is looked at again, since another caller may have started one meanwhile.
+                // and reserved in the same locked section, so a caller that arrives while this is in flight always
+                // sees the reservation and joins it instead of being charged (and possibly refused) for a read that
+                // is already under way.
                 _quota?.Acquire(_caller?.Key)?.Dispose();
-                charged = true;
-                continue;
+                mine = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+                task = mine.Task;
+                reads[key] = new InFlight<T>(task, generation);
             }
-
-            if (mine is not null)
-            {
-                _ = ReadAsync(mine, read, value => store(value, honoured, generation), () =>
-                {
-                    if (reads.TryGetValue(key, out InFlight<T>? current) && ReferenceEquals(current.Task, mine.Task))
-                    {
-                        reads.Remove(key);
-                    }
-                });
-            }
-
-            return await task.WaitAsync(cancellationToken);
         }
+
+        if (mine is not null)
+        {
+            _ = ReadAsync(mine, read, value => store(value, honoured, generation), () =>
+            {
+                if (reads.TryGetValue(key, out InFlight<T>? current) && ReferenceEquals(current.Task, mine.Task))
+                {
+                    reads.Remove(key);
+                }
+            });
+        }
+
+        return await task.WaitAsync(cancellationToken);
     }
 
     /// <summary>

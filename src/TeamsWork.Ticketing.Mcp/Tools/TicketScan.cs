@@ -78,13 +78,15 @@ internal static class TicketScan
             token = r.ContinuationToken;
             // Another page exists if the API says so (a token, or a total not yet reached). Without either, a full page
             // means there may be more; a short page is the end. The API may return fewer than asked for, so page fullness
-            // alone never ends a scan that a total says isn't finished.
-            more = items.Count > 0 && (token is not null || (total is int known ? known > read : items.Count == size));
+            // alone never ends a scan that a total says isn't finished. The total is compared against distinct progress
+            // (scanned), not raw rows read, so a page of duplicates can't make the known total look reached while an
+            // unseen ticket remains.
+            more = items.Count > 0 && (token is not null || (total is int known ? known > scanned : items.Count == size));
         }
         while (more && read < maxTickets);
 
-        // Incomplete if more was expected, or if fewer rows were read than the API said there are.
-        return new Result<T>(matches, scanned, total, Truncated: more || (total is int expected && read < expected));
+        // Incomplete if more was expected, or if fewer distinct tickets were seen than the API said there are.
+        return new Result<T>(matches, scanned, total, Truncated: more || (total is int expected && scanned < expected));
     }
 
     /// <summary>The hint shown when a scan stopped before reading every ticket.</summary>

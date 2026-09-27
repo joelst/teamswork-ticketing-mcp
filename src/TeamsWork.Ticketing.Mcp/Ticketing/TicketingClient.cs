@@ -399,15 +399,15 @@ public sealed class TicketingClient
                     throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned an empty response.", null);
                 }
 
-                // Some endpoints report failures with HTTP 200 and error=true.
+                // Some endpoints report failures with HTTP 200 and error=true; the request still reached the API.
                 if (result is ListResponse<Ticket> { Error: true } or ItemResponse<Ticket> { Error: true })
                 {
-                    throw new TicketingApiException(response.StatusCode, ExtractMessage(payload) ?? "The Ticketing API reported an error.");
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, ExtractMessage(payload) ?? "The Ticketing API reported an error.", null);
                 }
 
                 if (TryGetErrorFlag(payload, out string? message))
                 {
-                    throw new TicketingApiException(response.StatusCode, message ?? "The Ticketing API reported an error.");
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, message ?? "The Ticketing API reported an error.", null);
                 }
 
                 return result;
