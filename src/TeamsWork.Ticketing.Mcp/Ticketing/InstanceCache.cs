@@ -10,42 +10,57 @@ namespace TeamsWork.Ticketing.Mcp.Ticketing;
 /// instance. The client is passed in on each call rather than held, because the typed <see cref="TicketingClient"/>
 /// is transient and holding one would pin its HTTP handler for the life of the process.
 /// <para>
-/// Because the cache is shared, no caller can empty it or make it re-read at will: a copy is replaced only once a
-/// fresh one has been read, callers that need the same read at the same time share it, and a refresh is honoured only
-/// when the copy is older than <see cref="MinRefreshInterval"/>. A successful refresh starts a new generation: reads
-/// that began before it may still answer their own callers, but can't put their older copy back in the cache.
+/// Because the cache is shared, no caller can empty it or make it re-read at will:
+/// <list type="bullet">
+///   <item>a copy is replaced only once a fresh one has been read;</item>
+///   <item>a refresh is honoured at most once per <see cref="MinRefreshInterval"/> for the whole cache (not per copy, so
+///   cycling time zone offsets doesn't multiply it); within that interval it is an ordinary read;</item>
+///   <item>the caller who starts a read is charged for it against their own quota share, and refused alone if it is
+///   used up; callers who join a read in flight share it at no charge and never see another caller's quota error;</item>
+///   <item>a successful refresh starts a new generation: reads that began before it can't store their older copy, and new
+///   callers don't join them.</item>
+/// </list>
 /// </para>
 /// </summary>
 public sealed class InstanceCache
 {
-    /// <summary>How recent a copy must be for a refresh to be answered from it instead of re-read.</summary>
+    /// <summary>How often a refresh is honoured, for the whole cache.</summary>
     public static readonly TimeSpan MinRefreshInterval = TimeSpan.FromSeconds(30);
 
     private readonly TimeSpan _ttl;
     private readonly TimeProvider _time;
     private readonly TimeZoneOffsetResolver _timeZones;
+    private readonly UpstreamQuota? _quota;
+    private readonly IUpstreamCaller? _caller;
     private readonly object _lock = new();
 
-    // Instance responses carry times in the requested offset, so each offset is cached separately. A refresh never
-    // joins an ordinary read (which may have started before the settings changed), so in-flight reads are keyed by
-    // whether they are refreshes.
+    // Instance responses carry times in the requested offset, so each offset is cached separately.
     private readonly Dictionary<int, Entry<Instance>> _instances = [];
-    private readonly Dictionary<(int Offset, bool Refresh), Task<Instance>> _instanceReads = [];
+    private readonly Dictionary<(int Offset, bool Refresh), InFlight<Instance>> _instanceReads = [];
     private int _instanceGeneration;
+    private DateTimeOffset _lastInstanceRefresh = DateTimeOffset.MinValue;
 
     private Entry<IReadOnlyList<TagCategory>>? _tags;
-    private readonly Dictionary<bool, Task<IReadOnlyList<TagCategory>>> _tagReads = [];
+    private readonly Dictionary<bool, InFlight<IReadOnlyList<TagCategory>>> _tagReads = [];
     private int _tagGeneration;
+    private DateTimeOffset _lastTagRefresh = DateTimeOffset.MinValue;
 
-    public InstanceCache(IOptions<TicketingOptions> options, TimeZoneOffsetResolver timeZones, TimeProvider? time = null)
+    public InstanceCache(
+        IOptions<TicketingOptions> options,
+        TimeZoneOffsetResolver timeZones,
+        TimeProvider? time = null,
+        UpstreamQuota? quota = null,
+        IUpstreamCaller? caller = null)
     {
         _ttl = TimeSpan.FromSeconds(options.Value.InstanceCacheSeconds);
         _timeZones = timeZones;
         _time = time ?? TimeProvider.System;
+        _quota = quota;
+        _caller = caller;
     }
 
     /// <summary>
-    /// The instance settings. <paramref name="refresh"/> re-reads them unless they were read in the last
+    /// The instance settings. <paramref name="refresh"/> re-reads them unless the cache was refreshed in the last
     /// <see cref="MinRefreshInterval"/>, and a successful re-read replaces every offset's copy, so later name lookups
     /// (which may use another offset) see the change too.
     /// </summary>
@@ -53,34 +68,22 @@ public sealed class InstanceCache
     {
         cancellationToken.ThrowIfCancellationRequested(); // a caller that has given up starts no read
         int offset = _timeZones.Resolve(timezoneOffset);
-        TaskCompletionSource<Instance>? mine = null;
-        Task<Instance> read;
-        int generation;
-        lock (_lock)
-        {
-            if (Usable(_instances.GetValueOrDefault(offset), refresh) is Instance cached)
+        return GetAsync(
+            _instanceReads,
+            refreshing => (offset, refreshing),
+            refreshing =>
             {
-                return Task.FromResult(cached);
-            }
-
-            generation = _instanceGeneration;
-            if (!_instanceReads.TryGetValue((offset, refresh), out read!))
+                bool honoured = refreshing && _time.GetUtcNow() - _lastInstanceRefresh >= MinRefreshInterval;
+                return (honoured, Usable(_instances.GetValueOrDefault(offset), honoured), _instanceGeneration);
+            },
+            () => client.GetInstanceAsync(offset, CancellationToken.None, shared: true),
+            (instance, honoured, generation) =>
             {
-                mine = new TaskCompletionSource<Instance>(TaskCreationOptions.RunContinuationsAsynchronously);
-                read = mine.Task;
-                _instanceReads[(offset, refresh)] = read;
-            }
-        }
-
-        if (mine is not null)
-        {
-            _ = ReadAsync(mine, () => client.GetInstanceAsync(offset, CancellationToken.None, shared: true), instance =>
-            {
-                _instanceReads.Remove((offset, refresh));
-                if (refresh)
+                if (honoured)
                 {
                     // Every copy predates this read now, whatever its offset.
                     _instanceGeneration++;
+                    _lastInstanceRefresh = _time.GetUtcNow();
                     _instances.Clear();
                 }
                 else if (generation != _instanceGeneration)
@@ -92,47 +95,34 @@ public sealed class InstanceCache
                 {
                     _instances[offset] = NewEntry(instance);
                 }
-            }, () => _instanceReads.Remove((offset, refresh)));
-        }
-
-        return read.WaitAsync(cancellationToken);
+            },
+            refresh,
+            cancellationToken);
     }
 
     /// <summary>Tag categories that haven't been deleted. <paramref name="refresh"/> works as for the instance.</summary>
     public Task<IReadOnlyList<TagCategory>> GetTagCategoriesAsync(TicketingClient client, bool refresh, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        TaskCompletionSource<IReadOnlyList<TagCategory>>? mine = null;
-        Task<IReadOnlyList<TagCategory>> read;
-        int generation;
-        lock (_lock)
-        {
-            if (Usable(_tags, refresh) is IReadOnlyList<TagCategory> cached)
+        return GetAsync(
+            _tagReads,
+            refreshing => refreshing,
+            refreshing =>
             {
-                return Task.FromResult(cached);
-            }
-
-            generation = _tagGeneration;
-            if (!_tagReads.TryGetValue(refresh, out read!))
-            {
-                mine = new TaskCompletionSource<IReadOnlyList<TagCategory>>(TaskCreationOptions.RunContinuationsAsynchronously);
-                read = mine.Task;
-                _tagReads[refresh] = read;
-            }
-        }
-
-        if (mine is not null)
-        {
-            _ = ReadAsync(mine, async () =>
+                bool honoured = refreshing && _time.GetUtcNow() - _lastTagRefresh >= MinRefreshInterval;
+                return (honoured, Usable(_tags, honoured), _tagGeneration);
+            },
+            async () =>
             {
                 ListResponse<TagCategory> r = await client.ListTagCategoriesAsync(CancellationToken.None, shared: true);
                 return (IReadOnlyList<TagCategory>)(r.Items ?? []).Where(c => c.Deleted != true).ToList();
-            }, categories =>
+            },
+            (categories, honoured, generation) =>
             {
-                _tagReads.Remove(refresh);
-                if (refresh)
+                if (honoured)
                 {
                     _tagGeneration++;
+                    _lastTagRefresh = _time.GetUtcNow();
                 }
                 else if (generation != _tagGeneration)
                 {
@@ -140,16 +130,84 @@ public sealed class InstanceCache
                 }
 
                 _tags = _ttl > TimeSpan.Zero ? NewEntry(categories) : null;
-            }, () => _tagReads.Remove(refresh));
-        }
+            },
+            refresh,
+            cancellationToken);
+    }
 
-        return read.WaitAsync(cancellationToken);
+    /// <summary>
+    /// The shared logic: answer from the cache, or join a read of the current generation, or start one (charging this
+    /// caller first). Runs <paramref name="state"/> and <paramref name="store"/> under the lock.
+    /// </summary>
+    private async Task<T> GetAsync<TKey, T>(
+        Dictionary<TKey, InFlight<T>> reads,
+        Func<bool, TKey> keyOf,
+        Func<bool, (bool Honoured, T? Cached, int Generation)> state,
+        Func<Task<T>> read,
+        Action<T, bool, int> store,
+        bool refresh,
+        CancellationToken cancellationToken)
+        where TKey : notnull
+        where T : class
+    {
+        bool charged = false;
+        while (true)
+        {
+            TaskCompletionSource<T>? mine = null;
+            Task<T>? task = null;
+            TKey key;
+            bool honoured;
+            int generation;
+            lock (_lock)
+            {
+                (honoured, T? cached, generation) = state(refresh);
+                if (cached is not null)
+                {
+                    return cached;
+                }
+
+                key = keyOf(honoured);
+                if (reads.TryGetValue(key, out InFlight<T>? inFlight) && inFlight.Generation == generation)
+                {
+                    task = inFlight.Task;
+                }
+                else if (charged)
+                {
+                    mine = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    task = mine.Task;
+                    reads[key] = new InFlight<T>(task, generation);
+                }
+            }
+
+            if (task is null)
+            {
+                // Starting a read: this caller pays for it, and is refused alone if their share is used up. Charged
+                // outside the lock, then the state is looked at again, since another caller may have started one meanwhile.
+                _quota?.Acquire(_caller?.Key)?.Dispose();
+                charged = true;
+                continue;
+            }
+
+            if (mine is not null)
+            {
+                _ = ReadAsync(mine, read, value => store(value, honoured, generation), () =>
+                {
+                    if (reads.TryGetValue(key, out InFlight<T>? current) && ReferenceEquals(current.Task, mine.Task))
+                    {
+                        reads.Remove(key);
+                    }
+                });
+            }
+
+            return await task.WaitAsync(cancellationToken);
+        }
     }
 
     /// <summary>
     /// Performs one shared read. It isn't tied to the token of the caller that started it, since others may be waiting
     /// for the same answer and one caller giving up mustn't cancel theirs; the client's request timeout bounds it. A
-    /// failed read leaves the cached copy in place. Every path completes <paramref name="result"/>, so no waiter hangs.
+    /// failed read leaves the cached copy in place. Every path completes <paramref name="result"/>, so no waiter hangs,
+    /// and the in-flight entry is removed (only if it is still this read's) before the result is published.
     /// </summary>
     private async Task ReadAsync<T>(TaskCompletionSource<T> result, Func<Task<T>> read, Action<T> store, Action forget)
     {
@@ -173,16 +231,12 @@ public sealed class InstanceCache
         {
             lock (_lock)
             {
+                forget();
                 store(value);
             }
         }
         catch (Exception ex)
         {
-            lock (_lock)
-            {
-                forget();
-            }
-
             result.SetException(ex);
             return;
         }
@@ -198,9 +252,8 @@ public sealed class InstanceCache
             return null;
         }
 
+        // An honoured refresh re-reads unless the copy is itself only moments old; an ordinary read uses any current copy.
         DateTimeOffset now = _time.GetUtcNow();
-        // A refresh is answered from the copy only if it is also still current: with a lifetime shorter than the refresh
-        // interval, a refresh must never be weaker than an ordinary read.
         bool current = entry.Expires > now;
         return (refresh ? current && now - entry.Read < MinRefreshInterval : current) ? entry.Value : null;
     }
@@ -212,4 +265,6 @@ public sealed class InstanceCache
     }
 
     private sealed record Entry<T>(T Value, DateTimeOffset Expires, DateTimeOffset Read);
+
+    private sealed record InFlight<T>(Task<T> Task, int Generation);
 }

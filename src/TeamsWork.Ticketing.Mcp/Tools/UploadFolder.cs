@@ -46,6 +46,12 @@ public sealed class UploadFolder
         _realRoot = realRoot;
     }
 
+    /// <summary>
+    /// Whether uploads can be offered here: only where the file that is actually open can be identified (Windows, and
+    /// Linux with statx). Elsewhere (macOS) the checks would rest on paths alone, so the tool isn't offered at all.
+    /// </summary>
+    public static bool IsSupported => OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
+
     /// <summary>Full path of the folder, ending in a directory separator.</summary>
     public string Root { get; }
 
@@ -56,6 +62,13 @@ public sealed class UploadFolder
     /// </summary>
     public static UploadFolder Create(TicketingOptions options, string? userSecretsPath)
     {
+        if (!IsSupported)
+        {
+            throw new StartupConfigurationException(
+                "File uploads are available on Windows and Linux only. On this system the server can't check which file an open " +
+                "handle refers to, so it can't make sure an upload is the file it checked. Unset Ticketing:UploadRoot.");
+        }
+
         string configured = options.UploadRoot?.Trim() ?? throw new StartupConfigurationException("Ticketing:UploadRoot is not set.");
         string root = Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(configured)));
 
@@ -73,6 +86,14 @@ public sealed class UploadFolder
         if (OperatingSystem.IsWindows() && realRoot is null)
         {
             throw new StartupConfigurationException($"Ticketing:UploadRoot '{root}' can't be opened to check where it is.");
+        }
+
+        // A folder Windows resolves to a network path (a share, including \localhost\C$, or a mapped drive) can't be
+        // compared with the local folders the checks below protect, since the same folder has two unrelated spellings. So
+        // only a local folder is accepted.
+        if (realRoot?.StartsWith(@"\\", StringComparison.Ordinal) == true)
+        {
+            throw new StartupConfigurationException("Ticketing:UploadRoot must be a folder on a local drive, not a network share or mapped drive.");
         }
 
         string[] locations = realRoot is null ? [root] : [root, Path.TrimEndingDirectorySeparator(realRoot)];
@@ -127,8 +148,12 @@ public sealed class UploadFolder
             }
         }
 
-        string temp = Canon(Path.GetTempPath());
-        if (string.Equals(root, temp, OverlapComparison))
+        // The exemption is for Windows' own temporary folder, at its fixed place inside the local application data folder,
+        // not wherever TEMP or TMP point: those can be set to a settings folder, which would widen the exemption to it.
+        string temp = OperatingSystem.IsWindows()
+            ? Canon(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Temp"))
+            : Canon(Path.GetTempPath());
+        if (string.Equals(root, temp, OverlapComparison) || string.Equals(root, Canon(Path.GetTempPath()), OverlapComparison))
         {
             throw new StartupConfigurationException("Ticketing:UploadRoot must be a dedicated folder, not the temporary folder itself. Use a folder inside it.");
         }
@@ -220,13 +245,25 @@ public sealed class UploadFolder
     {
         try
         {
+            // On Linux the kind of file is checked before opening it: opening a FIFO would wait for a writer (hanging the
+            // call), and a device isn't a file to upload. Its identity is kept, to confirm the open handle is the same file.
+            NativeMethods.UnixFileInfo? before = null;
+            if (OperatingSystem.IsLinux())
+            {
+                before = NativeMethods.LinuxStat(file.FullName);
+                if (before is not { IsRegularFile: true })
+                {
+                    throw new McpException($"'{param}' isn't a regular file (or can't be checked), so it can't be uploaded.");
+                }
+            }
+
             using FileStream stream = new(file.FullName, FileMode.Open, FileAccess.Read, FileShare.Read);
             if (!string.Equals(Resolve(path, param).FullName, file.FullName, InsideComparison))
             {
                 throw new McpException($"'{param}' changed while it was being read. Try again.");
             }
 
-            VerifyOpenFile(stream, param);
+            VerifyOpenFile(stream, param, before);
 
             using var buffer = new MemoryStream();
             byte[] chunk = new byte[81920];
@@ -251,28 +288,40 @@ public sealed class UploadFolder
 
     /// <summary>
     /// Checks the file that is actually open, not the path used to open it: where the operating system says the handle
-    /// points must be inside the folder, with no hidden segment, and (on Windows) the file must have a single name, so a
-    /// hard link to a file elsewhere is refused. On macOS, which has no managed way to ask, the path check stands alone.
+    /// points must be inside the folder, with no hidden segment, and the file must be a regular file with a single name,
+    /// so a hard link to a file elsewhere is refused. On Linux it must also be the file checked before opening. Anything
+    /// that can't be checked is refused rather than passed.
     /// </summary>
-    private void VerifyOpenFile(FileStream stream, string param)
+    private void VerifyOpenFile(FileStream stream, string param, NativeMethods.UnixFileInfo? before)
     {
-        if (_realRoot is null)
-        {
-            return;
-        }
-
+        const string HardLink = "has more than one name on disk (a hard link), so it can't be uploaded. Copy the file into the folder instead.";
         string? real = null;
         if (OperatingSystem.IsWindows())
         {
             real = NativeMethods.FinalPath(stream.SafeFileHandle);
             if (NativeMethods.LinkCount(stream.SafeFileHandle) is not 1)
             {
-                throw new McpException($"'{param}' has more than one name on disk (a hard link), so it can't be uploaded. Copy the file into the folder instead.");
+                throw new McpException($"'{param}' {HardLink}");
             }
         }
         else if (OperatingSystem.IsLinux())
         {
+            if (NativeMethods.LinuxStat(stream.SafeFileHandle) is not { IsRegularFile: true } opened || before is null || !opened.SameFileAs(before.Value))
+            {
+                throw new McpException($"'{param}' turned out, once open, not to be the regular file that was checked, so it wasn't read.");
+            }
+
+            if (opened.LinkCount != 1)
+            {
+                throw new McpException($"'{param}' {HardLink}");
+            }
+
             real = File.ResolveLinkTarget($"/proc/self/fd/{stream.SafeFileHandle.DangerousGetHandle()}", returnFinalTarget: false)?.FullName;
+        }
+
+        if (_realRoot is null)
+        {
+            throw new McpException("Uploads can't be verified on this system, so they aren't read.");
         }
 
         if (real is null || !IsWithin(real, _realRoot, InsideComparison) || string.Equals(real, _realRoot, InsideComparison) ||

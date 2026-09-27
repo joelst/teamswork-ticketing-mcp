@@ -337,8 +337,8 @@ public sealed class ReviewFixesTests
         await Lookup(TestFactory.Client(handler)).FindTicketByNumber("12", cancellationToken: Ct);
 
         Dictionary<string, string> window = TestFactory.Query(handler.Requests[2].Uri);
-        Assert.Equal("900", window["limit"]); // 1000 - 50 for the search - 50 for the newest read
-        Assert.Equal("1123", window["offset"]); // ends at position 2022 = 2034 - 12
+        Assert.Equal("949", window["limit"]); // 1000 - 50 for the search - 1 for the newest read
+        Assert.Equal("1074", window["offset"]); // ends at position 2022 = 2034 - 12
     }
 
     [Fact]

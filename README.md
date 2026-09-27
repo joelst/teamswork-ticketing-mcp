@@ -41,7 +41,7 @@ or tool output.
 | `list_my_tickets` | read | Tickets assigned to or raised by the caller |
 | `list_sla_risk` | read | Unresolved tickets that breached or escalated an SLA |
 | `count_tickets` | read | Ticket counts by status, priority, or assignee |
-| `upload_ticket_files` | write | Upload files from a chosen local folder (stdio only, off unless `Ticketing:UploadRoot` is set) |
+| `upload_ticket_files` | write | Upload files from a chosen local folder (stdio only, Windows and Linux, off unless `Ticketing:UploadRoot` is set) |
 
 Every write is attributed to the **authenticated caller** (from the token's claims). Tools never accept a `user`
 argument, so an agent cannot impersonate someone else. App-only callers (for example a Foundry managed identity) are
@@ -277,7 +277,7 @@ Estimated running cost: Container Apps consumption with scale-to-zero (mostly wi
 | `Ticketing:BaseUrl` | appsettings / env | Ticketing API base URL, for an endpoint `Region` doesn't cover. Set one or the other |
 | `Ticketing:InstanceCacheSeconds` | env | How long instance settings and tags are cached, default 300; `0` turns it off |
 | `Ticketing:MaxScanTickets` | env | Most tickets one filtering tool call (or ticket-number lookup) reads, default 1000 |
-| `Ticketing:ExternalEmailDomains` | env / appsettings | Comma-separated email domains allowed for people outside the assignee list (requestors, people fields); unset allows any |
+| `Ticketing:ExternalEmailDomains` | env / appsettings | Comma-separated email domains allowed for people outside the assignee list (requestors, people fields); unset allows any. Matching is exact (list each subdomain), ASCII only (punycode for an internationalised domain); startup refuses wildcards |
 | `Ticketing:MaxUpstreamRequestsPerCallerPerMinute` | env | Upstream requests one caller may cause per minute, counting every request a tool call makes, default 50; `0` turns it off (Entra mode) |
 | `Ticketing:UploadRoot` | env / user secrets (stdio only) | Folder `upload_ticket_files` may read; unset turns uploads off |
 | `Ticketing:MaxUploadBytes` | env | Largest total size of one upload, default 10 MiB |

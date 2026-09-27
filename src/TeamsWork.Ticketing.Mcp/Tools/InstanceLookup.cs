@@ -161,11 +161,17 @@ internal sealed partial class InstanceLookup
         }
 
         // Someone outside the list can't appear under a listed person's name, however it is spelled on screen.
+        if (given.Name.EnumerateRunes().Any(IsInvisible))
+        {
+            throw new McpException($"'{paramName}' name contains invisible characters. Give the person's name as it should appear.");
+        }
+
         if (people.FirstOrDefault(p => NameSkeleton(p.Name) == NameSkeleton(given.Name)) is Persona namesake)
         {
             throw new McpException(
                 $"'{paramName}' uses the name of {namesake.Name}, who is in the assignee list with a different ID and email. Use their " +
-                "details from get_instance, or the outside person's own name.");
+                "details from get_instance; if this is someone else with the same name, add something that tells them apart, such as " +
+                "their organisation.");
         }
 
         // An outsider's ID is either an object ID in the standard form or, in the email-to-ticket form, the email itself.
@@ -183,7 +189,8 @@ internal sealed partial class InstanceLookup
                 $"(Ticketing:ExternalEmailDomains: {string.Join(", ", externalDomains.Order(StringComparer.OrdinalIgnoreCase))}).");
         }
 
-        return given;
+        // Sent as validated: an object ID in its standard lower-case form.
+        return Guid.TryParseExact(given.Id, "D", out Guid standard) ? given with { Id = standard.ToString("D") } : given;
     }
 
     /// <summary>
@@ -203,7 +210,7 @@ internal sealed partial class InstanceLookup
         List<Persona> people = AssigneesOf(instance);
 
         bool Matches(Persona p, bool partialName) =>
-            (id is null || Same(p.Id, id)) &&
+            (id is null || SameId(p.Id, id)) &&
             (email is null || Same(p.Email, email)) &&
             (name is null || (partialName ? StartsAWord(p.Name!, name) : Same(p.Name, name)));
 
@@ -232,23 +239,24 @@ internal sealed partial class InstanceLookup
         Guid.TryParse(a?.Trim(), out Guid ga) && Guid.TryParse(b?.Trim(), out Guid gb) ? ga == gb : Same(a, b);
 
     /// <summary>
-    /// A name reduced to what a reader sees: compatibility forms folded (NFKC), invisible format characters (zero-width
-    /// spaces and joiners) removed, runs of whitespace collapsed, case ignored. Look-alike letters from other scripts
-    /// (Cyrillic "а" for Latin "a") aren't folded; that needs the Unicode confusables table.
+    /// A name reduced to what a reader sees, using nothing that depends on globalisation data (the Linux build has none,
+    /// and Unicode normalisation there silently does nothing): invisible code points removed, full-width Latin letters
+    /// and digits mapped to their ordinary forms, runs of whitespace collapsed, case ignored. It works on whole code
+    /// points, so characters outside the basic plane (tag characters) aren't missed. Look-alike letters from other
+    /// scripts (Cyrillic "а" for Latin "a") aren't folded; that needs the Unicode confusables table.
     /// </summary>
     internal static string NameSkeleton(string? name)
     {
-        string folded = (name ?? "").Normalize(System.Text.NormalizationForm.FormKC);
-        var builder = new System.Text.StringBuilder(folded.Length);
+        var builder = new System.Text.StringBuilder((name ?? "").Length);
         bool space = false;
-        foreach (char c in folded)
+        foreach (System.Text.Rune rune in (name ?? "").EnumerateRunes())
         {
-            if (char.GetUnicodeCategory(c) == UnicodeCategory.Format)
+            if (IsInvisible(rune))
             {
                 continue;
             }
 
-            if (char.IsWhiteSpace(c))
+            if (System.Text.Rune.IsWhiteSpace(rune))
             {
                 space = builder.Length > 0;
                 continue;
@@ -260,11 +268,26 @@ internal sealed partial class InstanceLookup
                 space = false;
             }
 
-            builder.Append(char.ToLowerInvariant(c));
+            // U+FF01..U+FF5E are full-width forms of U+0021..U+007E.
+            System.Text.Rune plain = rune.Value is >= 0xFF01 and <= 0xFF5E ? new System.Text.Rune(rune.Value - 0xFEE0) : rune;
+            builder.Append(System.Text.Rune.ToLowerInvariant(plain).ToString());
         }
 
         return builder.ToString();
     }
+
+    /// <summary>
+    /// Whether a code point is invisible when displayed: format characters (zero-width spaces and joiners, tag characters)
+    /// and the other Default_Ignorable_Code_Point characters that aren't format characters (combining grapheme joiner,
+    /// Hangul fillers, variation selectors).
+    /// </summary>
+    internal static bool IsInvisible(System.Text.Rune rune) =>
+        System.Text.Rune.GetUnicodeCategory(rune) == UnicodeCategory.Format ||
+        rune.Value is 0x034F or 0x115F or 0x1160 or 0x17B4 or 0x17B5 or 0x3164 or 0xFFA0 ||
+        rune.Value is >= 0x180B and <= 0x180F ||
+        rune.Value is >= 0xFE00 and <= 0xFE0F ||
+        rune.Value is >= 0xFFF0 and <= 0xFFF8 ||
+        rune.Value is >= 0xE0000 and <= 0xE0FFF;
 
     private static List<Persona> AssigneesOf(Instance instance) =>
         (instance.Assignees?.Peoples ?? [])
@@ -364,7 +387,8 @@ internal sealed partial class InstanceLookup
                 // Copies that state different things about what the field is leave no definition to check a value against.
                 // A copy that leaves an attribute out doesn't disagree.
                 copies.Select(TypeKey).OfType<string>().Distinct().Count() > 1 ||
-                copies.Select(c => c.IsMultiple).OfType<bool>().Distinct().Count() > 1))
+                copies.Select(c => c.IsMultiple).OfType<bool>().Distinct().Count() > 1 ||
+                copies.Select(OptionKeys).Where(keys => keys.Length > 0).Distinct().Count() > 1))
             .ToList();
 
     /// <summary>One definition from a field's copies, taking each attribute from the first copy that states it.</summary>
@@ -372,11 +396,12 @@ internal sealed partial class InstanceLookup
     {
         Id = copies[0].Id,
         Title = copies.Select(c => c.Title).FirstOrDefault(t => !string.IsNullOrWhiteSpace(t)),
-        Type = copies.Select(c => c.Type).FirstOrDefault(t => t is { ValueKind: not JsonValueKind.Null and not JsonValueKind.Undefined }),
+        // The same attributes the conflict check reads: a type this server can name, and options it can read.
+        Type = copies.FirstOrDefault(c => TypeKey(c) is not null)?.Type,
         IsMultiple = copies.Select(c => c.IsMultiple).FirstOrDefault(m => m is not null),
         IsMandatory = copies.Select(c => c.IsMandatory).FirstOrDefault(m => m is not null),
         Status = copies.Select(c => c.Status).FirstOrDefault(st => st is not null),
-        Options = copies.Select(c => c.Options).FirstOrDefault(o => o is { ValueKind: JsonValueKind.Array } a && a.GetArrayLength() > 0),
+        Options = copies.FirstOrDefault(c => OptionsOf(c).Count > 0)?.Options,
         DefaultValue = copies.Select(c => c.DefaultValue).FirstOrDefault(d => d is not null),
     };
 
@@ -539,6 +564,10 @@ internal sealed partial class InstanceLookup
 
         return key is null ? null : TypePrefix().Replace(key, "").ToLowerInvariant();
     }
+
+    /// <summary>A field's option keys, sorted and joined, for comparing copies of it.</summary>
+    private static string OptionKeys(CustomField field) =>
+        string.Join(',', OptionsOf(field).Select(o => o.Key).Order(StringComparer.Ordinal));
 
     private static List<(string Key, string? Text)> OptionsOf(CustomField field)
     {

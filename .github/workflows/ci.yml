@@ -39,6 +39,13 @@ jobs:
       - run: dotnet restore
       - run: dotnet build -c Release --no-restore -p:ContinuousIntegrationBuild=true
       - run: dotnet test -c Release --no-build
+      # The Linux release build and container run without ICU (InvariantGlobalization), where Unicode normalisation and
+      # IDN mapping silently change meaning. Run the tests that way too, so behaviour that depends on culture data shows.
+      - name: dotnet test (invariant globalization)
+        if: runner.os == 'Linux'
+        env:
+          DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "1"
+        run: dotnet test -c Release --no-build
 
   # install.sh must run under dash and macOS sh, not only bash; shellcheck knows those portability mistakes.
   install-scripts:

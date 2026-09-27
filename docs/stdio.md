@@ -175,8 +175,9 @@ text an agent has read can't make it send other files. Up to 10 files per call, 
 (`Ticketing:MaxUploadBytes`). Uploads are private (visible to agents, not the requestor) unless the agent passes
 `isPrivate: false`. Uploads are never offered by the HTTP transports.
 
-Only put files in the folder that you are willing to send. Anything you place there can be uploaded (on Windows a hard
-link to a file elsewhere is refused; on Linux and macOS it isn't detected). The guard limits what this tool reads; an
+Only put files in the folder that you are willing to send. Anything you place there can be uploaded (hard links to
+files elsewhere, FIFOs, and devices are refused). Uploads are available on Windows and Linux; on macOS the server logs a
+warning and doesn't offer the tool, because it can't identify the file it has open there. The guard limits what this tool reads; an
 agent that also has shell or file tools could copy a file into the folder first, so keep the folder out of their reach.
 
 `install.sh` updates the file without a JSON parser, so it only edits the form `dotnet user-secrets` writes: one

@@ -114,28 +114,25 @@ public sealed class TicketingOptions
     public string? ExternalEmailDomains { get; set; }
 
     /// <summary>
-    /// The domains in <see cref="ExternalEmailDomains"/>, in ASCII (punycode) form and lower case, matching how addresses
-    /// are compared, so an internationalised spelling of a domain can't differ from its listed form.
+    /// The domains in <see cref="ExternalEmailDomains"/>, lower case. Matching is exact (a subdomain is a different
+    /// domain), and every entry must be an ASCII host name (punycode for an internationalised one); startup refuses
+    /// anything else, so a typo or wildcard can't silently match nothing.
     /// </summary>
     public IReadOnlySet<string> ExternalEmailDomainSet() =>
+        ExternalEmailDomainEntries().Select(d => d.ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>Entries of <see cref="ExternalEmailDomains"/> that aren't plain ASCII host names.</summary>
+    public IReadOnlyList<string> InvalidExternalEmailDomains() =>
+        ExternalEmailDomainEntries()
+            .Where(d => d.StartsWith('.') || d.EndsWith('.') || !d.Contains('.') ||
+                        !d.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '.'))
+            .ToList();
+
+    private IEnumerable<string> ExternalEmailDomainEntries() =>
         (ExternalEmailDomains ?? "")
             .Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(d => d.TrimStart('@').TrimEnd('.'))
-            .Where(d => d.Length > 0)
-            .Select(AsciiDomain)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-    private static string AsciiDomain(string domain)
-    {
-        try
-        {
-            return new System.Globalization.IdnMapping().GetAscii(domain).ToLowerInvariant();
-        }
-        catch (ArgumentException)
-        {
-            return domain.ToLowerInvariant();
-        }
-    }
+            .Select(d => d.TrimStart('@'))
+            .Where(d => d.Length > 0);
 
     /// <summary>The endpoint <see cref="Region"/> names, or null when it is unset or not a known region.</summary>
     public string? RegionBaseUrl() =>
@@ -164,6 +161,7 @@ public sealed class ServiceAccountOptions
         IsConfigured &&
         System.Net.Mail.MailAddress.TryCreate(Email!.Trim(), out System.Net.Mail.MailAddress? address) &&
         string.Equals(address.Address, Email.Trim(), StringComparison.OrdinalIgnoreCase) &&
+        TeamsWork.Ticketing.Mcp.Tools.ToolValidation.IsAsciiDomain(address.Host) &&
         // The standard 36-character form only: the help desk stores that form and people are matched on it.
         ((Guid.TryParseExact(Id!.Trim(), "D", out Guid objectId) && objectId != Guid.Empty) ||
          string.Equals(Id!.Trim(), Email.Trim(), StringComparison.OrdinalIgnoreCase));

@@ -162,14 +162,18 @@ public sealed class TicketTools
                 }
                 else
                 {
+                    // The ticket exists now, so the follow-up doesn't use the caller's token: a caller that gives up here would
+                    // otherwise get an error for a ticket that was created, and might create it again. Its own time limit
+                    // (the client's retries within it) keeps the call from hanging.
+                    using var followUp = new CancellationTokenSource(TimeSpan.FromSeconds(_options.RequestTimeoutSeconds * 3 + 15));
                     try
                     {
-                        created = await _client.UpdateTicketAsync(createdId, new TicketWrite { Priority = validPriority }, actor.ToTicketUser(), includeHtml, timezoneOffset, cancellationToken);
+                        created = await _client.UpdateTicketAsync(createdId, new TicketWrite { Priority = validPriority }, actor.ToTicketUser(), includeHtml, timezoneOffset, followUp.Token);
                     }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    catch (Exception ex)
                     {
                         // Only the API's own messages are written for the agent; anything else stays generic.
-                        string reason = ex is TicketingApiException api ? api.Message : "the request failed.";
+                        string reason = ex is TicketingApiException api ? api.Message : ex is OperationCanceledException ? "it took too long." : "the request failed.";
                         string which = created.TicketNo is int no ? $"Ticket #{no}" : $"Ticket {created.Id}";
                         warning = $"{which} was created, but setting its priority to {validPriority} failed: {reason} " +
                                   $"Don't create it again; call update_ticket with ticketId {created.Id} and the priority.";

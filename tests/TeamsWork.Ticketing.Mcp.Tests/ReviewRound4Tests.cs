@@ -53,10 +53,33 @@ public sealed class ReviewRound4Tests
         Assert.Throws<McpException>(() => InstanceLookup.ResolvePerson(person, "requestor", Listed, assigneeOnly: false, domains));
     }
 
-    [Fact]
-    public void Internationalised_domains_are_compared_in_one_form()
+    [Theory]
+    [InlineData("jane@\uFF43ontoso.com")] // full-width letters, which IDN mapping would fold into contoso.com
+    [InlineData("pat@b\u00FCcher.example")] // an internationalised domain not in its punycode form
+    public void An_email_domain_must_be_ascii(string email)
     {
-        IReadOnlySet<string> domains = TestFactory.Options(o => o.ExternalEmailDomains = "bücher.example").ExternalEmailDomainSet();
+        Assert.Contains("ASCII form", Assert.Throws<McpException>(() => ToolValidation.RequireEmail(email, "email")).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_email_is_returned_with_its_domain_in_lower_case()
+    {
+        Assert.Equal("Pat@contoso.com", ToolValidation.RequireEmail("Pat@CONTOSO.com", "email"));
+    }
+
+    [Theory]
+    [InlineData("*.contoso.com")]
+    [InlineData("b\u00FCcher.example")]
+    [InlineData("contoso")]
+    public void Domain_allowlist_entries_must_be_plain_ascii_domains(string entry)
+    {
+        Assert.NotEmpty(TestFactory.Options(o => o.ExternalEmailDomains = "contoso.com, " + entry).InvalidExternalEmailDomains());
+    }
+
+    [Fact]
+    public void Punycode_domains_are_allowed_in_the_allowlist()
+    {
+        IReadOnlySet<string> domains = TestFactory.Options(o => o.ExternalEmailDomains = "XN--bcher-kva.example").ExternalEmailDomainSet();
         var person = new UserRef("pat@xn--bcher-kva.example", "pat@xn--bcher-kva.example", "pat@xn--bcher-kva.example");
 
         Assert.Equal("pat@xn--bcher-kva.example", InstanceLookup.ResolvePerson(person, "requestor", Listed, assigneeOnly: false, domains).Email);
@@ -77,16 +100,38 @@ public sealed class ReviewRound4Tests
     }
 
     [Theory]
-    [InlineData("Jane  Doe")]           // two spaces
-    [InlineData("Jane Doe")]       // no-break space
-    [InlineData("Jane Doe​")]      // zero-width space
-    [InlineData("ＪＡＮＥ ＤＯＥ")]      // full-width letters
+    [InlineData("Jane  Doe")]                          // two spaces
+    [InlineData("Jane\u00A0Doe")]                     // no-break space
+    [InlineData("\uFF2A\uFF41\uFF4E\uFF45 Doe")]   // full-width letters
+    [InlineData("JANE DOE")]
     public void A_listed_persons_name_is_recognised_however_its_spelled(string name)
     {
         McpException ex = Assert.Throws<McpException>(() =>
             InstanceLookup.ResolvePerson(new UserRef("22222222-2222-2222-2222-222222222222", name, "pat@evil.test"), "requestor", Listed, assigneeOnly: false));
 
         Assert.Contains("uses the name of Jane Doe", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Jane Doe\u200B")]       // zero-width space
+    [InlineData("Jane Doe\U000E0041")]   // a tag character, outside the basic plane
+    [InlineData("Jane\u034F Doe")]       // combining grapheme joiner
+    [InlineData("Jane Doe\u3164")]       // Hangul filler
+    [InlineData("Jane Doe\uFE0F")]       // variation selector
+    public void An_outsiders_name_cant_hide_invisible_characters(string name)
+    {
+        McpException ex = Assert.Throws<McpException>(() =>
+            InstanceLookup.ResolvePerson(new UserRef("22222222-2222-2222-2222-222222222222", name, "pat@evil.test"), "requestor", Listed, assigneeOnly: false));
+
+        Assert.Contains("invisible characters", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_outsiders_id_is_sent_in_the_standard_form()
+    {
+        TicketUser user = InstanceLookup.ResolvePerson(new UserRef("3FA85F64-5717-4562-B3FC-2C963F66AFA6", "Pat", "pat@outside.test"), "requestor", Listed, assigneeOnly: false);
+
+        Assert.Equal("3fa85f64-5717-4562-b3fc-2c963f66afa6", user.Id);
     }
 
     [Theory]
@@ -209,7 +254,7 @@ public sealed class ReviewRound4Tests
     }
 
     [Fact]
-    public async Task A_shared_read_isnt_charged_to_the_caller_who_started_it()
+    public async Task The_caller_who_starts_a_shared_read_pays_for_it_alone()
     {
         IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(TestFactory.Options(o => o.MaxUpstreamRequestsPerCallerPerMinute = 1));
         var handler = new FakeHttpHandler()
@@ -217,14 +262,24 @@ public sealed class ReviewRound4Tests
             .Enqueue(HttpStatusCode.OK, InstanceJson);
         var time = new FixedTimeProvider(DateTimeOffset.UtcNow);
         using var quota = new UpstreamQuota(opts);
+        var caller = new MutableCaller { Key = "tenant/alice" };
         var client = new TicketingClient(new HttpClient(handler), opts, new TicketingRateLimiter(opts), new TimeZoneOffsetResolver(opts, time),
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<TicketingClient>.Instance, time, quota, new Caller("tenant/alice"));
-        var cache = new InstanceCache(opts, new TimeZoneOffsetResolver(opts, time), time);
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<TicketingClient>.Instance, time, quota, caller);
+        var cache = new InstanceCache(opts, new TimeZoneOffsetResolver(opts, time), time, quota, caller);
 
         await client.ListTicketsAsync(new TicketListQuery(), Ct); // alice's one request this minute
-        Instance instance = await cache.GetInstanceAsync(client, null, refresh: false, Ct); // still served: a shared read
+        TicketingApiException ex = await Assert.ThrowsAsync<TicketingApiException>(() => cache.GetInstanceAsync(client, null, refresh: false, Ct));
+        Assert.Contains("your share", ex.Message, StringComparison.Ordinal);
+        Assert.Single(handler.Requests); // refused before any read went out
 
+        caller.Key = "tenant/bob"; // someone else still can
+        Instance instance = await cache.GetInstanceAsync(client, null, refresh: false, Ct);
         Assert.Equal("Help desk", instance.DisplayName);
+    }
+
+    private sealed class MutableCaller : IUpstreamCaller
+    {
+        public string? Key { get; set; }
     }
 
     private sealed record Caller(string? Key) : IUpstreamCaller;
@@ -266,6 +321,51 @@ public sealed class ReviewRound4Tests
 
         Assert.Contains("hard link", Assert.Throws<McpException>(() => folder.ReadFiles(["linked.txt"])).Message, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void A_hard_link_to_a_file_elsewhere_is_refused_on_linux()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "This checks the Linux link count (statx).");
+        using var dir = new TempDir();
+        using var outside = new TempDir();
+        string target = Path.Combine(outside.Path, "secret.txt");
+        File.WriteAllText(target, "x");
+        Assert.SkipUnless(link(Utf8(target), Utf8(Path.Combine(dir.Path, "linked.txt"))) == 0, "Hard links aren't supported here.");
+        UploadFolder folder = UploadFolder.Create(TestFactory.Options(o => o.UploadRoot = dir.Path), null);
+
+        Assert.Contains("hard link", Assert.Throws<McpException>(() => folder.ReadFiles(["linked.txt"])).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_fifo_is_refused_without_hanging_on_linux()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "FIFOs are a Unix thing.");
+        using var dir = new TempDir();
+        Assert.SkipUnless(mkfifo(Utf8(Path.Combine(dir.Path, "pipe")), 0x1B6) == 0, "Couldn't create a FIFO here.");
+        UploadFolder folder = UploadFolder.Create(TestFactory.Options(o => o.UploadRoot = dir.Path), null);
+
+        // Opening a FIFO for reading waits for a writer; the check must refuse it before opening.
+        Task<McpException> refused = Task.Run(() => Assert.Throws<McpException>(() => folder.ReadFiles(["pipe"])), Ct);
+        McpException ex = await refused.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+
+        Assert.Contains("isn't a regular file", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Uploads_are_only_offered_where_the_open_file_can_be_verified()
+    {
+        Assert.Equal(OperatingSystem.IsWindows() || OperatingSystem.IsLinux(), UploadFolder.IsSupported);
+    }
+
+    private static byte[] Utf8(string path) => System.Text.Encoding.UTF8.GetBytes(path + " ");
+
+    [DllImport("libc", ExactSpelling = true, SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    private static extern int link(byte[] existing, byte[] newPath);
+
+    [DllImport("libc", ExactSpelling = true, SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    private static extern int mkfifo(byte[] path, uint mode);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]

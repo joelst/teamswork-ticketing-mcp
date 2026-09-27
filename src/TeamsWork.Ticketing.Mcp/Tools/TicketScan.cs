@@ -50,11 +50,10 @@ internal static class TicketScan
             ListResponse<Ticket> r = await client.ListTicketsAsync(page, cancellationToken);
             IReadOnlyList<Ticket> items = r.Items ?? [];
             total ??= r.ItemCount;
-            read += items.Count;
 
             // Counted once each, so an API that repeats tickets across pages (or ignores offset) can't inflate results.
-            // Rows without an ID are left out: nothing can act on them, and they can't be told apart across pages, so
-            // counting them would let a repeating API look like progress.
+            // Rows without an ID aren't offered as matches (nothing can act on them), but they are rows, and the API's
+            // total counts rows, so paging and completeness are measured in rows read.
             int before = scanned;
             foreach (Ticket t in items.Where(x => !string.IsNullOrWhiteSpace(x.Id) && seen.Add(x.Id)))
             {
@@ -65,24 +64,27 @@ internal static class TicketScan
                 }
             }
 
-            token = r.ContinuationToken;
-            // Another page exists if the API says so (a token, or a total not yet reached by distinct tickets). Without
-            // either, a full page means there may be more; a short page is the end. The API may return fewer than asked
-            // for, so page fullness alone never ends a scan that a total says isn't finished.
-            more = items.Count > 0 && (token is not null || (total is int known ? known > scanned : items.Count == size));
-
-            // A page of tickets already seen is no progress: the API is repeating itself (ignoring offset, or a token that
-            // loops), so paging further can't reach the rest. Stop, and report the scan as incomplete if more was expected.
-            if (items.Count > 0 && scanned == before)
+            // A page that brings no ticket not already seen is no progress: the API is repeating itself (ignoring offset,
+            // or a token that loops), so paging further can't reach the rest. Its rows aren't counted as read; the scan
+            // stops, incomplete if the API said there was more.
+            bool progress = items.Count == 0 || scanned > before || (read == 0 && items.All(x => string.IsNullOrWhiteSpace(x.Id)));
+            if (!progress)
             {
+                more = true;
                 break;
             }
+
+            read += items.Count;
+            token = r.ContinuationToken;
+            // Another page exists if the API says so (a token, or a total not yet reached). Without either, a full page
+            // means there may be more; a short page is the end. The API may return fewer than asked for, so page fullness
+            // alone never ends a scan that a total says isn't finished.
+            more = items.Count > 0 && (token is not null || (total is int known ? known > read : items.Count == size));
         }
         while (more && read < maxTickets);
 
-        // Incomplete if more was expected, or if fewer distinct tickets were seen than the API said there are (a scan
-        // cut short by an empty or repeated page).
-        return new Result<T>(matches, scanned, total, Truncated: more || (total is int expected && scanned < expected));
+        // Incomplete if more was expected, or if fewer rows were read than the API said there are.
+        return new Result<T>(matches, scanned, total, Truncated: more || (total is int expected && read < expected));
     }
 
     /// <summary>The hint shown when a scan stopped before reading every ticket.</summary>

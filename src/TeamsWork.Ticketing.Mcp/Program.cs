@@ -74,7 +74,9 @@ static async Task RunStdioAsync(string[] args)
     AddTools(mcp);
 
     // File uploads read the local disk, so they are offered only here, and only once a folder has been chosen.
-    bool uploads = !string.IsNullOrWhiteSpace(builder.Configuration[$"{TicketingOptions.SectionName}:{nameof(TicketingOptions.UploadRoot)}"]);
+    bool uploadsRequested = !string.IsNullOrWhiteSpace(builder.Configuration[$"{TicketingOptions.SectionName}:{nameof(TicketingOptions.UploadRoot)}"]);
+    // Only where the open file can be verified (Windows, Linux); elsewhere the tool isn't offered at all.
+    bool uploads = uploadsRequested && UploadFolder.IsSupported;
     if (uploads)
     {
         builder.Services.AddSingleton(sp => UploadFolder.Create(
@@ -86,6 +88,11 @@ static async Task RunStdioAsync(string[] args)
     ActingUser actor = await host.Services.GetRequiredService<IActingUserProvider>().GetActingUserAsync(CancellationToken.None);
     ILogger startupLog = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
     startupLog.LogInformation("stdio transport; ticket changes will be attributed to {Name} <{Email}>.", actor.Name, actor.Email);
+    if (uploadsRequested && !uploads)
+    {
+        startupLog.LogWarning("Ticketing:UploadRoot is set, but file uploads are available on Windows and Linux only, so upload_ticket_files isn't offered.");
+    }
+
     if (uploads)
     {
         // Resolved now so a bad folder stops startup with a clear message rather than failing the first upload.
@@ -452,6 +459,9 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
             "(on Linux, the tzdata package provides them).")
         // The ID is what the help desk records and matches people by. Anything but an Entra object ID (or the email, in
         // the email-to-ticket form) attributes every write to someone the help desk doesn't know, silently.
+        .Validate(o => o.InvalidExternalEmailDomains().Count == 0,
+            "Ticketing:ExternalEmailDomains must list plain domain names, such as contoso.com, separated by commas: no wildcards, and " +
+            "an internationalised domain in its xn-- punycode form. Matching is exact, so list each subdomain that should be allowed.")
         .Validate(o => o.ServiceAccount?.IsConfigured != true || o.ServiceAccount.IsValidIdentity,
             "Ticketing:ServiceAccount:Email must be a valid email address, and Ticketing:ServiceAccount:Id the account's Entra object ID " +
             "(a GUID, from 'az ad signed-in-user show --query id' or the Entra admin center) or that same email address.")

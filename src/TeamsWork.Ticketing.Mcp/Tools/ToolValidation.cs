@@ -260,10 +260,11 @@ internal static class ToolValidation
     }
 
     /// <summary>
-    /// Validates a single, bare email address and returns it as parsed. MailAddress also accepts lists
-    /// ("a@x.com, b@y.com") and display names ("Jane &lt;j@y.com&gt;"), where the address it reports isn't the text given;
-    /// checking one and sending the other would let an identity or domain check pass on a different address from the
-    /// one that is used, so anything but one plain address is refused.
+    /// Validates a single, bare email address and returns it in canonical form: the local part as given, the domain in
+    /// lower case. MailAddress also accepts lists ("a@x.com, b@y.com") and display names ("Jane &lt;j@y.com&gt;"), where
+    /// the address it reports isn't the text given, so anything but one plain address is refused. The domain must be in
+    /// ASCII (an internationalised domain in its punycode form): folding Unicode domains depends on globalisation data the
+    /// Linux build doesn't carry, and a full-width "ｃontoso.com" must not pass as, or differ from, contoso.com.
     /// </summary>
     public static string RequireEmail(string? value, string paramName)
     {
@@ -275,20 +276,23 @@ internal static class ToolValidation
             throw new McpException($"'{paramName}' must be one plain email address, such as name@example.com.");
         }
 
-        return address.Address;
+        if (!IsAsciiDomain(address.Host))
+        {
+            throw new McpException($"'{paramName}' must have its domain in ASCII form (for an internationalised domain, its xn-- punycode form).");
+        }
+
+        return address.User + "@" + address.Host.ToLowerInvariant();
     }
 
-    /// <summary>The domain of an address from <see cref="RequireEmail"/>, in its ASCII (punycode) form, lower case.</summary>
-    public static string EmailDomain(string address)
-    {
-        string host = new System.Net.Mail.MailAddress(address).Host;
-        try
-        {
-            return new System.Globalization.IdnMapping().GetAscii(host).ToLowerInvariant();
-        }
-        catch (ArgumentException)
-        {
-            return host.ToLowerInvariant();
-        }
-    }
+    /// <summary>The domain of an address from <see cref="RequireEmail"/>, lower case.</summary>
+    public static string EmailDomain(string address) => address[(address.LastIndexOf('@') + 1)..].ToLowerInvariant();
+
+    /// <summary>
+    /// Whether <paramref name="domain"/> is a plain ASCII host name (letters, digits, hyphens, dots), or an IP literal in
+    /// brackets. Punycode labels (xn--) are ASCII and pass.
+    /// </summary>
+    public static bool IsAsciiDomain(string domain) =>
+        domain.Length > 0 &&
+        ((domain.StartsWith('[') && domain.EndsWith(']')) ||
+         domain.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '.'));
 }

@@ -56,7 +56,7 @@ public sealed class ReviewRound3Tests
     public async Task First_page_is_clamped_to_the_reported_total()
     {
         // Numbering that starts high: highest 20000 but only 2000 tickets, so 5 can't be past position 1999.
-        var options = TestFactory.Options(o => o.MaxScanTickets = 150);
+        var options = TestFactory.Options(o => o.MaxScanTickets = 100);
         var handler = new FakeHttpHandler()
             .Enqueue(HttpStatusCode.OK, """{"items":[]}""")
             .Enqueue(HttpStatusCode.OK, $$$"""{"items":[{{{Ticket(TicketB, 20000)}}}],"itemCount":2000}""")
@@ -64,7 +64,7 @@ public sealed class ReviewRound3Tests
 
         await Assert.ThrowsAsync<McpException>(() => Lookup(TestFactory.Client(handler, options), options).FindTicketByNumber("5", cancellationToken: Ct));
 
-        Assert.Equal("1950", TestFactory.Query(handler.Requests[2].Uri)["offset"]); // ends at 1999, sized by the 50 left
+        Assert.Equal("1951", TestFactory.Query(handler.Requests[2].Uri)["offset"]); // ends at 1999, sized by the 49 left
         Assert.Equal(3, handler.Requests.Count); // the empty page is charged, so the budget is spent
     }
 
@@ -185,6 +185,36 @@ public sealed class ReviewRound3Tests
 
         await cache.GetInstanceAsync(client, -6, refresh: false, Ct); // ...but wasn't cached, so this reads again
         Assert.Equal(3, handler.Count);
+    }
+
+    [Fact]
+    public async Task Cycling_offsets_doesnt_multiply_refreshes()
+    {
+        var handler = new GatedHandler(gateFirst: false);
+        (TicketingClient client, InstanceCache cache) = Gated(handler);
+
+        await cache.GetInstanceAsync(client, -6, refresh: true, Ct);  // honoured: a read
+        await cache.GetInstanceAsync(client, -5, refresh: true, Ct);  // within 30 s of it: an ordinary read of -5
+        await cache.GetInstanceAsync(client, -6, refresh: true, Ct);  // ordinary: -6 is still cached
+        await cache.GetInstanceAsync(client, -5, refresh: true, Ct);  // ordinary: -5 is now cached
+
+        Assert.Equal(2, handler.Count);
+    }
+
+    [Fact]
+    public async Task A_new_caller_doesnt_join_a_read_from_before_a_refresh()
+    {
+        var handler = new GatedHandler(gateFirst: true);
+        (TicketingClient client, InstanceCache cache) = Gated(handler);
+
+        Task<Instance> older = Task.Run(() => cache.GetInstanceAsync(client, -6, refresh: false, Ct), Ct); // held back
+        await handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        await cache.GetInstanceAsync(client, -5, refresh: true, Ct); // a refresh finishes
+        await cache.GetInstanceAsync(client, -6, refresh: false, Ct); // its own read, not the older one
+
+        Assert.Equal(3, handler.Count);
+        handler.Release.SetResult();
+        await older;
     }
 
     private static (TicketingClient Client, InstanceCache Cache) Gated(GatedHandler handler)
@@ -327,7 +357,8 @@ public sealed class ReviewRound3Tests
 
         if (allowed)
         {
-            Assert.Equal(email, InstanceLookup.ResolvePerson(person, "requestor", Listed, assigneeOnly: false, domains).Email);
+            string canonical = email[..email.IndexOf('@')] + email[email.IndexOf('@')..].ToLowerInvariant(); // domain in lower case
+            Assert.Equal(canonical, InstanceLookup.ResolvePerson(person, "requestor", Listed, assigneeOnly: false, domains).Email);
         }
         else
         {

@@ -316,7 +316,12 @@ public sealed class TicketingClient
 
             // HttpClient.Timeout ends once the headers arrive (ResponseHeadersRead), so this also bounds the body read:
             // an upstream that sends headers and then stalls would otherwise hold the request open indefinitely.
-            using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            // A request that isn't safe to repeat is seen through once it is sent: the caller's cancellation still stops the
+            // waiting before it (the rate limiter, a backoff), but not the exchange itself, which would leave a ticket or
+            // comment created with no one told. Only the server's own time limit ends it, and a time-out reports the
+            // outcome as unknown.
+            CancellationToken exchange = idempotent ? cancellationToken : CancellationToken.None;
+            using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(exchange);
             attemptTimeout.CancelAfter(TimeSpan.FromSeconds(_options.RequestTimeoutSeconds));
 
             long started = _timeProvider.GetTimestamp();
@@ -335,7 +340,7 @@ public sealed class TicketingClient
             {
                 throw Failure(idempotent, mayHaveBeenProcessed: !IsPreSendFailure(ex), null, $"Could not reach the Ticketing API ({ex.HttpRequestError}).", ex);
             }
-            catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+            catch (TaskCanceledException ex) when (!exchange.IsCancellationRequested)
             {
                 throw Failure(idempotent, mayHaveBeenProcessed: true, null, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
             }
@@ -357,7 +362,7 @@ public sealed class TicketingClient
                 {
                     payload = await ReadBodyAsync(response.Content, _options.MaxResponseBytes, attemptTimeout.Token);
                 }
-                catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+                catch (OperationCanceledException ex) when (!exchange.IsCancellationRequested)
                 {
                     // The headers arrived, so the API received the request.
                     throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
@@ -519,9 +524,14 @@ public sealed class TicketingClient
         status == HttpStatusCode.TooManyRequests ||
         (idempotent && status is HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout);
 
-    /// <summary>Failures that happen before any request bytes reach the server.</summary>
+    /// <summary>
+    /// Failures that can only happen before any request bytes are sent: the name didn't resolve, or the TLS handshake
+    /// failed (the request is sent only over an established TLS session). A generic connection error isn't among them:
+    /// a server or proxy can reset the connection after a request body has gone out, so for a request that isn't safe to
+    /// repeat it counts as an unknown outcome, not as proof that nothing happened.
+    /// </summary>
     private static bool IsPreSendFailure(HttpRequestException ex) =>
-        ex.HttpRequestError is HttpRequestError.ConnectionError or HttpRequestError.NameResolutionError or HttpRequestError.SecureConnectionError;
+        ex.HttpRequestError is HttpRequestError.NameResolutionError or HttpRequestError.SecureConnectionError;
 
     private static TimeSpan Backoff(int attempt, RetryConditionHeaderValue? retryAfter)
     {

@@ -21,8 +21,8 @@ public sealed class LookupTools
     // Tickets the number search reads before it falls back to paging through tickets sorted by number.
     private const int NumberSearchSize = 50;
 
-    // Every request costs at least this much of the budget, so pages that come back empty or short still use it up and one
-    // lookup makes at most MaxScanTickets / 50 requests (20 by default).
+    // Every page request costs at least this much of the budget, so pages that come back empty or short still use it up, and
+    // one lookup makes at most MaxScanTickets / 50 + 1 requests (21 by default: the search, the newest-ticket read, pages).
     private const int MinPageCharge = 50;
 
     private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
@@ -211,7 +211,7 @@ public sealed class LookupTools
         }
 
         ListResponse<Ticket> newest = await ListByNumberAsync(null, 1, search: null, timezoneOffset, cancellationToken);
-        budget -= MinPageCharge; // a request like any other, so the bound on requests holds
+        budget--; // one row: charging a full page here would leave a small budget no room to page at all
         if (newest.Items is { Count: 0 })
         {
             return new NumberLookup(null, true); // no tickets at all

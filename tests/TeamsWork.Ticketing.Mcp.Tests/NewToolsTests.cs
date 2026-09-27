@@ -450,8 +450,8 @@ public sealed class NewToolsTests
         Assert.Equal("DESC", newest["order"]);
         Dictionary<string, string> window = TestFactory.Query(handler.Requests[2].Uri);
         // Number 42 sits at position 58 at most (100 - 42); the page ending there starts at 0, and it takes what is left
-        // of the MaxScanTickets budget (1000, less 50 for the search and 50 for the newest-ticket read).
-        Assert.Equal("900", window["limit"]);
+        // of the MaxScanTickets budget (1000, less 50 for the search and 1 for the newest-ticket read).
+        Assert.Equal("949", window["limit"]);
         Assert.False(window.ContainsKey("offset")); // offset 0 isn't sent
         Assert.EndsWith($"/tickets/{TicketA}", handler.Requests[3].Uri.AbsolutePath, StringComparison.Ordinal);
     }

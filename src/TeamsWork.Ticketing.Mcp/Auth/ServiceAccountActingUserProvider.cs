@@ -22,7 +22,13 @@ public sealed class ServiceAccountActingUserProvider : IActingUserProvider
                 "They identify who ticket changes are attributed to.");
         }
 
-        _user = new ActingUser(sa.Id!, sa.Name!, sa.Email!, ActingUserSource.ServiceAccount);
+        // Used exactly as validated: trimmed, and an object ID in the standard form the help desk stores.
+        string id = sa.Id!.Trim();
+        _user = new ActingUser(
+            Guid.TryParseExact(id, "D", out Guid objectId) ? objectId.ToString("D") : id,
+            sa.Name!.Trim(),
+            sa.Email!.Trim(),
+            ActingUserSource.ServiceAccount);
     }
 
     public ValueTask<ActingUser> GetActingUserAsync(CancellationToken cancellationToken) => ValueTask.FromResult(_user);
