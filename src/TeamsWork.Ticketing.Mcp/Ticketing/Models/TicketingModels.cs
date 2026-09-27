@@ -262,12 +262,21 @@ public sealed record TicketListQuery
     public string? OrderBy { get; init; }
     public string? Order { get; init; }
     public string? Select { get; init; }
+
+    // Date filters are whole days in YYYY-MM-DD form: the API ignores one with a time of day (and then returns every
+    // ticket). "After" includes the named day and "before" excludes it, in the caller's local time (see
+    // TicketingClient.ListTicketsAsync for the offset they need).
     public string? CreatedAfter { get; init; }
     public string? CreatedBefore { get; init; }
     public string? ExpectedDateAfter { get; init; }
     public string? ExpectedDateBefore { get; init; }
     public string? LastUpdateAfter { get; init; }
     public string? LastUpdateBefore { get; init; }
+
+    internal bool HasDateFilter =>
+        CreatedAfter is not null || CreatedBefore is not null || ExpectedDateAfter is not null ||
+        ExpectedDateBefore is not null || LastUpdateAfter is not null || LastUpdateBefore is not null;
+
     public int? Limit { get; init; }
     public int? Offset { get; init; }
     public string? ContinuationToken { get; init; }

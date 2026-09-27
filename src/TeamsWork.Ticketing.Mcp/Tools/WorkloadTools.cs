@@ -63,7 +63,7 @@ public sealed class WorkloadTools
         [Description("assignee (default): tickets assigned to me; requestor: tickets I raised; either: both.")] string? role = null,
         [Description("true to include resolved and closed tickets.")] bool includeResolved = false,
         [Description("Only this priority: Low, Medium, Important, or Urgent.")] string? priority = null,
-        [Description("Only tickets created after this local datetime (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss).")] string? createdAfter = null,
+        [Description("Only tickets created on or after this day (YYYY-MM-DD, local to timezoneOffset). The API filters by whole days; a time of day is refused.")] string? createdAfter = null,
         [Description("Maximum tickets to return (default 20, max 100).")] int? limit = null,
         [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
@@ -76,7 +76,7 @@ public sealed class WorkloadTools
             {
                 IsResolved = includeResolved ? null : false,
                 Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
-                CreatedAfter = ToolValidation.OptionalDateTime(createdAfter, "createdAfter"),
+                CreatedAfter = ToolValidation.OptionalDateFilter(createdAfter, "createdAfter"),
                 Select = SummaryFields,
                 TimezoneOffset = timezoneOffset,
             };
@@ -103,7 +103,7 @@ public sealed class WorkloadTools
     public Task<string> ListSlaRisk(
         [Description("any (default): breached or escalated; breached: breached only; escalated: escalated only.")] string? kind = null,
         [Description("Only this priority: Low, Medium, Important, or Urgent.")] string? priority = null,
-        [Description("Only tickets created after this local datetime (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss).")] string? createdAfter = null,
+        [Description("Only tickets created on or after this day (YYYY-MM-DD, local to timezoneOffset). The API filters by whole days; a time of day is refused.")] string? createdAfter = null,
         [Description("Maximum tickets to return (default 20, max 100).")] int? limit = null,
         [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
@@ -116,7 +116,7 @@ public sealed class WorkloadTools
             {
                 IsResolved = false,
                 Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
-                CreatedAfter = ToolValidation.OptionalDateTime(createdAfter, "createdAfter"),
+                CreatedAfter = ToolValidation.OptionalDateFilter(createdAfter, "createdAfter"),
                 TimezoneOffset = timezoneOffset,
             };
 
@@ -234,8 +234,8 @@ public sealed class WorkloadTools
         [Description("Only this priority: Low, Medium, Important, or Urgent.")] string? priority = null,
         [Description("Only tickets matching this full-text search.")] string? search = null,
         [Description("Comma-separated tag filter in the form tagCategoryId_tagText (IDs from list_tag_categories).")] string? tags = null,
-        [Description("Only tickets created after this local datetime (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss).")] string? createdAfter = null,
-        [Description("Only tickets created before this local datetime (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss).")] string? createdBefore = null,
+        [Description("Only tickets created on or after this day (YYYY-MM-DD, local to timezoneOffset). The API filters by whole days; a time of day is refused.")] string? createdAfter = null,
+        [Description("Only tickets created before this day (YYYY-MM-DD, local to timezoneOffset; the day itself isn't included). For one day, give it as createdAfter and the next day here.")] string? createdBefore = null,
         [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
     {
@@ -248,8 +248,8 @@ public sealed class WorkloadTools
                 Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
                 Search = ToolValidation.OptionalText(search, "search", 500),
                 Tags = ToolValidation.OptionalText(tags, "tags", 2000),
-                CreatedAfter = ToolValidation.OptionalDateTime(createdAfter, "createdAfter"),
-                CreatedBefore = ToolValidation.OptionalDateTime(createdBefore, "createdBefore"),
+                CreatedAfter = ToolValidation.OptionalDateFilter(createdAfter, "createdAfter"),
+                CreatedBefore = ToolValidation.OptionalDateFilter(createdBefore, "createdBefore"),
                 Select = "id,status,priority,assignee",
                 TimezoneOffset = timezoneOffset,
             };
