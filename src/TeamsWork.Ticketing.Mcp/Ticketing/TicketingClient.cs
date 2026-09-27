@@ -294,6 +294,7 @@ public sealed class TicketingClient
             // then the process-wide quota.
             using RateLimitLease? callerLease = _quota?.Acquire(callerKey);
             using var lease = await _rateLimiter.AcquireAsync(cancellationToken);
+            using var inFlight = await _rateLimiter.AcquireInFlightAsync(cancellationToken);
             using var request = new HttpRequestMessage(method, uri);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             if (!string.IsNullOrEmpty(continuationToken))
@@ -387,6 +388,16 @@ public sealed class TicketingClient
                     throw Failure(idempotent, mayHaveBeenProcessed: (int)response.StatusCode >= 500, response.StatusCode, DescribeError(response.StatusCode, payload), null);
                 }
 
+                // Some endpoints report failures with HTTP 200 and error=true. The request reached the endpoint, and nothing
+                // says an error reported this way means nothing was done, so for a request that isn't safe to repeat it is
+                // an unknown outcome (with the API's message), like every other failure after the request arrived. Checked before
+                // the typed read, so an error response whose other fields don't fit the model still reports the API's error.
+                if (ErrorFlag(payload) is { Error.ValueKind: JsonValueKind.True } flagged)
+                {
+                    string? apiMessage = flagged.Message is { ValueKind: JsonValueKind.String } m ? m.GetString() : null;
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, apiMessage ?? "The Ticketing API reported an error.", null);
+                }
+
                 T? result;
                 try
                 {
@@ -400,19 +411,6 @@ public sealed class TicketingClient
                 if (result is null)
                 {
                     throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned an empty response.", null);
-                }
-
-                // Some endpoints report failures with HTTP 200 and error=true. The request reached the endpoint, and nothing
-                // says an error reported this way means nothing was done, so for a request that isn't safe to repeat it is
-                // an unknown outcome (with the API's message), like every other failure after the request arrived.
-                if (result is ListResponse<Ticket> { Error: true } or ItemResponse<Ticket> { Error: true })
-                {
-                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, ExtractMessage(payload) ?? "The Ticketing API reported an error.", null);
-                }
-
-                if (TryGetErrorFlag(payload, out string? message))
-                {
-                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, message ?? "The Ticketing API reported an error.", null);
                 }
 
                 return result;
@@ -541,14 +539,20 @@ public sealed class TicketingClient
         (ex.HttpRequestError is HttpRequestError.ConnectionError && ex.InnerException is System.Net.Sockets.SocketException);
 
     /// <summary>
-    /// The longest one request can take, retries included: each attempt may wait a full window for the rate limiter and
-    /// then its own time limit, with the longest honoured delay between attempts. A caller that must let a request finish
-    /// on its own (after the caller's token no longer applies) bounds it by this, so it isn't cut short mid-exchange.
+    /// The longest one request can take, retries included: each attempt may wait behind a full rate-limiter queue (as
+    /// many windows as it takes the permits to serve it), then behind a full in-flight queue, and then its own time limit, with the longest honoured delay
+    /// between attempts. A caller that must let a request finish on its own (after the caller's token no longer applies)
+    /// bounds it by this, so it isn't cut short mid-exchange.
     /// </summary>
-    internal static TimeSpan LongestRequest(TicketingOptions options) =>
-        MaxAttempts * TimeSpan.FromSeconds(options.RateLimitWindowSeconds + options.RequestTimeoutSeconds) +
-        (MaxAttempts - 1) * MaxRetryDelay +
-        TimeSpan.FromSeconds(5);
+    internal static TimeSpan LongestRequest(TicketingOptions options)
+    {
+        int windows = (TicketingRateLimiter.QueueLimit + 1 + options.RateLimitPermits - 1) / Math.Max(1, options.RateLimitPermits);
+        // Then a turn for an in-flight slot: each request ahead holds one for at most one attempt and its retry delay.
+        int turns = (TicketingRateLimiter.InFlightQueueLimit + options.MaxConcurrentUpstreamRequests) / Math.Max(1, options.MaxConcurrentUpstreamRequests);
+        TimeSpan perAttempt = TimeSpan.FromSeconds((windows * options.RateLimitWindowSeconds) + options.RequestTimeoutSeconds) +
+                              turns * (TimeSpan.FromSeconds(options.RequestTimeoutSeconds) + MaxRetryDelay);
+        return MaxAttempts * perAttempt + (MaxAttempts - 1) * MaxRetryDelay + TimeSpan.FromSeconds(5);
+    }
 
     private static TimeSpan Backoff(int attempt, RetryConditionHeaderValue? retryAfter)
     {
@@ -590,29 +594,24 @@ public sealed class TicketingClient
         }
     }
 
-    private static bool TryGetErrorFlag(string payload, out string? message)
+    /// <summary>
+    /// The response's top-level error flag and message, whatever else it holds. Read into a two-field type, so the rest
+    /// of the document is skipped rather than built into a second full copy; the fields are kept as JSON values, so an
+    /// unexpected type in one can't hide the other. Null when the response isn't an object.
+    /// </summary>
+    private static ErrorFlagFields? ErrorFlag(string payload)
     {
-        message = null;
         try
         {
-            using JsonDocument doc = JsonDocument.Parse(payload);
-            if (doc.RootElement.ValueKind == JsonValueKind.Object &&
-                doc.RootElement.TryGetProperty("error", out JsonElement err) &&
-                err.ValueKind == JsonValueKind.True)
-            {
-                if (doc.RootElement.TryGetProperty("message", out JsonElement msg) && msg.ValueKind == JsonValueKind.String)
-                {
-                    message = msg.GetString();
-                }
-
-                return true;
-            }
+            return JsonSerializer.Deserialize<ErrorFlagFields>(payload, JsonOptions);
         }
         catch (JsonException)
         {
-            // Already deserialized successfully above; ignore.
+            return null; // not an object: no flag to report
         }
-
-        return false;
     }
+
+    private sealed record ErrorFlagFields(
+        [property: System.Text.Json.Serialization.JsonPropertyName("error")] JsonElement? Error,
+        [property: System.Text.Json.Serialization.JsonPropertyName("message")] JsonElement? Message);
 }

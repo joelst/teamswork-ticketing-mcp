@@ -1,4 +1,3 @@
-using System.Collections.Frozen;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -250,18 +249,29 @@ internal sealed partial class InstanceLookup
 
     /// <summary>
     /// A name reduced to what a reader sees, using nothing that depends on globalisation data (the Linux build has none,
-    /// and Unicode normalisation there silently does nothing): invisible code points and combining marks removed, styled
-    /// and look-alike Latin letters mapped to plain ones (see <see cref="Fold"/>), runs of whitespace collapsed, case
-    /// ignored. It works on whole code points, so characters outside the basic plane aren't missed. It errs towards
-    /// matching: "José" and "Jose" are the same name here, which only means an outsider called Jose must be told apart.
+    /// and Unicode normalisation there silently does nothing): invisible code points removed; accents removed from
+    /// Latin, Greek and Cyrillic letters however they are written (a precomposed "é" through <see cref="BaseLetters"/>,
+    /// or "e" and a combining accent, by dropping the mark); anything that displays as plain Latin letters mapped to them
+    /// (<see cref="LookAlikes"/>: compatibility forms and the Unicode confusables); runs of whitespace collapsed; case
+    /// ignored. In other scripts a combining mark is part of
+    /// the letter (a Devanagari vowel sign), so it is kept there. It works on whole code points, so characters outside
+    /// the basic plane aren't missed. It errs towards matching: "José" and "Jose" are the same name here, which only
+    /// means an outsider called Jose must be told apart.
     /// </summary>
     internal static string NameSkeleton(string? name)
     {
         var builder = new System.Text.StringBuilder((name ?? "").Length);
         bool space = false;
+        bool accentsDropped = true; // a mark here would sit on the start of the name, a space, or a Latin, Greek or Cyrillic letter
         foreach (System.Text.Rune rune in (name ?? "").EnumerateRunes())
         {
-            if (IsInvisible(rune) || System.Text.Rune.GetUnicodeCategory(rune) is UnicodeCategory.NonSpacingMark or UnicodeCategory.EnclosingMark)
+            if (IsInvisible(rune))
+            {
+                continue;
+            }
+
+            bool mark = System.Text.Rune.GetUnicodeCategory(rune) is UnicodeCategory.NonSpacingMark or UnicodeCategory.EnclosingMark;
+            if (mark && accentsDropped)
             {
                 continue;
             }
@@ -269,6 +279,7 @@ internal sealed partial class InstanceLookup
             if (System.Text.Rune.IsWhiteSpace(rune) || rune.Value == 0x2800) // U+2800, the blank braille pattern, shows as a space
             {
                 space = builder.Length > 0;
+                accentsDropped = true;
                 continue;
             }
 
@@ -278,53 +289,18 @@ internal sealed partial class InstanceLookup
                 space = false;
             }
 
-            builder.Append(System.Text.Rune.ToLowerInvariant(new System.Text.Rune(Fold(rune.Value))).ToString());
+            int plain = BaseLetters.Of(rune.Value);
+            string? letters = LookAlikes.Of(plain) ?? LookAlikes.Of(System.Text.Rune.ToLowerInvariant(new System.Text.Rune(plain)).Value);
+            builder.Append(letters ?? System.Text.Rune.ToLowerInvariant(new System.Text.Rune(plain)).ToString());
+            if (!mark)
+            {
+                // Latin, Greek and Cyrillic (with their extensions) and the phonetic and extended Latin blocks.
+                accentsDropped = letters is not null || plain is < 0x0530 or (>= 0x1D00 and <= 0x1FFF);
+            }
         }
 
         return builder.ToString();
     }
-
-    /// <summary>
-    /// Maps a code point that displays as a Latin letter to that letter: full-width forms, the mathematical alphabets
-    /// (bold, italic, script and the rest), circled, parenthesised and squared letters, letterlike symbols, small
-    /// capitals, and the Cyrillic and Greek letters that look Latin. This covers what NFKC folding did plus the common
-    /// cross-script look-alikes, without Unicode data files; rarer confusables (modifier letters, other scripts) aren't
-    /// covered.
-    /// </summary>
-    private static int Fold(int c) => c switch
-    {
-        >= 0xFF01 and <= 0xFF5E => c - 0xFEE0,                                    // full-width ASCII
-        >= 0x1D400 and <= 0x1D6A3 => MathLetter((c - 0x1D400) % 52),             // 13 alphabets of A-Z a-z
-        >= 0x1D7CE and <= 0x1D7FF => '0' + (c - 0x1D7CE) % 10,                    // 5 styles of digits
-        >= 0x24B6 and <= 0x24CF => 'A' + (c - 0x24B6),                            // circled capitals
-        >= 0x24D0 and <= 0x24E9 => 'a' + (c - 0x24D0),                            // circled small letters
-        >= 0x249C and <= 0x24B5 => 'a' + (c - 0x249C),                            // parenthesised small letters
-        >= 0x1F110 and <= 0x1F129 => 'A' + (c - 0x1F110),                         // parenthesised capitals
-        >= 0x1F130 and <= 0x1F149 => 'A' + (c - 0x1F130),                         // squared
-        >= 0x1F150 and <= 0x1F169 => 'A' + (c - 0x1F150),                         // negative circled
-        >= 0x1F170 and <= 0x1F189 => 'A' + (c - 0x1F170),                         // negative squared
-        _ => LookAlikes.GetValueOrDefault(c, c),
-    };
-
-    private static readonly System.Collections.Frozen.FrozenDictionary<int, int> LookAlikes = new (string From, string To)[]
-    {
-        // Letterlike symbols (the letters missing from the mathematical alphabets live here).
-        ("\u2102\u210A\u210B\u210C\u210D\u210E\u2110\u2111\u2112\u2113\u2115\u2119\u211A\u211B\u211C\u211D\u2124\u2128\u212A\u212C\u212D\u212F\u2130\u2131\u2133\u2134\u2145\u2146\u2147\u2148\u2149",
-         "CgHHHhIILlNPQRRRZZKBCeEFMoDdeij"),
-        // Small capitals.
-        ("\u1D00\u0299\u1D04\u1D05\u1D07\uA730\u0262\u029C\u026A\u1D0A\u1D0B\u029F\u1D0D\u0274\u1D0F\u1D18\uA7AF\u0280\uA731\u1D1B\u1D1C\u1D20\u1D21\u028F\u1D22",
-         "abcdefghijklmnopqrstuvwyz"),
-        // Cyrillic.
-        ("\u0430\u0435\u043E\u0440\u0441\u0443\u0445\u0456\u0458\u0455\u0501\u04BB\u051B\u051D\u0410\u0412\u0415\u041A\u041C\u041D\u041E\u0420\u0421\u0422\u0425\u0406\u0408\u0405\u0423",
-         "aeopcyxijsdhqwABEKMHOPCTXIJSY"),
-        // Greek, and the dotless i.
-        ("\u0391\u0392\u0395\u0396\u0397\u0399\u039A\u039C\u039D\u039F\u03A1\u03A4\u03A5\u03A7\u03BF\u03BD\u03B9\u0131",
-         "ABEZHIKMNOPTYXovii"),
-    }
-    .SelectMany(m => m.From.Zip(m.To, (from, to) => KeyValuePair.Create((int)from, (int)to)))
-    .ToFrozenDictionary();
-
-    private static int MathLetter(int i) => i < 26 ? 'A' + i : 'a' + (i - 26);
 
     /// <summary>
     /// Whether a code point is invisible when displayed: format characters (zero-width spaces and joiners, tag characters)

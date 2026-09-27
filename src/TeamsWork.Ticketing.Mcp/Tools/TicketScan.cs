@@ -78,11 +78,12 @@ internal static class TicketScan
 
             // A page that brings no ticket not already seen is no progress: the API is repeating itself (ignoring offset,
             // or a token that loops), so paging further can't reach the rest. Its rows aren't counted as read; the scan
-            // stops, incomplete if the API said there was more.
+            // stops, incomplete unless what was already proven reaches the total (a repeated last page after a complete
+            // scan is the API's quirk, not a sign of more).
             bool progress = items.Count == 0 || scanned > before || (read == 0 && items.All(x => string.IsNullOrWhiteSpace(x.Id)));
             if (!progress)
             {
-                more = true;
+                more = total is not int all || all > (repeated ? scanned : scanned + withoutId);
                 break;
             }
 

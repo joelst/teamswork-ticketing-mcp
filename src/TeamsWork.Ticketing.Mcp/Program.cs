@@ -55,7 +55,7 @@ else
 
 static async Task RunStdioAsync(string[] args)
 {
-    HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
+    HostApplicationBuilder builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { Args = args, ContentRootPath = AppContext.BaseDirectory });
 
     // stdout is the MCP channel; every log line must go to stderr.
     builder.Logging.ClearProviders();
@@ -104,7 +104,7 @@ static async Task RunStdioAsync(string[] args)
 
 static async Task RunHttpAsync(string[] args)
 {
-    WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+    WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = AppContext.BaseDirectory });
     AuthMode authMode = AuthModeResolver.Resolve(builder.Configuration, args);
 
     if (authMode == AuthMode.Local)
@@ -435,6 +435,15 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
             if (o.RegionBaseUrl() is string regional && string.Equals(o.BaseUrl?.TrimEnd('/'), TicketingOptions.DefaultBaseUrl, StringComparison.OrdinalIgnoreCase))
             {
                 o.BaseUrl = regional;
+            }
+
+            // The service account in the form every person is compared and sent in, once, for every transport (the Entra
+            // app-only path as well as stdio). An invalid one is left as it is and refused by validation below.
+            if (o.ServiceAccount?.Canonical() is (string id, string name, string email))
+            {
+                o.ServiceAccount.Id = id;
+                o.ServiceAccount.Name = name;
+                o.ServiceAccount.Email = email;
             }
         })
         .ValidateDataAnnotations()

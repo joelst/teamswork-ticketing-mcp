@@ -60,6 +60,8 @@ public sealed class UploadFolder
     /// be a drive root, and must not contain the home folder, the application data or configuration folders (where MCP
     /// client configs can hold the API key), or the user-secrets file.
     /// </summary>
+    private static readonly string[] PseudoFileSystems = ["/proc", "/sys", "/dev", "/run"];
+
     public static UploadFolder Create(TicketingOptions options, string? userSecretsPath)
     {
         if (!IsSupported)
@@ -94,6 +96,13 @@ public sealed class UploadFolder
         if (realRoot?.StartsWith(@"\\", StringComparison.Ordinal) == true)
         {
             throw new StartupConfigurationException("Ticketing:UploadRoot must be a folder on a local drive, not a network share or mapped drive.");
+        }
+
+        // The kernel's pseudo-filesystems hold process environments (/proc/<pid>/environ has the API key) and device
+        // nodes whose "files" pass as regular ones, so nothing under them can be an upload folder.
+        if (OperatingSystem.IsLinux() && PseudoFileSystems.Any(p => IsWithin(root, p, StringComparison.Ordinal)))
+        {
+            throw new StartupConfigurationException($"Ticketing:UploadRoot '{root}' is inside a system folder ({string.Join(", ", PseudoFileSystems)}), which can't hold uploads.");
         }
 
         string[] locations = realRoot is null ? [root] : [root, Path.TrimEndingDirectorySeparator(realRoot)];

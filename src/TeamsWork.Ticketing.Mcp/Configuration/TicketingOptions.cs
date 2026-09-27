@@ -48,6 +48,13 @@ public sealed class TicketingOptions
     /// </summary>
     public ServiceAccountOptions? ServiceAccount { get; set; }
 
+    /// <summary>
+    /// Upstream requests in flight at once, across all callers. Each can hold a response of up to
+    /// <see cref="MaxResponseBytes"/> (and its text) while it is read, so this bounds that memory; others wait their turn.
+    /// </summary>
+    [Range(1, 100)]
+    public int MaxConcurrentUpstreamRequests { get; set; } = 8;
+
     /// <summary>Upstream rate limit: permits per window. The vendor enforces 100 requests per 60 seconds.</summary>
     [Range(1, 10_000)]
     public int RateLimitPermits { get; set; } = 100;
