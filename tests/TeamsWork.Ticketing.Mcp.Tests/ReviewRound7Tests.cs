@@ -165,7 +165,9 @@ public sealed class ReviewRound7Tests
         }
         finally
         {
+            // Waited for, since a process still running holds the working directory and the folder can't be deleted.
             server.Kill(entireProcessTree: true);
+            await server.WaitForExitAsync(CancellationToken.None);
         }
     }
 
