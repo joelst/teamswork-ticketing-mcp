@@ -24,7 +24,8 @@ From the ticket and activity models: `requestor`, `assignee`, `createdBy`, `cust
 `{id,name,email}`), and `isPrivate` on activities and comments ("visible only to internal agents").
 
 From `GET /tickets`: `select` (return only named fields), `lastUpdateAfter`, `limit` up to 1000. There is no filter
-by person, which is why reads for requesters need the index below.
+by person, which is why reads for requesters need the index below. The live API differs from its spec in ways that
+shape the design; see [Milestone 0 findings](#milestone-0-findings).
 
 No Graph permission is needed: the app already mirrors the Team's owners into the assignee list.
 
@@ -61,8 +62,12 @@ write tool for everyone, whatever the role.
 | `update_ticket_status` | yes | on visible tickets, only transitions whose `authorizedUsers` include `requestor` | yes | no |
 | `update_ticket`, `assign_ticket`, `add_ticket_link_attachments` | yes | no | yes | no |
 
-A ticket is **visible** to a requester when their `oid` is its requestor, assignee, or creator, or is in a
-people-picker field marked `isSeeTicket`.
+A ticket is **visible** to a requester when they are its requestor, assignee, or creator, or are in a people-picker
+field marked `isSeeTicket`. A person on a ticket is identified by Entra object ID, except on tickets that arrived
+by email, where the ID is the email address itself. So a person matches the caller when the ID is the caller's
+`oid`, or when the ID is an email address equal to the caller's sign-in name (`upn`, which only an administrator
+can change for a member; `email` and `preferred_username` aren't used, since they can be edited or unverified).
+The `cc` list on comments doesn't grant visibility unless the spike below shows the app treats it that way.
 
 ## Enforcement
 
@@ -98,7 +103,7 @@ assignee, creator, and `isSeeTicket` people. About 300 bytes, so 100,000 tickets
 | Step | Triggered by | Request |
 | --- | --- | --- |
 | Full build | The first call that needs the index after startup, and any call once the last full build is older than `Index:FullSyncHours` (default 6), which drops deleted tickets | Pages of 1,000 with `select` of the row fields: one request per 1,000 tickets |
-| Incremental | Any tool call, once the index is older than `Index:RefreshAfterMinutes` (default 5) | `lastUpdateAfter` = last watermark minus a 2-minute overlap; usually one request |
+| Incremental | Any tool call, once the index is older than `Index:RefreshAfterMinutes` (default 5) | `lastUpdateAfter` = the UTC date before the watermark (the API filters by whole days only), then rows kept only if `lastUpdatedOn` is after the watermark minus a 2-minute overlap; usually one request |
 | Forced | `refresh: true` on a list, count, or search tool, at most once every 30 s for the whole index (as for the instance cache) | As incremental |
 | Write-through | This server creating or changing a ticket | None: the API's response updates the row |
 
@@ -151,7 +156,7 @@ cost. The existing scan stays as the fallback while the index is loading.
 
 Each milestone ships behind `Access:Mode = Open` and keeps today's tests green.
 
-**M0: spikes (no product code)**
+**M0: spikes (no product code)**: done; see [Milestone 0 findings](#milestone-0-findings).
 - Per-tool async authorization policies with the MCP SDK 2.2 in stateless mode: listing and calling.
 - On the live API: does `lastUpdatedOn` move for comments, status changes, and assignment? Does `select` return
   `customFields` and `createdBy`? What values does `assignees.type` take besides `teamsOwner`? Are private
@@ -189,6 +194,33 @@ Each milestone ships behind `Access:Mode = Open` and keeps today's tests green.
 - `docs/security.md`, README configuration table, `app.bicep` parameters, `minReplicas` guidance.
 - Rollout: deploy with `Open`, watch sync metrics (rows, last sync, sync requests a minute), then switch to
   `RoleScoped`.
+
+## Milestone 0 findings
+
+Checked on 2026-09-27 against the live instance (2,034 tickets) with read-only requests, and against the MCP SDK
+2.2 documentation.
+
+| Question | Finding | Effect on the design |
+| --- | --- | --- |
+| Does `select` return the index fields? | Yes: `id`, `ticketNo`, `status`, `priority`, `requestor`, `assignee`, `createdBy`, `customFields`, `createdOn`, `lastUpdatedOn`. A full build is 3 requests here. | As planned |
+| How are custom fields keyed in lists? | By field **title** (`"Followers": []`), not by the ID the spec describes | The index finds `isSeeTicket` fields by title, and by ID where present |
+| What identifies a person? | An Entra object ID, or the **email address** on tickets that arrived by email (requestor and creator). An empty assignee is `{"id":""}`. | Matching by `oid` or by `upn` for email IDs (see Tools per role) |
+| Does `lastUpdatedOn` move? | Yes for public and private comments (within 1.5 s) and status changes (written about 0.8 s before the activity). Assignment wasn't observed directly. | Incremental sync on `lastUpdatedOn` holds; the 2-minute overlap covers the skew |
+| Do date filters work? | **Only as a plain date.** `YYYY-MM-DD` filters; any time of day (the spec's own `YYYY-MM-DDTHH:mm:ss`, with or without `Z`) is silently ignored and every ticket comes back. "After" includes the named day; "before" excludes it. | Incremental sync asks by date and trims by timestamp. Also a bug in today's tools (below). |
+| Which way does `timezone` shift date filters? | Opposite to the spec ("7 means GMT+7"): day D starts at `D 00:00Z + timezone hours` (checked at -12, 0, and +14). | The index sends `timezone=0`. Today's tools shift day boundaries by twice the offset (below). |
+| Are private activities flagged? | Yes, `isPrivate: true`, and a comment can be sent with it | Requesters get activities without them |
+| What do attachments return? | Signed blob URLs, valid for about an hour | Attachment tools need the ticket check; a private activity's attachments are dropped with it |
+| Anything else on activities? | `action` (`created`, `started`, `assigned`, `commented`, `closed`, ...) and a `cc` list | `cc` doesn't grant visibility until its meaning is known |
+| `assignees.type` values | Only `teamsOwner` on this instance | Staff is "on the assignee list" whatever the type |
+| Per-tool authorization in the SDK | `[Authorize]` on tools is supported, and the SDK filters list results by it (`FilterAuthorizedItemsAsync`), with policies from ASP.NET Core's policy provider | Tool layer as planned; M1 proves list and call with tests |
+
+**Bugs in today's tools found by these checks** (to fix before M1):
+- `list_tickets` (and the tools built on it) accept `YYYY-MM-DDTHH:mm:ss` for the six date filters and pass it on,
+  so the API ignores the filter and returns everything, unmarked. They should accept dates only.
+- The date filters are sent with the caller's offset, which the API applies in the opposite direction, so for US
+  Central a day starts 10 hours early. Sending the negated offset on requests that carry date filters would give the
+  caller's local day, if the offset affects nothing else in those requests (timestamps in responses were UTC either
+  way).
 
 ## Risks and open questions
 
