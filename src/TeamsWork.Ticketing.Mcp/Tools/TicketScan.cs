@@ -53,8 +53,10 @@ internal static class TicketScan
             read += items.Count;
 
             // Counted once each, so an API that repeats tickets across pages (or ignores offset) can't inflate results.
+            // Rows without an ID are left out: nothing can act on them, and they can't be told apart across pages, so
+            // counting them would let a repeating API look like progress.
             int before = scanned;
-            foreach (Ticket t in items.Where(x => x.Id is null || seen.Add(x.Id)))
+            foreach (Ticket t in items.Where(x => !string.IsNullOrWhiteSpace(x.Id) && seen.Add(x.Id)))
             {
                 scanned++;
                 if (pick(t) is T picked)

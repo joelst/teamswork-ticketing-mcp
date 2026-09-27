@@ -216,6 +216,7 @@ public sealed class LocalModeIntegrationTests
     // Seen live: an ID that isn't an object ID attributed every write to someone the help desk didn't know.
     [Theory]
     [InlineData("not-an-object-id", false)]
+    [InlineData("00000000-0000-0000-0000-000000000000", false)] // parses as a GUID, but is no one's object ID
     [InlineData("dev@example.test", true)] // the email-to-ticket form
     [InlineData("44444444-4444-4444-4444-444444444444", true)]
     public async Task Service_account_id_must_be_an_object_id_or_the_email(string id, bool starts)

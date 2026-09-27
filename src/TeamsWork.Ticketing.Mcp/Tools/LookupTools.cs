@@ -21,8 +21,8 @@ public sealed class LookupTools
     // Tickets the number search reads before it falls back to paging through tickets sorted by number.
     private const int NumberSearchSize = 50;
 
-    // Every page request costs at least this much of the budget, so pages that come back empty or short still use it up
-    // and one lookup makes at most MaxScanTickets / 50 requests (20 by default).
+    // Every request costs at least this much of the budget, so pages that come back empty or short still use it up and one
+    // lookup makes at most MaxScanTickets / 50 requests (20 by default).
     private const int MinPageCharge = 50;
 
     private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
@@ -211,7 +211,7 @@ public sealed class LookupTools
         }
 
         ListResponse<Ticket> newest = await ListByNumberAsync(null, 1, search: null, timezoneOffset, cancellationToken);
-        budget--;
+        budget -= MinPageCharge; // a request like any other, so the bound on requests holds
         if (newest.Items is { Count: 0 })
         {
             return new NumberLookup(null, true); // no tickets at all
@@ -315,14 +315,15 @@ public sealed class LookupTools
     /// </summary>
     private static NumberLookup? Match(IReadOnlyList<Ticket>? tickets, int number)
     {
-        Ticket? row = tickets?.FirstOrDefault(t => TicketSummary.TicketNumber(t) == number);
-        if (row is null)
+        List<Ticket> rows = tickets?.Where(t => TicketSummary.TicketNumber(t) == number).ToList() ?? [];
+        if (rows.Count == 0)
         {
             return null;
         }
 
-        return Guid.TryParse(row.Id, out _)
-            ? new NumberLookup(row.Id, true)
+        // A row with a usable ID wins over one without, wherever it appears.
+        return rows.FirstOrDefault(t => Guid.TryParse(t.Id, out _)) is Ticket usable
+            ? new NumberLookup(usable.Id, true)
             : throw new McpException($"Ticket number {number} exists, but the Ticketing API returned no usable ID for it. Try list_tickets with a search for it.");
     }
 

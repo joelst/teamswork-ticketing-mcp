@@ -122,8 +122,18 @@ public sealed class WorkloadTools
 
             // With every SLA rule off, the API reports no SLA flags at all, so a scan would find nothing and look like
             // "nothing at risk". Say what is actually true, and save the requests.
-            Instance instance = await _cache.GetInstanceAsync(_client, timezoneOffset, refresh: false, cancellationToken);
-            if (SlaEnabled(instance.Sla) == false)
+            // The settings only save a scan; if they can't be read, scan anyway rather than fail.
+            bool? slaEnabled;
+            try
+            {
+                slaEnabled = SlaEnabled((await _cache.GetInstanceAsync(_client, timezoneOffset, refresh: false, cancellationToken)).Sla);
+            }
+            catch (TicketingApiException)
+            {
+                slaEnabled = null;
+            }
+
+            if (slaEnabled == false)
             {
                 return new ScanResult<TicketSummary>([], 0, 0, 0, null, false,
                     "SLA tracking is turned off on this instance (no first-response or resolution rule is enabled), so no ticket can breach " +
@@ -168,8 +178,10 @@ public sealed class WorkloadTools
     }
 
     /// <summary>
-    /// Whether any first-response or resolution rule (including escalation) is enabled: true or false when the settings
-    /// say so, null when they're in a shape this server doesn't recognise (then the tool scans rather than guess "off").
+    /// Whether any first-response or resolution rule (including escalation) is enabled. True as soon as one is; false
+    /// only when both rule groups are present and every rule in them is explicitly disabled; null (so the tool scans
+    /// rather than guess "off") when anything is missing or in a shape this server doesn't recognise, since an
+    /// unrecognised rule might be an enabled one.
     /// </summary>
     internal static bool? SlaEnabled(JsonElement? sla)
     {
@@ -178,28 +190,38 @@ public sealed class WorkloadTools
             return null;
         }
 
-        bool sawRule = false;
+        bool allUnderstood = true;
+        int rulesSeen = 0;
         foreach (string part in (string[])["frt", "rt"])
         {
             if (!settings.TryGetProperty(part, out JsonElement rules) || rules.ValueKind != JsonValueKind.Object)
             {
+                allUnderstood = false;
                 continue;
             }
 
             foreach (JsonProperty rule in rules.EnumerateObject())
             {
-                if (rule.Value.ValueKind == JsonValueKind.Object && rule.Value.TryGetProperty("enabled", out JsonElement enabled))
+                JsonValueKind enabled = rule.Value.ValueKind == JsonValueKind.Object && rule.Value.TryGetProperty("enabled", out JsonElement e)
+                    ? e.ValueKind
+                    : JsonValueKind.Undefined;
+                if (enabled == JsonValueKind.True)
                 {
-                    sawRule = true;
-                    if (enabled.ValueKind == JsonValueKind.True)
-                    {
-                        return true;
-                    }
+                    return true;
+                }
+
+                if (enabled == JsonValueKind.False)
+                {
+                    rulesSeen++;
+                }
+                else
+                {
+                    allUnderstood = false;
                 }
             }
         }
 
-        return sawRule ? false : null;
+        return allUnderstood && rulesSeen > 0 ? false : null;
     }
 
     [McpServerTool(Name = "count_tickets", Title = "Count tickets", ReadOnly = true, Idempotent = true, OpenWorld = false)]
@@ -269,13 +291,19 @@ public sealed class WorkloadTools
     /// <summary>
     /// Whether a ticket's person is the caller. The object ID decides when the ticket has one, so a ticket naming
     /// someone else's ID with the caller's email (or the reverse) isn't counted as theirs; the email decides only for
-    /// people recorded without an ID, or in the email-to-ticket form where the ID is the email.
+    /// people recorded without an ID, or in the email-to-ticket form where the ID is the email. A caller who is itself
+    /// in the email form (a service account without an object ID) can only be matched by email.
     /// </summary>
     private static bool IsPerson(TicketUser? user, ActingUser me)
     {
         if (user is null)
         {
             return false;
+        }
+
+        if (string.Equals(me.Id.Trim(), me.Email.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return !string.IsNullOrWhiteSpace(user.Email) && string.Equals(user.Email.Trim(), me.Email.Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
         string? id = string.IsNullOrWhiteSpace(user.Id) ? null : user.Id.Trim();
@@ -285,7 +313,8 @@ public sealed class WorkloadTools
             return sameEmail || string.Equals(id, me.Id.Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
-        return string.Equals(id, me.Id.Trim(), StringComparison.OrdinalIgnoreCase);
+        // Compared as object IDs, so one written another way still matches.
+        return Guid.TryParse(id, out Guid theirs) && Guid.TryParse(me.Id, out Guid mine) ? theirs == mine : string.Equals(id, me.Id.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
     private static ScanResult<TicketSummary> Summaries(TicketScan.Result<TicketSummary> scan, int max)

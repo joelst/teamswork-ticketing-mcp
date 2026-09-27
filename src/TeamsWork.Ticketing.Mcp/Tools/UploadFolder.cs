@@ -64,12 +64,44 @@ public sealed class UploadFolder
             throw new StartupConfigurationException($"Ticketing:UploadRoot '{root}' does not exist. Create the folder, or unset the setting to turn uploads off.");
         }
 
+        // Where the folder really is, as the operating system resolves an open handle to it: through subst and mapped
+        // drives, administrative shares (\\localhost\C$), and links in any parent. The guards below check both this and
+        // the canonical path, so no alias of a protected folder passes.
+        string? realRoot = OperatingSystem.IsWindows() ? NativeMethods.DirectoryFinalPath(root)
+            : OperatingSystem.IsLinux() ? root
+            : null;
+        if (OperatingSystem.IsWindows() && realRoot is null)
+        {
+            throw new StartupConfigurationException($"Ticketing:UploadRoot '{root}' can't be opened to check where it is.");
+        }
+
+        string[] locations = realRoot is null ? [root] : [root, Path.TrimEndingDirectorySeparator(realRoot)];
+        foreach (string location in locations.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            CheckNotProtected(location, userSecretsPath);
+        }
+
+        return new UploadFolder(root + Path.DirectorySeparatorChar, options.MaxUploadBytes, realRoot is null ? null : Path.TrimEndingDirectorySeparator(realRoot));
+    }
+
+    /// <summary>
+    /// Refuses a folder that is, contains, or sits inside a place where credentials and client configurations live: a
+    /// drive root; a folder containing the home folder, the application data or configuration folders, or the
+    /// user-secrets file; a folder inside an application settings folder or a hidden folder in the home folder. The
+    /// temporary folder, which Windows keeps inside the local application data folder, is allowed below it, but only in
+    /// that normal shape: TEMP pointed at the home folder can't widen the exemption, and the temporary folder itself,
+    /// which other programs write to, isn't a dedicated folder.
+    /// </summary>
+    private static void CheckNotProtected(string root, string? userSecretsPath)
+    {
         if (Path.GetPathRoot(root) is string drive && string.Equals(Path.TrimEndingDirectorySeparator(drive), root, OverlapComparison))
         {
             throw new StartupConfigurationException("Ticketing:UploadRoot must be a dedicated folder, not a drive root.");
         }
 
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        string Canon(string path) => Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(path)));
+
         var guarded = new List<(string Path, string What)>
         {
             (home, "your home folder"),
@@ -89,16 +121,24 @@ public sealed class UploadFolder
 
         foreach ((string path, string what) in guarded.Where(g => g.Path.Length > 0))
         {
-            if (IsWithin(Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(path))), root))
+            if (IsWithin(Canon(path), root))
             {
                 throw new StartupConfigurationException($"Ticketing:UploadRoot must be a dedicated folder that doesn't contain {what}. Choose a folder of its own.");
             }
         }
 
-        // Nor may it sit inside a folder where applications keep settings and credentials (an MCP client's config can hold
-        // the API key), or a hidden folder in the home folder (~/.ssh). The temporary folder, inside the local application
-        // data folder on Windows, is fine.
-        string temp = Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(Path.GetTempPath())));
+        string temp = Canon(Path.GetTempPath());
+        if (string.Equals(root, temp, OverlapComparison))
+        {
+            throw new StartupConfigurationException("Ticketing:UploadRoot must be a dedicated folder, not the temporary folder itself. Use a folder inside it.");
+        }
+
+        string? canonicalHome = home.Length > 0 ? Canon(home) : null;
+        bool TempExempt(string container) =>
+            IsWithin(root, temp) &&
+            IsWithin(temp, container) && !string.Equals(temp, container, OverlapComparison) &&
+            (canonicalHome is null || !HasHiddenSegmentBelow(temp, canonicalHome));
+
         var settingsFolders = new List<string>
         {
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -109,10 +149,9 @@ public sealed class UploadFolder
             settingsFolders.Add(Path.Combine(home, ".config"));
         }
 
-        foreach (string folder in settingsFolders.Where(f => f.Length > 0))
+        foreach (string settings in settingsFolders.Where(f => f.Length > 0).Select(Canon))
         {
-            string settings = Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(folder)));
-            if (IsWithin(root, settings) && !IsWithin(root, temp))
+            if (IsWithin(root, settings) && !TempExempt(settings))
             {
                 throw new StartupConfigurationException(
                     "Ticketing:UploadRoot must not be inside an application settings folder (such as AppData or ~/.config), where client " +
@@ -120,26 +159,16 @@ public sealed class UploadFolder
             }
         }
 
-        if (home.Length > 0)
+        if (canonicalHome is not null && IsWithin(root, canonicalHome) && HasHiddenSegmentBelow(root, canonicalHome) && !TempExempt(canonicalHome))
         {
-            string canonicalHome = Path.TrimEndingDirectorySeparator(Canonical(Path.GetFullPath(home)));
-            if (IsWithin(root, canonicalHome) && !IsWithin(root, temp) &&
-                root[canonicalHome.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries).Any(s => s.StartsWith('.')))
-            {
-                throw new StartupConfigurationException("Ticketing:UploadRoot must not be inside a hidden folder (such as ~/.ssh). Choose a folder of its own.");
-            }
+            throw new StartupConfigurationException("Ticketing:UploadRoot must not be inside a hidden folder (such as ~/.ssh). Choose a folder of its own.");
         }
-
-        string? realRoot = OperatingSystem.IsWindows() ? NativeMethods.DirectoryFinalPath(root)
-            : OperatingSystem.IsLinux() ? root
-            : null;
-        if (OperatingSystem.IsWindows() && realRoot is null)
-        {
-            throw new StartupConfigurationException($"Ticketing:UploadRoot '{root}' can't be opened to check where it is.");
-        }
-
-        return new UploadFolder(root + Path.DirectorySeparatorChar, options.MaxUploadBytes, realRoot is null ? null : Path.TrimEndingDirectorySeparator(realRoot));
     }
+
+    /// <summary>Whether any segment of <paramref name="path"/> below <paramref name="folder"/> is hidden (starts with '.').</summary>
+    private static bool HasHiddenSegmentBelow(string path, string folder) =>
+        IsWithin(path, folder) &&
+        path[folder.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries).Any(segment => segment.StartsWith('.'));
 
     /// <summary>Reads the files for an upload, after checking every path and the total size.</summary>
     public IReadOnlyList<UploadFile> ReadFiles(IReadOnlyList<string>? paths)
@@ -380,6 +409,8 @@ public sealed class UploadFolder
     /// </summary>
     internal static string Canonical(string fullPath) => Canonical(fullPath, depth: 0);
 
+    private const int MaxLinkDepth = 8;
+
     private static string Canonical(string fullPath, int depth)
     {
         string root = Path.GetPathRoot(fullPath) ?? "";
@@ -393,11 +424,32 @@ public sealed class UploadFolder
                 continue;
             }
 
-            // A link's target is canonicalized in turn, since its own parents may be links or short names (bounded, in
-            // case of a loop).
-            current = entry.LinkTarget is not null && depth < 8
-                ? Canonical(entry.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? entry.FullName, depth + 1)
-                : entry.FullName;
+            if (entry.LinkTarget is null)
+            {
+                current = entry.FullName;
+                continue;
+            }
+
+            // A link's target is canonicalized in turn, since its own parents may be links or short names. Past the depth
+            // limit (a loop, or a deliberately deep chain) the real location is unknown, and a still-linked path could
+            // pass the protected-folder checks as an alias, so that is an error rather than a best guess.
+            FileSystemInfo? target = null;
+            try
+            {
+                target = depth < MaxLinkDepth ? entry.ResolveLinkTarget(returnFinalTarget: true) : null;
+            }
+            catch (IOException)
+            {
+                // A loop the operating system gave up on.
+            }
+
+            if (target is null)
+            {
+                throw new StartupConfigurationException(
+                    $"'{fullPath}' goes through links that can't be followed to a real folder (a loop, or more than {MaxLinkDepth} deep).");
+            }
+
+            current = Canonical(target.FullName, depth + 1);
         }
 
         return current;

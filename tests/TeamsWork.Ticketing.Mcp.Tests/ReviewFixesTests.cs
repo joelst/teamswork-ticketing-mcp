@@ -337,8 +337,8 @@ public sealed class ReviewFixesTests
         await Lookup(TestFactory.Client(handler)).FindTicketByNumber("12", cancellationToken: Ct);
 
         Dictionary<string, string> window = TestFactory.Query(handler.Requests[2].Uri);
-        Assert.Equal("949", window["limit"]); // 1000 - 50 searched - 1 newest
-        Assert.Equal("1074", window["offset"]); // ends at position 2022 = 2034 - 12
+        Assert.Equal("900", window["limit"]); // 1000 - 50 for the search - 50 for the newest read
+        Assert.Equal("1123", window["offset"]); // ends at position 2022 = 2034 - 12
     }
 
     [Fact]
@@ -530,7 +530,10 @@ public sealed class ReviewFixesTests
         using var dir = new TempDir();
         Directory.CreateDirectory(Path.Combine(dir.Path, "Inbox"));
 
-        string canonical = UploadFolder.Canonical(Path.Combine(dir.Path, OperatingSystem.IsLinux() ? "Inbox" : "INBOX", "new"));
+        // A wrong-case spelling only names the folder where the volume ignores case, which the volume, not the operating
+        // system, decides (APFS and Windows folders can be case-sensitive).
+        string spelling = Directory.Exists(Path.Combine(dir.Path, "INBOX")) ? "INBOX" : "Inbox";
+        string canonical = UploadFolder.Canonical(Path.Combine(dir.Path, spelling, "new"));
 
         Assert.EndsWith(Path.Combine("Inbox", "new"), canonical, StringComparison.Ordinal);
     }

@@ -168,8 +168,8 @@ Put it in the secrets file (or set `Ticketing__UploadRoot`) and restart the clie
 Save or copy the files you want to send into that folder, then ask the agent to upload them by name, as they appear
 in the folder (letter case included). A OneDrive folder works. The folder must exist and must be a dedicated one: the
 server refuses to start with a drive root, a folder that contains your home folder, the application data or
-configuration folders, or the user-secrets file, or a folder inside an application settings folder (such as AppData
-or `~/.config`) or a hidden folder such as `~/.ssh`. The tool refuses paths outside the folder, hidden files and folders
+configuration folders, or the user-secrets file, a folder inside an application settings folder (such as AppData
+or `~/.config`) or a hidden folder such as `~/.ssh`, or the temporary folder itself (a folder inside it is fine). The tool refuses paths outside the folder, hidden files and folders
 (names starting with `.`), paths through symbolic links or junctions, short 8.3 names, and alternate data streams, so
 text an agent has read can't make it send other files. Up to 10 files per call, 10 MiB in total by default
 (`Ticketing:MaxUploadBytes`). Uploads are private (visible to agents, not the requestor) unless the agent passes

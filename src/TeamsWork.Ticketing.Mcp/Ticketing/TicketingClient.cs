@@ -209,14 +209,19 @@ public sealed class TicketingClient
 
     // ---- Instance / tags --------------------------------------------------------------------------------------
 
-    public async Task<Instance> GetInstanceAsync(int? timezoneOffset, CancellationToken cancellationToken)
+    /// <param name="shared">
+    /// True for a read made on behalf of every caller (the instance cache): it is charged only to the process-wide quota,
+    /// never to the caller who happened to start it, so one caller's used-up share can't fail the others waiting on it.
+    /// </param>
+    public async Task<Instance> GetInstanceAsync(int? timezoneOffset, CancellationToken cancellationToken, bool shared = false)
     {
-        ItemResponse<Instance> r = await SendAsync<ItemResponse<Instance>>(HttpMethod.Get, "instance", [], null, null, true, timezoneOffset, cancellationToken);
+        ItemResponse<Instance> r = await SendAsync<ItemResponse<Instance>>(HttpMethod.Get, "instance", [], null, null, true, timezoneOffset, cancellationToken, chargeCaller: !shared);
         return r.Item ?? throw new TicketingApiException("The Ticketing API returned no instance details.");
     }
 
-    public Task<ListResponse<TagCategory>> ListTagCategoriesAsync(CancellationToken cancellationToken) =>
-        SendAsync<ListResponse<TagCategory>>(HttpMethod.Get, "tags", [], null, null, false, null, cancellationToken);
+    /// <param name="shared">As for <see cref="GetInstanceAsync"/>.</param>
+    public Task<ListResponse<TagCategory>> ListTagCategoriesAsync(CancellationToken cancellationToken, bool shared = false) =>
+        SendAsync<ListResponse<TagCategory>>(HttpMethod.Get, "tags", [], null, null, false, null, cancellationToken, chargeCaller: !shared);
 
     // ---- Plumbing ---------------------------------------------------------------------------------------------
 
@@ -256,12 +261,16 @@ public sealed class TicketingClient
         bool includeTimezone,
         int? timezoneOffset,
         CancellationToken cancellationToken,
-        bool? idempotent = null)
+        bool? idempotent = null,
+        bool chargeCaller = true)
     {
         Uri uri = BuildUri(path, query, includeTimezone, timezoneOffset);
         // Whether repeating a request is harmless belongs to the operation, not the HTTP method. By default a POST (which
         // creates tickets, comments and attachments) isn't, and anything else is; callers say otherwise.
-        return await SendCoreAsync<T>(method, path, uri, body, continuationToken, idempotent ?? method != HttpMethod.Post, cancellationToken);
+        // The caller is identified once, before any retry, so a retry after the caller's request has ended is still
+        // charged to them rather than to nobody.
+        string? callerKey = chargeCaller ? _caller?.Key : null;
+        return await SendCoreAsync<T>(method, path, uri, body, continuationToken, idempotent ?? method != HttpMethod.Post, callerKey, cancellationToken);
     }
 
     private async Task<T> SendCoreAsync<T>(
@@ -271,6 +280,7 @@ public sealed class TicketingClient
         object? body,
         string? continuationToken,
         bool idempotent,
+        string? callerKey,
         CancellationToken cancellationToken)
     {
         // A request that isn't idempotent is only retried when it provably wasn't processed.
@@ -279,7 +289,7 @@ public sealed class TicketingClient
         {
             // One permit per upstream call, so retries count against the vendor quota too: first the caller's own share,
             // then the process-wide quota.
-            using RateLimitLease? callerLease = _quota?.Acquire(_caller?.Key);
+            using RateLimitLease? callerLease = _quota?.Acquire(callerKey);
             using var lease = await _rateLimiter.AcquireAsync(cancellationToken);
             using var request = new HttpRequestMessage(method, uri);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));

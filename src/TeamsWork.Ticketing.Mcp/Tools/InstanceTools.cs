@@ -25,10 +25,11 @@ public sealed class InstanceTools
     [Description(
         "Get the Ticketing instance configuration: custom field definitions (IDs, types, options, whether mandatory), the assignee list, " +
         "workflow definitions with state IDs, and SLA settings. Pass 'section' to get only the part you need; the full response is large. " +
-        "Results are cached for a few minutes; pass refresh=true after changing the instance's settings.")]
+        "Results are cached for a few minutes; pass refresh=true after changing the instance's settings (a refresh re-reads unless the " +
+        "settings were read in the last 30 seconds).")]
     public Task<string> GetInstance(
         [Description("Part to return: all (default), customFields (custom and optional fields), assignees, workflows, or sla.")] string? section = null,
-        [Description("true to skip the cache and read the settings from the API.")] bool refresh = false,
+        [Description("true to re-read the settings from the API, unless they were read in the last 30 seconds.")] bool refresh = false,
         [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
     {
@@ -57,7 +58,7 @@ public sealed class InstanceTools
     [McpServerTool(Name = "list_tag_categories", Title = "List tag categories", ReadOnly = true, Idempotent = true, OpenWorld = false)]
     [Description("List all tag categories and the tags in each. Tag inputs on create_ticket/update_ticket accept a category's ID or name; the list_tickets 'tags' filter needs the ID (tagCategoryId_tagText).")]
     public Task<string> ListTagCategories(
-        [Description("true to skip the cache and read the tags from the API.")] bool refresh = false,
+        [Description("true to re-read the tags from the API, unless they were read in the last 30 seconds.")] bool refresh = false,
         CancellationToken cancellationToken = default)
     {
         return ToolRunner.RunAsync(async () =>

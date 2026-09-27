@@ -452,11 +452,9 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
             "(on Linux, the tzdata package provides them).")
         // The ID is what the help desk records and matches people by. Anything but an Entra object ID (or the email, in
         // the email-to-ticket form) attributes every write to someone the help desk doesn't know, silently.
-        .Validate(o => o.ServiceAccount?.IsConfigured != true ||
-                       Guid.TryParse(o.ServiceAccount.Id, out _) ||
-                       string.Equals(o.ServiceAccount.Id!.Trim(), o.ServiceAccount.Email!.Trim(), StringComparison.OrdinalIgnoreCase),
-            "Ticketing:ServiceAccount:Id must be the account's Entra object ID (a GUID, from 'az ad signed-in-user show --query id' " +
-            "or the Entra admin center), or its email address in the email-to-ticket form.")
+        .Validate(o => o.ServiceAccount?.IsConfigured != true || o.ServiceAccount.IsValidIdentity,
+            "Ticketing:ServiceAccount:Email must be a valid email address, and Ticketing:ServiceAccount:Id the account's Entra object ID " +
+            "(a GUID, from 'az ad signed-in-user show --query id' or the Entra admin center) or that same email address.")
         .Validate(o => !requireServiceAccount || o.ServiceAccount?.IsConfigured == true,
             "Ticketing:ServiceAccount:Id, :Name and :Email must all be set when running with --stdio or --local. " +
             "Ticket changes are attributed to this account (Id is your Entra object ID).")

@@ -113,12 +113,29 @@ public sealed class TicketingOptions
     /// </summary>
     public string? ExternalEmailDomains { get; set; }
 
-    /// <summary>The domains in <see cref="ExternalEmailDomains"/>, compared without regard to case.</summary>
+    /// <summary>
+    /// The domains in <see cref="ExternalEmailDomains"/>, in ASCII (punycode) form and lower case, matching how addresses
+    /// are compared, so an internationalised spelling of a domain can't differ from its listed form.
+    /// </summary>
     public IReadOnlySet<string> ExternalEmailDomainSet() =>
         (ExternalEmailDomains ?? "")
             .Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(d => d.TrimStart('@'))
+            .Select(d => d.TrimStart('@').TrimEnd('.'))
+            .Where(d => d.Length > 0)
+            .Select(AsciiDomain)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    private static string AsciiDomain(string domain)
+    {
+        try
+        {
+            return new System.Globalization.IdnMapping().GetAscii(domain).ToLowerInvariant();
+        }
+        catch (ArgumentException)
+        {
+            return domain.ToLowerInvariant();
+        }
+    }
 
     /// <summary>The endpoint <see cref="Region"/> names, or null when it is unset or not a known region.</summary>
     public string? RegionBaseUrl() =>
@@ -137,4 +154,17 @@ public sealed class ServiceAccountOptions
 
     public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(Id) && !string.IsNullOrWhiteSpace(Name) && !string.IsNullOrWhiteSpace(Email);
+
+    /// <summary>
+    /// Whether the identity is one the help desk can know: a valid email, and an ID that is either an Entra object ID
+    /// (a GUID other than all zeros) or that same email (the email-to-ticket form). Anything else attributes every write
+    /// to someone the help desk doesn't know, without any error.
+    /// </summary>
+    public bool IsValidIdentity =>
+        IsConfigured &&
+        System.Net.Mail.MailAddress.TryCreate(Email!.Trim(), out System.Net.Mail.MailAddress? address) &&
+        string.Equals(address.Address, Email.Trim(), StringComparison.OrdinalIgnoreCase) &&
+        // The standard 36-character form only: the help desk stores that form and people are matched on it.
+        ((Guid.TryParseExact(Id!.Trim(), "D", out Guid objectId) && objectId != Guid.Empty) ||
+         string.Equals(Id!.Trim(), Email.Trim(), StringComparison.OrdinalIgnoreCase));
 }

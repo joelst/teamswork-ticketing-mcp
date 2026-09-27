@@ -56,7 +56,7 @@ public sealed class ReviewRound3Tests
     public async Task First_page_is_clamped_to_the_reported_total()
     {
         // Numbering that starts high: highest 20000 but only 2000 tickets, so 5 can't be past position 1999.
-        var options = TestFactory.Options(o => o.MaxScanTickets = 100);
+        var options = TestFactory.Options(o => o.MaxScanTickets = 150);
         var handler = new FakeHttpHandler()
             .Enqueue(HttpStatusCode.OK, """{"items":[]}""")
             .Enqueue(HttpStatusCode.OK, $$$"""{"items":[{{{Ticket(TicketB, 20000)}}}],"itemCount":2000}""")
@@ -64,7 +64,7 @@ public sealed class ReviewRound3Tests
 
         await Assert.ThrowsAsync<McpException>(() => Lookup(TestFactory.Client(handler, options), options).FindTicketByNumber("5", cancellationToken: Ct));
 
-        Assert.Equal("1951", TestFactory.Query(handler.Requests[2].Uri)["offset"]); // ends at 1999, sized by the 49 left
+        Assert.Equal("1950", TestFactory.Query(handler.Requests[2].Uri)["offset"]); // ends at 1999, sized by the 50 left
         Assert.Equal(3, handler.Requests.Count); // the empty page is charged, so the budget is spent
     }
 
@@ -100,13 +100,15 @@ public sealed class ReviewRound3Tests
             .Enqueue(HttpStatusCode.BadGateway, "{}")
             .Enqueue(HttpStatusCode.OK, $$$"""{"item":{"id":"{{{TicketA}}}","status":"Closed"}}""");
 
-        try
+        Task<Ticket> change = TestFactory.Client(handler).UpdateTicketStatusAsync(Guid.Parse(TicketA), "Closed", null, comment, Actor, null, Ct);
+        if (requests == 1)
         {
-            await TestFactory.Client(handler).UpdateTicketStatusAsync(Guid.Parse(TicketA), "Closed", null, comment, Actor, null, Ct);
+            TicketingApiException ex = await Assert.ThrowsAsync<TicketingApiException>(() => change);
+            Assert.True(ex.OutcomeUnknown); // a note may have been recorded: say so rather than invite a retry
         }
-        catch (TicketingApiException)
+        else
         {
-            // expected when not retried
+            Assert.Equal("Closed", (await change).Status); // retried, and succeeded
         }
 
         Assert.Equal(requests, handler.Requests.Count);
@@ -142,22 +144,116 @@ public sealed class ReviewRound3Tests
     [Fact]
     public async Task Callers_that_miss_together_share_one_read()
     {
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        int requests = 0;
-        var handler = new FakeHttpHandler().Enqueue(_ =>
-        {
-            Interlocked.Increment(ref requests);
-            gate.Task.Wait(TimeSpan.FromSeconds(10));
-            return FakeHttpHandler.Json(HttpStatusCode.OK, InstanceJson);
-        });
-        (TicketingClient client, InstanceCache cache, _) = Build(handler);
+        var handler = new GatedHandler(gateFirst: true);
+        (TicketingClient client, InstanceCache cache) = Gated(handler);
 
-        Task<Instance> first = cache.GetInstanceAsync(client, null, refresh: false, Ct);
+        Task<Instance> first = Task.Run(() => cache.GetInstanceAsync(client, null, refresh: false, Ct), Ct);
+        await handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct); // the first read is out
         Task<Instance> second = cache.GetInstanceAsync(client, null, refresh: false, Ct);
-        gate.SetResult();
+        handler.Release.SetResult();
         await Task.WhenAll(first, second);
 
-        Assert.Equal(1, requests);
+        Assert.Equal(1, handler.Count);
+    }
+
+    [Fact]
+    public async Task A_refresh_doesnt_join_a_read_that_started_before_it()
+    {
+        var handler = new GatedHandler(gateFirst: true);
+        (TicketingClient client, InstanceCache cache) = Gated(handler);
+
+        Task<Instance> ordinary = Task.Run(() => cache.GetInstanceAsync(client, -6, refresh: false, Ct), Ct);
+        await handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        await cache.GetInstanceAsync(client, -6, refresh: true, Ct); // its own read, not the older one
+
+        Assert.Equal(2, handler.Count);
+        handler.Release.SetResult();
+        await ordinary;
+    }
+
+    [Fact]
+    public async Task A_read_older_than_a_refresh_cant_put_its_copy_back()
+    {
+        var handler = new GatedHandler(gateFirst: true);
+        (TicketingClient client, InstanceCache cache) = Gated(handler);
+
+        Task<Instance> older = Task.Run(() => cache.GetInstanceAsync(client, -6, refresh: false, Ct), Ct); // held back
+        await handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        await cache.GetInstanceAsync(client, -5, refresh: true, Ct); // a refresh finishes first
+        handler.Release.SetResult();
+        await older; // answers its own caller...
+
+        await cache.GetInstanceAsync(client, -6, refresh: false, Ct); // ...but wasn't cached, so this reads again
+        Assert.Equal(3, handler.Count);
+    }
+
+    private static (TicketingClient Client, InstanceCache Cache) Gated(GatedHandler handler)
+    {
+        IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(TestFactory.Options());
+        var time = new FixedTimeProvider(new DateTimeOffset(2026, 1, 15, 12, 0, 0, TimeSpan.Zero));
+        return (ClientFor(handler), new InstanceCache(opts, new TimeZoneOffsetResolver(opts, time), time));
+    }
+
+    /// <summary>Answers every request with the instance; the first can be held until released, asynchronously.</summary>
+    private sealed class GatedHandler(bool gateFirst) : HttpMessageHandler
+    {
+        private int _count;
+
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int Count => Volatile.Read(ref _count);
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _count) == 1 && gateFirst)
+            {
+                Entered.SetResult();
+                await Release.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            }
+
+            return FakeHttpHandler.Json(HttpStatusCode.OK, InstanceJson);
+        }
+    }
+
+    [Theory]
+    [InlineData("654d8ff9-bfdc-448a-ba40-2c15a2b2f6a4", "pat@example.test", true)]
+    [InlineData("pat@example.test", "pat@example.test", true)] // the email-to-ticket form
+    [InlineData("00000000-0000-0000-0000-000000000000", "pat@example.test", false)]
+    [InlineData("not-an-email", "not-an-email", false)] // the email form needs a real email
+    [InlineData("654d8ff9-bfdc-448a-ba40-2c15a2b2f6a4", "Pat <pat@example.test>", false)] // a display-name form isn't an address
+    public void Service_account_identity_must_be_one_the_help_desk_can_know(string id, string email, bool valid)
+    {
+        Assert.Equal(valid, new ServiceAccountOptions { Id = id, Name = "Pat", Email = email }.IsValidIdentity);
+    }
+
+    [Theory]
+    [InlineData("""{"frt":{"urgent":{"enabled":false},"newRule":{"mode":"x"}},"rt":{"low":{"enabled":false}}}""")] // an unknown rule
+    [InlineData("""{"frt":{"urgent":{"enabled":false}}}""")] // no resolution rules at all
+    [InlineData("""{"frt":{"urgent":{"enabled":"no"}},"rt":{"low":{"enabled":false}}}""")] // not a boolean
+    public void Partly_recognised_sla_settings_are_unknown_not_off(string json)
+    {
+        Assert.Null(WorkloadTools.SlaEnabled(JsonSerializer.Deserialize<JsonElement>(json)));
+    }
+
+    [Fact]
+    public void A_link_loop_under_the_upload_root_stops_startup()
+    {
+        using var dir = new TempDir();
+        string a = Path.Combine(dir.Path, "a");
+        string b = Path.Combine(dir.Path, "b");
+        try
+        {
+            Directory.CreateSymbolicLink(a, b);
+            Directory.CreateSymbolicLink(b, a);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            Assert.Skip("Creating a symbolic link needs a privilege this machine doesn't grant.");
+        }
+
+        Assert.Throws<StartupConfigurationException>(() => UploadFolder.Canonical(Path.Combine(a, "uploads")));
     }
 
     [Fact]
@@ -383,6 +479,7 @@ public sealed class ReviewRound3Tests
     [Fact]
     public void Open_file_check_runs_where_the_os_can_answer()
     {
+        Assert.SkipWhen(OperatingSystem.IsMacOS(), "macOS has no managed way to ask where an open handle points; the path check stands alone.");
         // The real-path check of the open handle runs on Windows and Linux; this upload succeeding shows it accepts a
         // plain file in the folder.
         using var dir = new TempDir();

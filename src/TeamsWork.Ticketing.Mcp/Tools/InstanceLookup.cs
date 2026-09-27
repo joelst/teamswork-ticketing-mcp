@@ -122,8 +122,9 @@ internal sealed partial class InstanceLookup
         List<Persona> people = AssigneesOf(instance);
         if (assigneeOnly && people.Count == 0)
         {
-            // Nothing to check an assignee against; an empty list doesn't mean anyone goes.
-            throw new McpException(
+            // Nothing to check an assignee against; an empty list doesn't mean anyone goes. A miss, so a copy cached before
+            // the list was filled in is read again.
+            throw Miss(
                 $"'{paramName}' can't be checked: the instance's assignee list is empty or unreadable, so this server can't assign tickets. " +
                 "Assign it in the Ticketing app.");
         }
@@ -134,7 +135,8 @@ internal sealed partial class InstanceLookup
         }
 
         TicketUser given = person.ToTicketUser(paramName);
-        Persona? byId = people.FirstOrDefault(p => Same(p.Id, given.Id));
+        // IDs are compared as object IDs, so one written another way ("N" form, braces) is still recognised.
+        Persona? byId = people.FirstOrDefault(p => SameId(p.Id, given.Id));
         Persona? byEmail = people.FirstOrDefault(p => Same(p.Email, given.Email));
 
         // The email-to-ticket form puts the email in every field, so its ID is no one's object ID.
@@ -158,16 +160,23 @@ internal sealed partial class InstanceLookup
                 "in it. Use a name or email from get_instance (section 'assignees').");
         }
 
-        // Someone outside the list can't appear under a listed person's name.
-        if (people.FirstOrDefault(p => Same(p.Name, given.Name)) is Persona namesake)
+        // Someone outside the list can't appear under a listed person's name, however it is spelled on screen.
+        if (people.FirstOrDefault(p => NameSkeleton(p.Name) == NameSkeleton(given.Name)) is Persona namesake)
         {
             throw new McpException(
                 $"'{paramName}' uses the name of {namesake.Name}, who is in the assignee list with a different ID and email. Use their " +
                 "details from get_instance, or the outside person's own name.");
         }
 
-        string domain = given.Email[(given.Email.LastIndexOf('@') + 1)..];
-        if (externalDomains is { Count: > 0 } && !externalDomains.Contains(domain))
+        // An outsider's ID is either an object ID in the standard form or, in the email-to-ticket form, the email itself.
+        if (!emailForm && !(Guid.TryParseExact(given.Id, "D", out Guid objectId) && objectId != Guid.Empty))
+        {
+            throw new McpException(
+                $"'{paramName}' id must be the person's Entra object ID (a GUID such as 3fa85f64-5717-4562-b3fc-2c963f66afa6), or their " +
+                "email address in all three fields for the email-to-ticket form.");
+        }
+
+        if (externalDomains is { Count: > 0 } && !externalDomains.Contains(ToolValidation.EmailDomain(given.Email)))
         {
             throw new McpException(
                 $"'{paramName}' '{given.Email}' is outside the email domains allowed for people not in the assignee list " +
@@ -216,6 +225,45 @@ internal sealed partial class InstanceLookup
                 string.Join("; ", found.Take(5).Select(p => $"{p.Name} <{p.Email}>")) +
                 (found.Count > 5 ? $" and {found.Count - 5} more" : "") + ". Use the email address."),
         };
+    }
+
+    /// <summary>Whether two IDs name the same object ID (in any GUID form), or are the same text when either isn't a GUID.</summary>
+    private static bool SameId(string? a, string? b) =>
+        Guid.TryParse(a?.Trim(), out Guid ga) && Guid.TryParse(b?.Trim(), out Guid gb) ? ga == gb : Same(a, b);
+
+    /// <summary>
+    /// A name reduced to what a reader sees: compatibility forms folded (NFKC), invisible format characters (zero-width
+    /// spaces and joiners) removed, runs of whitespace collapsed, case ignored. Look-alike letters from other scripts
+    /// (Cyrillic "а" for Latin "a") aren't folded; that needs the Unicode confusables table.
+    /// </summary>
+    internal static string NameSkeleton(string? name)
+    {
+        string folded = (name ?? "").Normalize(System.Text.NormalizationForm.FormKC);
+        var builder = new System.Text.StringBuilder(folded.Length);
+        bool space = false;
+        foreach (char c in folded)
+        {
+            if (char.GetUnicodeCategory(c) == UnicodeCategory.Format)
+            {
+                continue;
+            }
+
+            if (char.IsWhiteSpace(c))
+            {
+                space = builder.Length > 0;
+                continue;
+            }
+
+            if (space)
+            {
+                builder.Append(' ');
+                space = false;
+            }
+
+            builder.Append(char.ToLowerInvariant(c));
+        }
+
+        return builder.ToString();
     }
 
     private static List<Persona> AssigneesOf(Instance instance) =>
@@ -311,11 +359,26 @@ internal sealed partial class InstanceLookup
             .Where(f => Guid.TryParse(f.Id, out _))
             .GroupBy(f => f.Id!, StringComparer.OrdinalIgnoreCase)
             .Select(copies => new FieldDefinition(
-                copies.First(),
+                Merge(copies.ToList()),
                 copies.Select(c => c.Status).FirstOrDefault(status => status is not null && UnusableStatuses.Contains(status)),
-                // Copies that disagree on what the field is leave no definition to check a value against.
-                copies.Select(c => (TypeKey(c), c.IsMultiple ?? false)).Distinct().Count() > 1))
+                // Copies that state different things about what the field is leave no definition to check a value against.
+                // A copy that leaves an attribute out doesn't disagree.
+                copies.Select(TypeKey).OfType<string>().Distinct().Count() > 1 ||
+                copies.Select(c => c.IsMultiple).OfType<bool>().Distinct().Count() > 1))
             .ToList();
+
+    /// <summary>One definition from a field's copies, taking each attribute from the first copy that states it.</summary>
+    private static CustomField Merge(List<CustomField> copies) => new()
+    {
+        Id = copies[0].Id,
+        Title = copies.Select(c => c.Title).FirstOrDefault(t => !string.IsNullOrWhiteSpace(t)),
+        Type = copies.Select(c => c.Type).FirstOrDefault(t => t is { ValueKind: not JsonValueKind.Null and not JsonValueKind.Undefined }),
+        IsMultiple = copies.Select(c => c.IsMultiple).FirstOrDefault(m => m is not null),
+        IsMandatory = copies.Select(c => c.IsMandatory).FirstOrDefault(m => m is not null),
+        Status = copies.Select(c => c.Status).FirstOrDefault(st => st is not null),
+        Options = copies.Select(c => c.Options).FirstOrDefault(o => o is { ValueKind: JsonValueKind.Array } a && a.GetArrayLength() > 0),
+        DefaultValue = copies.Select(c => c.DefaultValue).FirstOrDefault(d => d is not null),
+    };
 
     /// <summary>A title matches usable fields first, so a hidden field doesn't make a visible one of the same name ambiguous.</summary>
     private static FieldDefinition? SingleByTitle(List<FieldDefinition> fields, string title)
