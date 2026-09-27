@@ -24,7 +24,7 @@ using TeamsWork.Ticketing.Mcp.Tools;
 //   * --stdio / MCP_TRANSPORT=stdio  -> stdio for local clients (Claude Code, VS Code), Ticketing:ServiceAccount required
 // ---------------------------------------------------------------------------------------------------------------
 
-bool useStdio = args.Contains("--stdio", StringComparer.OrdinalIgnoreCase) ||
+bool useStdio = args.Contains(ModeFlags.Stdio, StringComparer.OrdinalIgnoreCase) ||
                 string.Equals(Environment.GetEnvironmentVariable("MCP_TRANSPORT"), "stdio", StringComparison.OrdinalIgnoreCase);
 
 // A configuration problem that ends the process gets a plain explanation on stderr (never stdout, the stdio MCP
@@ -55,7 +55,7 @@ else
 
 static async Task RunStdioAsync(string[] args)
 {
-    HostApplicationBuilder builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { Args = args, ContentRootPath = AppContext.BaseDirectory });
+    HostApplicationBuilder builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { Args = ModeFlags.SettingsArguments(args), ContentRootPath = AppContext.BaseDirectory });
 
     UseBuiltInDefaultsInsteadOfFiles(builder.Configuration);
 
@@ -105,7 +105,7 @@ static async Task RunStdioAsync(string[] args)
 }
 
 // The local modes run from wherever the executable was installed, which may be a shared folder (~/.local/bin, a
-// downloads folder) where anyone or anything can leave an appsettings.json; release builds don't ship one at all. So
+// downloads folder) where anyone or anything can leave an appsettings.json; the single-file builds don't ship one. So
 // they read no settings files: the few defaults a file would add are built in here, and everything else is configured
 // through user secrets, environment variables, or the command line. The hosted server keeps the file in its image.
 static void UseBuiltInDefaultsInsteadOfFiles(IConfigurationBuilder configuration)
@@ -131,7 +131,7 @@ static void UseBuiltInDefaultsInsteadOfFiles(IConfigurationBuilder configuration
 
 static async Task RunHttpAsync(string[] args)
 {
-    WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = AppContext.BaseDirectory });
+    WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = ModeFlags.SettingsArguments(args), ContentRootPath = AppContext.BaseDirectory });
     // Whether the files are trusted depends on the mode, so the mode can't come from them: an appsettings.json left
     // beside the executable could otherwise switch it to unauthenticated local mode (or stop startup).
     AuthMode authMode;
@@ -500,11 +500,11 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
         .Validate(o => !string.IsNullOrWhiteSpace(o.DefaultTimeZoneId) && TimeZoneInfo.TryFindSystemTimeZoneById(o.DefaultTimeZoneId, out _),
             "Ticketing:DefaultTimeZoneId is not a time zone this machine knows. Use an IANA name such as America/Chicago " +
             "(on Linux, the tzdata package provides them).")
-        // The ID is what the help desk records and matches people by. Anything but an Entra object ID (or the email, in
-        // the email-to-ticket form) attributes every write to someone the help desk doesn't know, silently.
         .Validate(o => o.InvalidExternalEmailDomains().Count == 0,
             "Ticketing:ExternalEmailDomains must list plain domain names, such as contoso.com, separated by commas: no wildcards, and " +
             "an internationalised domain in its xn-- punycode form. Matching is exact, so list each subdomain that should be allowed.")
+        // The ID is what the help desk records and matches people by. Anything but an Entra object ID (or the email, in
+        // the email-to-ticket form) attributes every write to someone the help desk doesn't know, silently.
         .Validate(o => o.ServiceAccount?.IsConfigured != true || o.ServiceAccount.IsValidIdentity,
             "Ticketing:ServiceAccount:Email must be a valid email address, and Ticketing:ServiceAccount:Id the account's Entra object ID " +
             "(a GUID, from 'az ad signed-in-user show --query id' or the Entra admin center) or that same email address.")
