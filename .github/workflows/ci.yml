@@ -78,7 +78,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ github.token }}
       Ticketing__ApiKey: ci-dummy-key
-      Ticketing__ServiceAccount__Id: ci
+      Ticketing__ServiceAccount__Id: 00000000-0000-0000-0000-0000000000c1
       Ticketing__ServiceAccount__Name: CI
       Ticketing__ServiceAccount__Email: ci@example.test
     steps:
@@ -131,7 +131,7 @@ jobs:
         run: |
           RESPONSE=$( (printf '%s\n' "$INIT"; sleep 8) | docker run --rm -i \
             -v "$PWD/out:/app:ro" -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro \
-            -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=ci \
+            -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=00000000-0000-0000-0000-0000000000c1 \
             -e Ticketing__ServiceAccount__Name=CI -e Ticketing__ServiceAccount__Email=ci@example.test \
             ubuntu:24.04 sh -c 'if ls /usr/lib/*/libicu* >/dev/null 2>&1; then echo "image has ICU" >&2; exit 1; fi; exec /app/TeamsWork.Ticketing.Mcp --stdio' \
             | head -n1 )
@@ -142,7 +142,7 @@ jobs:
         run: |
           set +e
           OUTPUT=$(printf '%s\n' "$INIT" | docker run --rm -i -v "$PWD/out:/app:ro" \
-            -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=ci \
+            -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=00000000-0000-0000-0000-0000000000c1 \
             -e Ticketing__ServiceAccount__Name=CI -e Ticketing__ServiceAccount__Email=ci@example.test \
             ubuntu:24.04 sh -c 'if [ -e /usr/share/zoneinfo/America/Chicago ]; then echo "image has tzdata" >&2; exit 1; fi; exec /app/TeamsWork.Ticketing.Mcp --stdio' 2>&1)
           STATUS=$?
@@ -169,7 +169,7 @@ jobs:
         run: |
           INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
           RESPONSE=$( (printf '%s\n' "$INIT"; sleep 8) | docker run --rm -i \
-            -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=ci \
+            -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=00000000-0000-0000-0000-0000000000c1 \
             -e Ticketing__ServiceAccount__Name=CI -e Ticketing__ServiceAccount__Email=ci@example.test \
             teamswork-taas-mcp:ci --stdio | head -n1 )
           echo "$RESPONSE"

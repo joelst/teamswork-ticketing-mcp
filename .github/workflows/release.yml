@@ -153,7 +153,7 @@ jobs:
         timeout-minutes: 2
         env:
           Ticketing__ApiKey: ci-dummy-key
-          Ticketing__ServiceAccount__Id: ci
+          Ticketing__ServiceAccount__Id: 00000000-0000-0000-0000-0000000000c1
           Ticketing__ServiceAccount__Name: CI
           Ticketing__ServiceAccount__Email: ci@example.test
         run: |
