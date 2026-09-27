@@ -49,6 +49,9 @@ param serviceAccountId string = ''
 param serviceAccountName string = ''
 param serviceAccountEmail string = ''
 
+@description('Comma-separated email domains allowed for people outside the assignee list (requestors, people fields), e.g. contoso.com. Empty allows any domain.')
+param externalEmailDomains string = ''
+
 @minValue(0)
 @maxValue(10)
 param minReplicas int = 0
@@ -75,6 +78,10 @@ var serviceAccountEnv = empty(serviceAccountId) ? [] : [
   { name: 'Ticketing__ServiceAccount__Id', value: serviceAccountId }
   { name: 'Ticketing__ServiceAccount__Name', value: serviceAccountName }
   { name: 'Ticketing__ServiceAccount__Email', value: serviceAccountEmail }
+]
+
+var externalEmailDomainsEnv = empty(externalEmailDomains) ? [] : [
+  { name: 'Ticketing__ExternalEmailDomains', value: externalEmailDomains }
 ]
 
 resource app 'Microsoft.App/containerApps@2024-03-01' = {
@@ -138,7 +145,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'Entra__TenantId', value: entraTenantId }
             { name: 'Entra__ClientId', value: entraClientId }
             { name: 'Entra__PublicBaseUrl', value: publicBaseUrl }
-          ], serviceAccountEnv)
+          ], serviceAccountEnv, externalEmailDomainsEnv)
           probes: [
             {
               type: 'Startup'

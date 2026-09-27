@@ -15,7 +15,9 @@
 #       namePrefix (e.g. taasmcp), environmentName (e.g. prod),
 #       entraTenantId, entraClientId (from infra/scripts/New-EntraAppRegistrations.ps1),
 #       serviceAccountId, serviceAccountName, serviceAccountEmail (optional, for app-only callers),
-#       publicBaseUrl (optional custom domain)
+#       publicBaseUrl (optional custom domain),
+#       externalEmailDomains (optional; comma-separated domains allowed for requestors outside the assignee list)
+#     An optional variable left out of the group is deployed as empty.
 #     Optional secret variable: ticketingApiKey (only if you want the pipeline to seed Key Vault; otherwise
 #     run infra/scripts/Set-TicketingApiKey.ps1 once).
 #   * Environment "taas-mcp-prod" with an approval check on it.
@@ -131,9 +133,10 @@ stages:
                 set -euo pipefail
                 az group create --name "$(azureResourceGroup)" --location "$(azureLocation)" --output none
 
-                # Azure Pipelines leaves an undefined variable as the literal text $(ticketingApiKey) in the environment. It
-                # is detected by its "$(" start, written here without that sequence, so the pipeline can't expand it (a
-                # macro in this script would expand on both sides of a comparison, and write the secret into the script).
+                # Azure Pipelines leaves an undefined variable in the environment as its own macro text: a dollar sign,
+                # an opening parenthesis, and the name. That start is matched below with both characters escaped, and
+                # this comment never spells the macro out, because the pipeline expands macros anywhere in this script,
+                # comments included, and would write the secret into the script file.
                 EXTRA=()
                 if [ -n "${TICKETING_API_KEY:-}" ] && [[ "${TICKETING_API_KEY}" != \$\(* ]]; then
                   EXTRA=(ticketingApiKey="${TICKETING_API_KEY}")
@@ -225,12 +228,22 @@ stages:
                 - task: AzureCLI@2
                   displayName: az deployment group create (app)
                   name: app
+                  # Optional variables go through the environment, where one missing from the variable group arrives as
+                  # its macro text and is turned into an empty value below.
+                  env:
+                    OPT_PUBLIC_BASE_URL: $(publicBaseUrl)
+                    OPT_SERVICE_ACCOUNT_ID: $(serviceAccountId)
+                    OPT_SERVICE_ACCOUNT_NAME: $(serviceAccountName)
+                    OPT_SERVICE_ACCOUNT_EMAIL: $(serviceAccountEmail)
+                    OPT_EXTERNAL_EMAIL_DOMAINS: $(externalEmailDomains)
                   inputs:
                     azureSubscription: $(azureServiceConnection)
                     scriptType: bash
                     scriptLocation: inlineScript
                     inlineScript: |
                       set -euo pipefail
+                      # Empty for a variable the group doesn't define (see the Core stage for how that is detected).
+                      opt() { case "$1" in \$\(*) printf '' ;; *) printf '%s' "$1" ;; esac; }
                       OUT=$(az deployment group create \
                         --name "app-$(Build.BuildNumber)" \
                         --resource-group "$(azureResourceGroup)" \
@@ -245,10 +258,11 @@ stages:
                           apiKeySecretUri="$(apiKeySecretUri)" \
                           entraTenantId="$(entraTenantId)" \
                           entraClientId="$(entraClientId)" \
-                          publicBaseUrl="$(publicBaseUrl)" \
-                          serviceAccountId="$(serviceAccountId)" \
-                          serviceAccountName="$(serviceAccountName)" \
-                          serviceAccountEmail="$(serviceAccountEmail)" \
+                          publicBaseUrl="$(opt "$OPT_PUBLIC_BASE_URL")" \
+                          serviceAccountId="$(opt "$OPT_SERVICE_ACCOUNT_ID")" \
+                          serviceAccountName="$(opt "$OPT_SERVICE_ACCOUNT_NAME")" \
+                          serviceAccountEmail="$(opt "$OPT_SERVICE_ACCOUNT_EMAIL")" \
+                          externalEmailDomains="$(opt "$OPT_EXTERNAL_EMAIL_DOMAINS")" \
                         --query properties.outputs -o json)
 
                       FQDN=$(echo "$OUT" | jq -r '.containerAppFqdn.value')
