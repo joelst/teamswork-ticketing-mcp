@@ -269,7 +269,8 @@ $build = Join-Path $repoRoot 'scripts/Build-CoworkPackage.ps1'
     -WebsiteUrl $WebsiteUrl -PrivacyUrl $PrivacyUrl -TermsUrl $TermsUrl
 $zip = Join-Path $repoRoot 'artifacts/cowork/teamswork-ticketing-cowork.zip'
 
-$atk = if (Get-Command atk -ErrorAction SilentlyContinue) { @('atk') } else { @('npx', '-y', '@microsoft/m365agentstoolkit-cli') }
+# Wrapped in @(): an if expression would unroll a one-item array, leaving the string 'atk', whose [0] is 'a'.
+$atk = @(if (Get-Command atk -ErrorAction SilentlyContinue) { 'atk' } else { 'npx', '-y', '@microsoft/m365agentstoolkit-cli' })
 & $atk[0] @($atk | Select-Object -Skip 1) validate --package-file $zip --interactive false
 if ($LASTEXITCODE -ne 0) { throw 'Agents Toolkit validation failed; see above.' }
 
