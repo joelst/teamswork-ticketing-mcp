@@ -6,7 +6,7 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 installer="$here/../install.sh"
-for fn in json_escape secret_get people_with_email env_setting find_person; do
+for fn in json_escape secret_get people_with_email env_setting vendor_endpoint find_person; do
     body=$(sed -n "/^$fn() {/,/^}/p" "$installer")
     [ -n "$body" ] || { echo "install.sh has no function $fn"; exit 1; }
     eval "$body"
@@ -90,6 +90,34 @@ unset Ticketing__Region
 printf '{\n  "Ticketing:Region": " eu "\n}\n' >"$SECRETS_PATH"; rm -f "$tmp/curl-config"; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
 check 'a region with spaces around it is that region' "$(cat "$tmp/curl-config" 2>/dev/null)" 'url = "https://ticketing-apim-eu.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
 : >"$SECRETS_PATH"
+
+# vendor_endpoint follows the server's startup rules (TicketingOptions and Program.cs), so the key goes only where the
+# server itself would send it, and only to the vendor.
+us='https://teamswork.azure-api.net/ticketing/v1'; eu='https://ticketing-apim-eu.azure-api.net/ticketing/v1'; aus='https://ticketing-apim-aus.azure-api.net/ticketing/v1'
+check 'nothing set is US' "$(vendor_endpoint '' '' '')" "$us"
+check 'a region picks its endpoint' "$(vendor_endpoint 'eu' '' '')" "$eu"
+check 'the built-in US base URL, set, is a placeholder a region replaces' "$(vendor_endpoint 'EU' set "$us")" "$eu"
+check 'in any case and with a trailing slash' "$(vendor_endpoint 'AUS' set 'HTTPS://teamswork.azure-api.net/ticketing/v1/')" "$aus"
+check 'the US base URL alone is US' "$(vendor_endpoint '' set "$us/")" "$us"
+check 'a vendor endpoint set as the base URL is used' "$(vendor_endpoint '' set "$eu")" "$eu"
+check 'and agrees with its own region' "$(vendor_endpoint ' eu ' set "$eu")" "$eu"
+check 'a region and a base URL naming different endpoints stop the server: no request' "$(vendor_endpoint 'EU' set "$aus")" ''
+check 'a custom base URL: no request' "$(vendor_endpoint '' set 'https://elsewhere.example/v1')" ''
+check 'nor with a region' "$(vendor_endpoint 'EU' set 'https://elsewhere.example/v1')" ''
+check 'an empty base URL: no request' "$(vendor_endpoint '' set '')" ''
+check 'an unknown region: no request' "$(vendor_endpoint 'XX' '' '')" ''
+check 'the server trims a region only at the ends, so E U is unknown: no request' "$(vendor_endpoint 'E U' '' '')" ''
+printf '{\n  "Ticketing:BaseUrl": "%s",\n  "Ticketing:Region": "EU"\n}\n' "$us" >"$SECRETS_PATH"; rm -f "$tmp/curl-config"
+check 'end to end, the built-in URL in the file with a region looks up the regional list' "$(find_person 'pat.lee@contoso.com' 'abc123' | sed -n 1p)$(cat "$tmp/curl-config" 2>/dev/null)" '1111aaaa-1111-1111-1111-111111111111url = "https://ticketing-apim-eu.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
+: >"$SECRETS_PATH"
+
+# Only item.assignees.peoples counts: an assignees list nested under a custom field, or one outside item, doesn't.
+cp "$tmp/instance.json" "$tmp/instance-full.json"
+printf '%s\n' '{"before":{"assignees":{"peoples":[{"id":"88888888-8888-8888-8888-888888888888","name":"Root","email":"root@contoso.com"}]}},"item":{"id":"i","customFieldsLeft":[{"id":"f","extension":{"assignees":{"type":"x","peoples":[{"id":"99999999-0000-0000-0000-000000000000","name":"Nested","email":"pat.lee@contoso.com"},{"id":"99999999-1111-0000-0000-000000000000","name":"Only Nested","email":"nested@contoso.com"}]}}}],"assignees":{"type":"teamsOwner","peoples":[{"id":"1111aaaa-1111-1111-1111-111111111111","name":"Pat","email":"pat.lee@contoso.com"}]}}}' >"$tmp/instance.json"
+check 'a nested list of the same name is not the assignee list' "$(find_person 'pat.lee@contoso.com' 'abc123' | sed -n 1p)" '1111aaaa-1111-1111-1111-111111111111'
+check 'so someone only in it is no match' "$(find_person 'nested@contoso.com' 'abc123')" ''
+check 'nor is someone in a list outside item' "$(find_person 'root@contoso.com' 'abc123')" ''
+cp "$tmp/instance-full.json" "$tmp/instance.json"
 
 # No assignee list, or a null one, finds no one, rather than the search running on into a later people array.
 cp "$tmp/instance.json" "$tmp/instance-full.json"

@@ -401,21 +401,37 @@
         return $false
     }
 
-    # The Entra object ID and display name for an email, so nobody has to know their own GUID: from the help desk's
-    # assignee list (read with the API key just entered), then from the directory through the Azure CLI. $null when
-    # neither has exactly one match. The key is sent only to the vendor's endpoint for the region, never to a
-    # configured base URL, which a planted setting could point elsewhere; and as it is in the request URL, a failure
-    # is reported without the error text.
-    function Find-Person([string] $Email, [string] $ApiKey, [string] $RegionName, [string] $CustomBaseUrl) {
-        $endpoints = @{
+    # The endpoint the server will call for these settings, when it is one of the vendor's, or $null: the API key is
+    # only ever sent where the server itself would send it, and only to the vendor. Follows the server's startup rules
+    # (TicketingOptions and its validation in Program.cs): the base URL is the built-in US one unless set; a region
+    # (trimmed at the ends, any case, blank meaning unset) replaces that built-in value but not one set to anything
+    # else; an unknown region, or a region and base URL naming different endpoints, stops the server, so gets $null. A
+    # custom base URL, even an empty one, is never a vendor endpoint, so it gets $null too. $BaseUrl is $null when unset.
+    function Resolve-VendorEndpoint([string] $RegionName, $BaseUrl) {
+        $endpoints = [ordered]@{
             US  = 'https://teamswork.azure-api.net/ticketing/v1'
             EU  = 'https://ticketing-apim-eu.azure-api.net/ticketing/v1'
             AUS = 'https://ticketing-apim-aus.azure-api.net/ticketing/v1'
         }
-        # As the server reads it: trimmed, any case, and blank means unset, which is US.
-        $regionKey = if ($RegionName) { $RegionName.Trim().ToUpperInvariant() } else { '' }
-        $base = $endpoints[$(if ($regionKey) { $regionKey } else { 'US' })]
-        if ($ApiKey -and $base -and -not $CustomBaseUrl) {
+        $url = if ($null -eq $BaseUrl) { $endpoints.US } else { ([string] $BaseUrl).TrimEnd('/') }
+        $regionKey = if ($RegionName) { $RegionName.Trim() } else { '' }
+        if ($regionKey) {
+            $regional = $endpoints[$regionKey.ToUpperInvariant()]
+            if (-not $regional) { return $null }
+            if ($url -ieq $endpoints.US) { $url = $regional }
+            if ($url -ine $regional) { return $null }
+        }
+        foreach ($endpoint in $endpoints.Values) { if ($url -ieq $endpoint) { return $endpoint } }
+        return $null
+    }
+
+    # The Entra object ID and display name for an email, so nobody has to know their own GUID: from the help desk's
+    # assignee list (read with the API key just entered, at $Endpoint from Resolve-VendorEndpoint, and not at all when
+    # it is $null), then from the directory through the Azure CLI. $null when neither has exactly one match. As the key
+    # is in the request URL, a failure is reported without the error text.
+    function Find-Person([string] $Email, [string] $ApiKey, [string] $Endpoint) {
+        $base = $Endpoint
+        if ($ApiKey -and $base) {
             try {
                 $instance = Invoke-RestMethod -UseBasicParsing -TimeoutSec 20 -Uri "$base/instance?key=$([Uri]::EscapeDataString($ApiKey))&timezone=0"
                 $people = @($instance.item.assignees.peoples | Where-Object { $_.id -and $_.email -and $_.email.Trim() -ieq $Email })
@@ -490,10 +506,10 @@
             $nameDefault = $secrets['Ticketing:ServiceAccount:Name']
         }
         else {
-            # The region as the server will resolve it. For the base URL, a custom one in the file still skips the lookup
-            # even if an empty variable blanks it for the server: skipping never sends the key anywhere it shouldn't go.
-            $customBaseUrl = Get-First (Get-Setting 'Ticketing:BaseUrl' $secrets) $secrets['Ticketing:BaseUrl']
-            $found = Find-Person $email $secrets['Ticketing:ApiKey'] (Get-Setting 'Ticketing:Region' $secrets $Region) $customBaseUrl
+            # The endpoint the server will use for the region and base URL it will see (environment first, then -Region,
+            # then the file); a custom or conflicting one gets no request.
+            $endpoint = Resolve-VendorEndpoint (Get-Setting 'Ticketing:Region' $secrets $Region) (Get-Setting 'Ticketing:BaseUrl' $secrets)
+            $found = Find-Person $email $secrets['Ticketing:ApiKey'] $endpoint
             if (-not $found -and $signedIn.id -and $signedIn.email -and $signedIn.email.Trim() -ieq $email) {
                 $found = [pscustomobject]@{ Id = $signedIn.id; Name = $signedIn.name; Source = 'your Azure CLI sign-in' }
             }

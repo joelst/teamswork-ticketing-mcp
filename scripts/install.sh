@@ -358,11 +358,11 @@ ask() {
 # whose email is $1, compared in lower case. Only item.assignees.peoples counts, as in install.ps1: people elsewhere in
 # the response (an SLA escalation contact, a people-picker default) aren't the help desk's list, and one of them with
 # the same email would make the real match look ambiguous.
-# Braces and brackets inside strings (a display name such as "A [B]") must not count as structure, so the text is
-# first walked once, honouring quotes and escapes, and those four characters inside strings are swapped for control
-# characters, which valid JSON never has raw in a string. The list's person objects then hold no nested braces or
-# brackets, so the list runs to its first "]" and splits into people at "{"; values get their characters back. A null
-# or missing list finds no one.
+# The list is found by walking the JSON, honouring strings, down the exact path item > assignees > peoples, so a null
+# or missing list finds no one and a list of the same name anywhere else doesn't count. Braces and brackets inside
+# strings (a display name such as "A [B]") aren't structure: before the list is split into people at "{", those four
+# characters inside strings are swapped for control characters, which valid JSON never has raw in a string, and the
+# values printed get them back.
 people_with_email() {
     tr -d '\n' | awk -v want="$1" '
         function shield(s,   out, c, i, n, quoted, escaped) {
@@ -394,16 +394,39 @@ people_with_email() {
             sub("\"$", "", m)
             return unshield(m)
         }
+        # The inside of the item.assignees.peoples array, or "" when there is none (a null or missing list, or one
+        # anywhere else, such as under a custom field): walks the JSON once, honouring strings, and keeps the kind of
+        # each open container and the key being read in each object on the way down, so the array is taken only at
+        # that exact path.
+        function peoples(s,   n, i, c, depth, quoted, escaped, from, text, keyed, start) {
+            n = length(s); depth = 0; quoted = 0; escaped = 0; keyed = 0; start = 0
+            for (i = 1; i <= n; i++) {
+                c = substr(s, i, 1)
+                if (quoted) {
+                    if (escaped) escaped = 0
+                    else if (c == "\\") escaped = 1
+                    else if (c == "\"") { quoted = 0; text = substr(s, from + 1, i - from - 1); keyed = 1 }
+                    continue
+                }
+                if (c == "\"") { quoted = 1; from = i; continue }
+                if (c == " " || c == "\t" || c == "\r") continue
+                if (c == ":") { if (keyed && kind[depth] == "{") key[depth] = text; keyed = 0; continue }
+                keyed = 0
+                if (c == "{" || c == "[") {
+                    if (c == "[" && depth == 3 && kind[1] == "{" && kind[2] == "{" && kind[3] == "{" &&
+                        key[1] == "item" && key[2] == "assignees" && key[3] == "peoples") start = i + 1
+                    depth++; kind[depth] = c; key[depth] = ""
+                } else if (c == "}" || c == "]") {
+                    if (start && depth == 4 && c == "]") return substr(s, start, i - start)
+                    depth--
+                } else if (c == ",") key[depth] = ""
+            }
+            return ""
+        }
         {
-            s = shield($0)
-            # The "peoples" array directly inside the "assignees" object, and nothing else. With braces in strings shielded,
-            # [^{}]* cannot leave that object, so when either is null, missing or nested elsewhere, nothing matches rather
-            # than the search running on to some later array. Keys only: a string value that happens to read
-            # "assignees" is followed by "," or "}", not ":".
-            if (!match(s, /"assignees"[ \t]*:[ \t]*\{[^{}]*"peoples"[ \t]*:[ \t]*\[/)) exit
-            s = substr(s, RSTART + RLENGTH)
-            if ((i = index(s, "]"))) s = substr(s, 1, i - 1)
-            n = split(s, people, "{")
+            # The list, then its people: person objects hold no nested braces, so with braces in strings shielded,
+            # splitting at "{" gives one person each.
+            n = split(shield(peoples($0)), people, "{")
             for (p = 2; p <= n; p++)
                 if (tolower(field(people[p], "email")) == want) {
                     id = field(people[p], "id")
@@ -427,33 +450,54 @@ env_setting() {
             END { exit !found }'
 }
 
+# Prints the endpoint the server will call for region $1 and base URL $3 ($2 is "set" when a base URL is configured,
+# even an empty one), when it is one of the vendor's; nothing otherwise, and then no request is made: the API key is
+# only ever sent where the server itself would send it, and only to the vendor. Follows the server's startup rules
+# (TicketingOptions and its validation in Program.cs), as install.ps1's Resolve-VendorEndpoint does: the base URL is
+# the built-in US one unless set; a region (trimmed at the ends only, any case, blank meaning unset) replaces that
+# built-in value but not one set to anything else; an unknown region, or a region and base URL naming different
+# endpoints, stops the server. A custom base URL, even an empty one, is never a vendor endpoint.
+vendor_endpoint() {
+    ve_us='https://teamswork.azure-api.net/ticketing/v1'
+    ve_eu='https://ticketing-apim-eu.azure-api.net/ticketing/v1'
+    ve_aus='https://ticketing-apim-aus.azure-api.net/ticketing/v1'
+    if [ "$2" = set ]; then ve_url=$(printf '%s' "$3" | sed 's:/*$::' | tr '[:upper:]' '[:lower:]'); else ve_url=$ve_us; fi
+    ve_region=$(printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | tr '[:lower:]' '[:upper:]')
+    if [ -n "$ve_region" ]; then
+        case "$ve_region" in
+            US) ve_regional=$ve_us ;;
+            EU) ve_regional=$ve_eu ;;
+            AUS) ve_regional=$ve_aus ;;
+            *) return 0 ;;
+        esac
+        [ "$ve_url" != "$ve_us" ] || ve_url=$ve_regional
+        [ "$ve_url" = "$ve_regional" ] || return 0
+    fi
+    for ve in "$ve_us" "$ve_eu" "$ve_aus"; do
+        if [ "$ve_url" = "$ve" ]; then printf '%s' "$ve"; return 0; fi
+    done
+}
+
 # Prints the Entra object ID and display name (JSON-escaped) and where they came from, one per line, for the email
 # $1, so nobody has to know their own GUID: from the help desk's assignee list (read with the API key $2), then from
 # the directory through the Azure CLI. Prints nothing unless exactly one person matches. The key goes only to the
-# vendor's endpoint for the region, never to a configured base URL (which a planted setting could point elsewhere),
+# vendor endpoint vendor_endpoint finds, never to a custom base URL (which a planted setting could point elsewhere),
 # on curl's stdin rather than its command line, and only when it needs no escaping in a URL.
 find_person() {
     fp_email="$1"; fp_key="$2"
     fp_want=$(printf '%s' "$fp_email" | tr '[:upper:]' '[:lower:]')
-    # The region and base URL the server will use: the environment first, then --region, then the secrets file.
-    # A region variable that is set wins even when empty (US), as it does for the server.
+    # The region and base URL the server will see: the environment first (a variable that is set wins even when
+    # empty), then --region, then the secrets file.
     if ! fp_region=$(env_setting 'Ticketing:Region'); then
         fp_region=$REGION
         [ -n "$fp_region" ] || fp_region=$(secret_get 'Ticketing:Region')
     fi
-    # As the server reads it: trimmed, any case, and blank means unset, which is US.
-    fp_region=$(printf '%s' "$fp_region" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
-    # For the base URL, a custom one in the file still skips the lookup even if an empty variable blanks it for the
-    # server: skipping never sends the key anywhere it shouldn't go.
-    fp_custom=$(env_setting 'Ticketing:BaseUrl') || fp_custom=""
-    [ -n "$fp_custom" ] || fp_custom=$(secret_get 'Ticketing:BaseUrl')
-    case "$fp_region" in
-        ''|US) fp_base='https://teamswork.azure-api.net/ticketing/v1' ;;
-        EU) fp_base='https://ticketing-apim-eu.azure-api.net/ticketing/v1' ;;
-        AUS) fp_base='https://ticketing-apim-aus.azure-api.net/ticketing/v1' ;;
-        *) fp_base='' ;;
-    esac
-    if [ -n "$fp_base" ] && [ -z "$fp_custom" ] &&
+    fp_url_set=""
+    if fp_url=$(env_setting 'Ticketing:BaseUrl'); then fp_url_set='set'
+    elif fp_url=$(secret_get 'Ticketing:BaseUrl'); [ -n "$fp_url" ]; then fp_url_set='set'
+    fi
+    fp_base=$(vendor_endpoint "$fp_region" "$fp_url_set" "$fp_url")
+    if [ -n "$fp_base" ] &&
         printf '%s' "$fp_key" | grep -qE '^[A-Za-z0-9._~-]+$'; then
         if fp_json=$(printf 'url = "%s/instance?key=%s&timezone=0"\n' "$fp_base" "$fp_key" | curl -fsS --max-time 20 -K - 2>/dev/null); then
             fp_people=$(printf '%s' "$fp_json" | people_with_email "$fp_want")
