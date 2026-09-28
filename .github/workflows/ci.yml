@@ -67,6 +67,10 @@ jobs:
           $null = [System.Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/install.ps1", [ref]$null, [ref]$errors)
           $errors | ForEach-Object { Write-Host "::error file=scripts/install.ps1,line=$($_.Extent.StartLineNumber)::$($_.Message)" }
           if ($errors) { exit 1 }
+      # The skills and manifest template against Microsoft's upload rules, and a test build of the package.
+      - name: Cowork plugin
+        shell: pwsh
+        run: ./scripts/tests/Test-CoworkPlugin.ps1
 
   # Compiles the templates and their parameter files, which catches a parameter value outside a template's limits
   # before a deployment does. Needs no Azure sign-in.

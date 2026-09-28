@@ -1,0 +1,46 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.28/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.28",
+  "version": "0.1.0",
+  "id": "9cd0e4d4-8b59-4336-a292-3073b2e2e1ba",
+  "developer": {
+    "name": "{{DEVELOPER_NAME}}",
+    "websiteUrl": "{{WEBSITE_URL}}",
+    "privacyUrl": "{{PRIVACY_URL}}",
+    "termsOfUseUrl": "{{TERMS_URL}}"
+  },
+  "name": {
+    "short": "TeamsWork Ticketing",
+    "full": "TeamsWork Ticketing for Copilot Cowork"
+  },
+  "description": {
+    "short": "Triage, update and track help desk tickets",
+    "full": "Work with TeamsWork Ticketing help desk tickets from Copilot Cowork: triage new tickets, review your queue and SLA risks, and add comments, status changes and assignments as yourself."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#2E7D32",
+  "agentSkills": [
+    { "folder": "./skills/ticket-triage" },
+    { "folder": "./skills/my-ticket-queue" },
+    { "folder": "./skills/ticket-update" }
+  ],
+  "agentConnectors": [
+    {
+      "id": "teamswork-ticketing",
+      "displayName": "TeamsWork Ticketing",
+      "description": "Reads and updates help desk tickets as the signed-in user.",
+      "toolSource": {
+        "remoteMcpServer": {
+          "mcpServerUrl": "{{MCP_SERVER_URL}}",
+          "authorization": {
+            "type": "OAuthPluginVault",
+            "referenceId": "{{OAUTH_REFERENCE_ID}}"
+          }
+        }
+      }
+    }
+  ]
+}

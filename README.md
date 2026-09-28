@@ -79,7 +79,8 @@ tests/                           xunit v3 tests incl. an in-process HTTP + Entra
 infra/core.bicep                 Log Analytics, identity, ACR, Key Vault, Container Apps environment
 infra/app.bicep                  The container app (scale-to-zero)
 infra/scripts/                   Entra app registration + Key Vault secret helpers (PowerShell)
-scripts/                         Install scripts for local MCP clients (install.ps1, install.sh)
+scripts/                         Install scripts for local MCP clients (install.ps1, install.sh), Cowork package builder
+plugin/                          Skills and the Copilot Cowork plugin manifest (see docs/cowork.md)
 pipelines/azure-pipelines.yml    Azure DevOps: build, test, audit, deploy
 docs/                            Setup guides: Entra, Copilot Studio, Foundry, stdio, security
 ```
@@ -249,7 +250,8 @@ to stdout, which is the MCP channel.
 
 Visual Studio, config-file formats, and troubleshooting are in [docs/stdio.md](docs/stdio.md). For the Entra-protected remote deployment see
 [docs/setup-entra.md](docs/setup-entra.md), [docs/copilot-studio.md](docs/copilot-studio.md),
-[docs/foundry.md](docs/foundry.md), and [docs/security.md](docs/security.md).
+[docs/foundry.md](docs/foundry.md), [docs/cowork.md](docs/cowork.md) (Copilot Cowork plugin), and
+[docs/security.md](docs/security.md).
 
 ## Build and test
 
