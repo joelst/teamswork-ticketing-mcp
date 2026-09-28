@@ -361,7 +361,8 @@ ask() {
 # Braces and brackets inside strings (a display name such as "A [B]") must not count as structure, so the text is
 # first walked once, honouring quotes and escapes, and those four characters inside strings are swapped for control
 # characters, which valid JSON never has raw in a string. The list's person objects then hold no nested braces or
-# brackets, so the list runs to its first "]" and splits into people at "{"; values get their characters back.
+# brackets, so the list runs to its first "]" and splits into people at "{"; values get their characters back. A null
+# or missing list finds no one.
 people_with_email() {
     tr -d '\n' | awk -v want="$1" '
         function shield(s,   out, c, i, n, quoted, escaped) {
@@ -395,13 +396,12 @@ people_with_email() {
         }
         {
             s = shield($0)
-            # Keys only: a string value that happens to read "assignees" is followed by "," or "}", not ":".
-            if (!match(s, /"assignees"[ \t]*:/)) exit
-            s = substr(s, RSTART)
-            if (!match(s, /"peoples"[ \t]*:/)) exit
-            s = substr(s, RSTART)
-            if (!(i = index(s, "["))) exit
-            s = substr(s, i + 1)
+            # The "peoples" array directly inside the "assignees" object, and nothing else. With braces in strings shielded,
+            # [^{}]* cannot leave that object, so when either is null, missing or nested elsewhere, nothing matches rather
+            # than the search running on to some later array. Keys only: a string value that happens to read
+            # "assignees" is followed by "," or "}", not ":".
+            if (!match(s, /"assignees"[ \t]*:[ \t]*\{[^{}]*"peoples"[ \t]*:[ \t]*\[/)) exit
+            s = substr(s, RSTART + RLENGTH)
             if ((i = index(s, "]"))) s = substr(s, 1, i - 1)
             n = split(s, people, "{")
             for (p = 2; p <= n; p++)
@@ -441,7 +441,8 @@ find_person() {
         fp_region=$REGION
         [ -n "$fp_region" ] || fp_region=$(secret_get 'Ticketing:Region')
     fi
-    fp_region=$(printf '%s' "$fp_region" | tr '[:lower:]' '[:upper:]')
+    # As the server reads it: trimmed, any case, and blank means unset, which is US.
+    fp_region=$(printf '%s' "$fp_region" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
     # For the base URL, a custom one in the file still skips the lookup even if an empty variable blanks it for the
     # server: skipping never sends the key anywhere it shouldn't go.
     fp_custom=$(env_setting 'Ticketing:BaseUrl') || fp_custom=""

@@ -73,6 +73,15 @@ $pat = Find-Person 'pat.lee@contoso.com' 'k' 'EU' ''
 Check 'an email is matched in the assignee list, case aside' ($pat.Id -eq '1111aaaa-1111-1111-1111-111111111111' -and $pat.Name -eq 'Pat Lee')
 Check 'the regional endpoint is asked' ($script:requests[-1] -like 'https://ticketing-apim-eu.azure-api.net/ticketing/v1/instance?key=k&timezone=0')
 Check 'no region means US' ((Find-Person 'pat.lee@contoso.com' 'k' '' '') -and $script:requests[-1] -like 'https://teamswork.azure-api.net/ticketing/v1/*')
+# The server trims the region and treats a blank one as unset (US).
+Check 'a blank region means US, as for the server' ((Find-Person 'pat.lee@contoso.com' 'k' '   ' '') -and $script:requests[-1] -like 'https://teamswork.azure-api.net/ticketing/v1/*')
+Check 'a region with spaces around it is that region' ((Find-Person 'pat.lee@contoso.com' 'k' ' eu ' '') -and $script:requests[-1] -like 'https://ticketing-apim-eu.azure-api.net/ticketing/v1/*')
+$full = $script:answer
+foreach ($shape in '{"item":{"assignees":null}}', '{"item":{"assignees":{"peoples":null}}}', '{"item":{}}') {
+    $script:answer = $shape | ConvertFrom-Json
+    Check "no match with $shape" ($null -eq (Find-Person 'pat.lee@contoso.com' 'k' 'US' ''))
+}
+$script:answer = $full
 Check 'two people with one email is no match' ($null -eq (Find-Person 'sam@contoso.com' 'k' 'US' ''))
 Check 'nobody with the email is no match' ($null -eq (Find-Person 'nobody@contoso.com' 'k' 'US' ''))
 

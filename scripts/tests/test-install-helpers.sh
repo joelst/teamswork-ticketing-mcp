@@ -75,14 +75,30 @@ check 'an unset variable is not set' "$(env -u Ticketing__BaseUrl sh -c "$env_se
 env_setting Ticketing:BaseUrl || echo unset")" 'unset'
 # An empty region variable overrides the file and --region, and the server then uses its default: so must the lookup.
 printf '{\n  "Ticketing:Region": "EU"\n}\n' >"$SECRETS_PATH"
-Ticketing__Region=''; export Ticketing__Region; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
-check 'an empty region variable over a file region means US, as for the server' "$(cat "$tmp/curl-config")" 'url = "https://teamswork.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
-REGION=EU; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
-check 'and over --region too' "$(cat "$tmp/curl-config")" 'url = "https://teamswork.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
+Ticketing__Region=''; export Ticketing__Region; rm -f "$tmp/curl-config"; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
+check 'an empty region variable over a file region means US, as for the server' "$(cat "$tmp/curl-config" 2>/dev/null)" 'url = "https://teamswork.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
+REGION=EU; rm -f "$tmp/curl-config"; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
+check 'and over --region too' "$(cat "$tmp/curl-config" 2>/dev/null)" 'url = "https://teamswork.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
 REGION=""; unset Ticketing__Region
-find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
-check 'without the variable, the file region is used' "$(cat "$tmp/curl-config")" 'url = "https://ticketing-apim-eu.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
+rm -f "$tmp/curl-config"; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
+check 'without the variable, the file region is used' "$(cat "$tmp/curl-config" 2>/dev/null)" 'url = "https://ticketing-apim-eu.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
+# The server trims the region and treats a blank one as unset (US), so the lookup must too.
+# The stub's record is cleared first, so a request that never happens fails these rather than reading an older one.
+Ticketing__Region='   '; export Ticketing__Region; rm -f "$tmp/curl-config"; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
+check 'a blank region means US, as for the server' "$(cat "$tmp/curl-config" 2>/dev/null)" 'url = "https://teamswork.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
+unset Ticketing__Region
+printf '{\n  "Ticketing:Region": " eu "\n}\n' >"$SECRETS_PATH"; rm -f "$tmp/curl-config"; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
+check 'a region with spaces around it is that region' "$(cat "$tmp/curl-config" 2>/dev/null)" 'url = "https://ticketing-apim-eu.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
 : >"$SECRETS_PATH"
+
+# No assignee list, or a null one, finds no one, rather than the search running on into a later people array.
+cp "$tmp/instance.json" "$tmp/instance-full.json"
+later='"customFieldsRight":[{"id":"g","defaultValue":[{"id":"66666666-6666-6666-6666-666666666666","name":"Later","email":"later@contoso.com"}]}],"x":{"peoples":[{"id":"77777777-7777-7777-7777-777777777777","name":"Stray","email":"stray@contoso.com"}]}'
+for shape in '"assignees":null' '"assignees":{"type":"teamsOwner","peoples":null}' '"assignees":{"type":"teamsOwner"}' '"noAssignees":1'; do
+    printf '{"item":{"id":"i",%s,%s}}\n' "$shape" "$later" >"$tmp/instance.json"
+    check "no match with $shape" "$(find_person 'later@contoso.com' 'abc123')$(find_person 'stray@contoso.com' 'abc123')" ''
+done
+cp "$tmp/instance-full.json" "$tmp/instance.json"
 Ticketing__Region=EU; export Ticketing__Region; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
 check 'a region set in the environment picks the endpoint, as it does for the server' "$(cat "$tmp/curl-config")" 'url = "https://ticketing-apim-eu.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
 unset Ticketing__Region

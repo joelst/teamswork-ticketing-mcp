@@ -412,7 +412,9 @@
             EU  = 'https://ticketing-apim-eu.azure-api.net/ticketing/v1'
             AUS = 'https://ticketing-apim-aus.azure-api.net/ticketing/v1'
         }
-        $base = $endpoints[(Get-First $RegionName 'US').Trim().ToUpperInvariant()]
+        # As the server reads it: trimmed, any case, and blank means unset, which is US.
+        $regionKey = if ($RegionName) { $RegionName.Trim().ToUpperInvariant() } else { '' }
+        $base = $endpoints[$(if ($regionKey) { $regionKey } else { 'US' })]
         if ($ApiKey -and $base -and -not $CustomBaseUrl) {
             try {
                 $instance = Invoke-RestMethod -UseBasicParsing -TimeoutSec 20 -Uri "$base/instance?key=$([Uri]::EscapeDataString($ApiKey))&timezone=0"
