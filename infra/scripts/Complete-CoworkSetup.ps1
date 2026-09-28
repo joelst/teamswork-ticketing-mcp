@@ -101,12 +101,22 @@ $tenantId = Invoke-Az @('account', 'show', '--query', 'tenantId', '-o', 'tsv')
 Write-Host "Tenant $tenantId"
 
 if (-not $McpServerUrl -and $ResourceGroup) {
-    $apps = @(Invoke-Az @('containerapp', 'list', '-g', $ResourceGroup, '--query', '[].{name:name, fqdn:properties.configuration.ingress.fqdn}', '-o', 'json') | ConvertFrom-Json)
-    if ($ContainerAppName) { $apps = @($apps | Where-Object name -eq $ContainerAppName) }
-    if ($apps.Count -ne 1 -or -not $apps[0].fqdn) {
-        throw "Expected one container app with ingress in '$ResourceGroup'$(if ($ContainerAppName) { " named '$ContainerAppName'" }), found $($apps.Count). Pass -ContainerAppName or -McpServerUrl."
+    # A lookup that fails (no deployment yet, the resource group missing, Container Apps never used in this
+    # subscription) only leaves the endpoint unknown: the Entra steps don't need it.
+    try {
+        $apps = @(Invoke-Az @('containerapp', 'list', '-g', $ResourceGroup, '--query', '[].{name:name, fqdn:properties.configuration.ingress.fqdn}', '-o', 'json') | ConvertFrom-Json)
+        if ($ContainerAppName) { $apps = @($apps | Where-Object name -eq $ContainerAppName) }
+        if ($apps.Count -eq 1 -and $apps[0].fqdn) { $McpServerUrl = "https://$($apps[0].fqdn)/mcp" }
+        else {
+            Write-Warning "Expected one container app with ingress in '$ResourceGroup'$(if ($ContainerAppName) { " named '$ContainerAppName'" }), found $($apps.Count). Pass -ContainerAppName or -McpServerUrl."
+        }
     }
-    $McpServerUrl = "https://$($apps[0].fqdn)/mcp"
+    catch {
+        $reason = if ("$_" -match 'not registered for the Microsoft\.App') { 'Container Apps has never been used in this subscription, so nothing is deployed yet' }
+            elseif ("$_" -match 'ResourceGroupNotFound|could not be found') { "the resource group '$ResourceGroup' doesn't exist" }
+            else { "$_" }
+        Write-Warning "Couldn't find the container app: $reason. Deploy it first (README > Deploy), or pass -McpServerUrl."
+    }
 }
 if ($McpServerUrl) {
     Write-Host "MCP endpoint $McpServerUrl"
