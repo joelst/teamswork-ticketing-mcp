@@ -248,39 +248,63 @@ public sealed class DateFilterTests
         Assert.Equal("priority", TestFactory.Query(handler.Requests.Single().Uri)["orderBy"]);
     }
 
-    [Fact]
-    public async Task A_truncated_scan_names_the_createdBefore_to_continue_with_in_local_days()
+    private static async Task<string> HintFor(TicketListQuery q, params (string Id, string Created)[] rows)
     {
-        // 03:00 UTC on the 20th is still the 19th in US Central (UTC-5 then).
-        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, Tickets(("a", "2026-09-25T12:00:00Z"), ("b", "2026-09-20T03:00:00Z")));
+        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, Tickets(rows));
+        TicketScan.Result<Ticket> r = await TicketScan.RunAsync(TestFactory.Client(handler), q, t => t, rows.Length, rows.Length, Ct);
+        Assert.True(r.Truncated);
+        return TicketScan.TruncationHint(r, q, TestFactory.Client(new FakeHttpHandler()).TimeZones)!;
+    }
+
+    [Fact]
+    public async Task A_truncated_scan_names_the_createdBefore_to_continue_with()
+    {
+        // 03:00 UTC on the 20th is still the 19th in US Central (UTC-5 then): the 20th's cut, 05:00 UTC, is after it.
         var q = new TicketListQuery { TimezoneOffset = -5 };
 
-        TicketScan.Result<Ticket> r = await TicketScan.RunAsync(TestFactory.Client(handler), q, t => t, 2, 2, Ct);
-        string hint = TicketScan.TruncationHint(r, q, TestFactory.Client(new FakeHttpHandler()).TimeZones)!;
+        string hint = await HintFor(q, ("a", "2026-09-25T12:00:00Z"), ("b", "2026-09-20T03:00:00Z"));
 
-        Assert.True(r.Truncated);
-        Assert.Contains("the oldest checked was created on 2026-09-19", hint, StringComparison.Ordinal);
+        Assert.Contains("the oldest checked was created at 2026-09-20T03:00Z", hint, StringComparison.Ordinal);
         Assert.Contains("createdBefore '2026-09-20'", hint, StringComparison.Ordinal);
     }
 
-    [Theory]
-    [InlineData(null)]          // every ticket checked is from one day: the suggestion would read the same tickets again
-    [InlineData("2026-09-19")]  // the suggestion (the 19th: oldest is the 18th) isn't earlier than the createdBefore given
-    public async Task A_truncated_scan_says_when_a_date_cant_reach_the_rest(string? createdBefore)
+    [Fact]
+    public async Task The_suggested_createdBefore_is_cut_where_the_next_request_really_cuts()
     {
-        (string, string)[] rows = createdBefore is null
-            ? [("a", "2026-09-19T20:00:00Z"), ("b", "2026-09-19T15:00:00Z")]
-            : [("a", "2026-09-19T20:00:00Z"), ("b", "2026-09-18T15:00:00Z")];
-        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, Tickets(rows));
-        var q = new TicketListQuery { TimezoneOffset = -5, CreatedBefore = createdBefore is null ? null : D(createdBefore) };
+        // createdAfter is a summer day, so the next request's one offset is summer time (UTC-5) for both ends. The oldest
+        // ticket, 05:30 UTC on 10 December, is still the 9th in winter time (UTC-6), so a local-day reckoning would say
+        // createdBefore 2026-12-10, whose cut (05:00 UTC, from the summer offset) is before that ticket and would skip the
+        // tickets just older than it. The suggestion is the first date whose real cut is after it.
+        var q = new TicketListQuery { CreatedAfter = D("2026-07-01") };
 
-        TicketScan.Result<Ticket> r = await TicketScan.RunAsync(TestFactory.Client(handler), q, t => t, 2, 2, Ct);
-        string hint = TicketScan.TruncationHint(r, q, TestFactory.Client(new FakeHttpHandler()).TimeZones)!;
+        string hint = await HintFor(q, ("a", "2026-12-15T12:00:00Z"), ("b", "2026-12-10T05:30:00Z"));
 
-        Assert.Contains("a date filter can't reach the rest", hint, StringComparison.Ordinal);
+        Assert.Contains("createdBefore '2026-12-11'", hint, StringComparison.Ordinal);
+        DateTimeOffset cut = TicketDateFilters.CreatedBeforeCut(q, D("2026-12-11"), TestFactory.Client(new FakeHttpHandler()).TimeZones);
+        Assert.True(cut > new DateTimeOffset(2026, 12, 10, 5, 30, 0, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public async Task A_truncated_scan_says_when_the_tickets_checked_are_all_within_a_day()
+    {
+        string hint = await HintFor(new TicketListQuery { TimezoneOffset = -5 }, ("a", "2026-09-19T20:00:00Z"), ("b", "2026-09-19T15:00:00Z"));
+
+        Assert.Contains("would read the same tickets again", hint, StringComparison.Ordinal);
         Assert.DoesNotContain("call again with createdBefore", hint, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task A_truncated_scan_says_when_a_createdBefore_given_leaves_no_earlier_date()
+    {
+        // The checked tickets span two days, but the only safe suggestion (the 19th) is no earlier than the 19th given:
+        // anything earlier would skip unchecked tickets from the 18th. The message says that, not that all were one day.
+        var q = new TicketListQuery { TimezoneOffset = -5, CreatedBefore = D("2026-09-19") };
+
+        string hint = await HintFor(q, ("a", "2026-09-19T02:00:00Z"), ("b", "2026-09-18T15:00:00Z"));
+
+        Assert.Contains("an earlier createdBefore than the '2026-09-19' given would skip tickets", hint, StringComparison.Ordinal);
+        Assert.DoesNotContain("within that day", hint, StringComparison.Ordinal);
+    }
     // ---- The tools ------------------------------------------------------------------------------------------------
 
     [Fact]

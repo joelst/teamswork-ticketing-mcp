@@ -143,10 +143,12 @@ internal static class TicketScan
 
     /// <summary>
     /// The hint shown when a scan stopped before reading every ticket, saying exactly how to reach the rest. The scan
-    /// reads newest created first, so the rest were created no later than the oldest ticket checked: calling again with
-    /// createdBefore set to the day after that one's (in the caller's local days, which the filter uses) continues from
-    /// there, reading that day again so none of it is skipped. That makes progress only while the tickets checked span
-    /// more than one day and the suggestion is earlier than any createdBefore already given; otherwise it says so.
+    /// reads newest created first, so the tickets not checked were created no later than the oldest one that was. The
+    /// suggested createdBefore is the earliest date whose cut, as the next request would really send it (the planner
+    /// decides the offset from the query's earliest day, so no separate local-day arithmetic can disagree with it),
+    /// falls after that ticket: so nothing unchecked is past it. It helps only if the cut is also before the newest
+    /// ticket checked (otherwise the next call reads the same tickets) and earlier than a createdBefore already given
+    /// (otherwise it is the same query); each case that can't page by date says which it is.
     /// </summary>
     public static string? TruncationHint<T>(Result<T> result, TicketListQuery query, TimeZoneOffsetResolver zones)
     {
@@ -163,28 +165,43 @@ internal static class TicketScan
             return checkedText + " Narrow it with the priority or date filters to see the rest.";
         }
 
-        DateOnly oldestDay = LocalDay(oldest, query.TimezoneOffset, zones);
-        DateOnly newestDay = LocalDay(newest, query.TimezoneOffset, zones);
-        if (oldestDay < newestDay && oldestDay < DateOnly.MaxValue)
+        // The cut for a date is that date's midnight in some offset of at most 14 hours either way, so the first date
+        // whose cut is after the oldest ticket is within a day of its UTC date.
+        DateOnly utcDay = DateOnly.FromDateTime(oldest.UtcDateTime);
+        DateOnly? next = null;
+        for (int days = -1; days <= 2 && next is null; days++)
         {
-            DateOnly next = oldestDay.AddDays(1);
-            if (query.CreatedBefore is not DateOnly given || next < given)
+            if (utcDay.DayNumber + days is int number && number >= DateOnly.MinValue.DayNumber && number <= DateOnly.MaxValue.DayNumber &&
+                TicketDateFilters.CreatedBeforeCut(query, DateOnly.FromDayNumber(number), zones) > oldest)
             {
-                return checkedText +
-                    $" They were read newest first; the oldest checked was created on {Day(oldestDay)} (your local day). To continue, " +
-                    $"call again with createdBefore '{Day(next)}' and the same other filters: that day is read again, so none of it is skipped.";
+                next = DateOnly.FromDayNumber(number);
             }
         }
 
+        string oldestText = $"the oldest checked was created at {oldest.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm'Z'", CultureInfo.InvariantCulture)}";
+        if (next is not DateOnly date)
+        {
+            return checkedText + " Narrow it with the priority filter or a search to see the rest.";
+        }
+
+        if (query.CreatedBefore is DateOnly given && date >= given)
+        {
+            return checkedText +
+                $" They were read newest first and {oldestText}, but an earlier createdBefore than the '{Day(given)}' given would " +
+                "skip tickets from that day that weren't checked: narrow it with the priority filter or a search instead.";
+        }
+
+        if (TicketDateFilters.CreatedBeforeCut(query, date, zones) >= newest)
+        {
+            return checkedText +
+                $" They were read newest first and {oldestText}; every ticket checked is from within that day, so a date filter " +
+                "would read the same tickets again: narrow it with the priority filter or a search instead.";
+        }
+
         return checkedText +
-            $" Every ticket checked was created on {Day(oldestDay)} (your local day), so a date filter can't reach the rest: " +
-            "narrow it with the priority filter or a search instead.";
+            $" They were read newest first and {oldestText}. To continue, call again with createdBefore '{Day(date)}' and the " +
+            "same other filters: it starts after that ticket, so none of the rest is skipped (a few are read again).";
     }
 
-    private static DateOnly LocalDay(DateTimeOffset time, int? timezoneOffset, TimeZoneOffsetResolver zones)
-    {
-        int offset = zones.ResolveOn(timezoneOffset, DateOnly.FromDateTime(time.UtcDateTime));
-        return DateOnly.FromDateTime(time.ToOffset(TimeSpan.FromHours(offset)).DateTime);
-    }
-
-    private static string Day(DateOnly day) => day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);}
+    private static string Day(DateOnly day) => day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+}

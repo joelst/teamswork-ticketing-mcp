@@ -83,6 +83,18 @@ internal static class TicketDateFilters
     }
 
     /// <summary>
+    /// The instant a query's createdBefore of <paramref name="day"/> would actually cut at, as this plan would send it:
+    /// the date's 00:00 UTC plus the <c>timezone</c> the whole query gets (which the earliest created or updated day in
+    /// it decides). Tickets created at or before it are included. For advice about a next query, so the advice and the
+    /// request can't disagree.
+    /// </summary>
+    internal static DateTimeOffset CreatedBeforeCut(TicketListQuery q, DateOnly day, TimeZoneOffsetResolver zones)
+    {
+        Plan plan = For(q with { CreatedBefore = day }, zones)!;
+        return new DateTimeOffset(day.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero).AddHours(plan.Timezone);
+    }
+
+    /// <summary>
     /// The date to send for an expected-date filter on <paramref name="day"/>, given the <c>timezone</c> sent: the one
     /// whose boundary (its 00:00 UTC plus that many hours) is nearest noon of the day before, in the instance's zone.
     /// Two can be equally near (12 hours either side), which is the usual case when created or updated filters fix
