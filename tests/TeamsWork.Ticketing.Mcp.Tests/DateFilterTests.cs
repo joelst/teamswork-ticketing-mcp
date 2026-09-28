@@ -87,6 +87,17 @@ public sealed class DateFilterTests
     }
 
     [Fact]
+    public void The_filter_descriptions_state_what_one_shared_offset_costs()
+    {
+        // The two behaviours above that one 'timezone' per request can't avoid are part of the tool contract, so
+        // agents don't rely on more than the server can do.
+        Assert.Contains("daylight-saving change the later end is an hour off", DateFilterText.CreatedBefore, StringComparison.Ordinal);
+        Assert.Contains("daylight-saving change the later end is an hour off", DateFilterText.LastUpdateBefore, StringComparison.Ordinal);
+        Assert.Contains("alongside a created or updated filter", DateFilterText.ExpectedDateAfter, StringComparison.Ordinal);
+        Assert.Contains("alongside a created or updated filter", DateFilterText.ExpectedDateBefore, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_list_without_a_date_filter_keeps_the_offset_as_it_is()
     {
         Dictionary<string, string> query = await SentFor(new TicketListQuery { Priority = "Low", TimezoneOffset = -5 });
