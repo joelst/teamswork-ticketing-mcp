@@ -196,6 +196,91 @@ public sealed class DateFilterTests
     private static DateTimeOffset Boundary(string date, int timezone) =>
         new DateTimeOffset(D(date).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero).AddHours(timezone);
 
+    [Fact]
+    public async Task An_offset_that_expected_dates_alone_dont_use_is_still_checked()
+    {
+        var handler = new FakeHttpHandler();
+
+        await Assert.ThrowsAsync<TicketingApiException>(() =>
+            TestFactory.Client(handler).ListTicketsAsync(new TicketListQuery { ExpectedDateAfter = D("2026-10-15"), TimezoneOffset = 99 }, Ct));
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Dates_at_the_ends_of_the_calendar_are_held_there_rather_than_throwing()
+    {
+        // The tools refuse these; the planner mustn't depend on that for any other caller.
+        Dictionary<string, string> query = await SentFor(new TicketListQuery
+        {
+            ExpectedDateAfter = DateOnly.MinValue,
+            ExpectedDateBefore = DateOnly.MaxValue,
+            CreatedAfter = DateOnly.MinValue,
+        });
+
+        Assert.Equal("0001-01-01", query["expectedDateAfter"]);
+        Assert.Equal("9999-12-30", query["expectedDateBefore"]); // with a created filter too, "before" takes the day before
+    }
+
+    // ---- Paging back by date after a scan stops early -------------------------------------------------------------
+
+    private static string Tickets(params (string Id, string Created)[] rows) =>
+        """{"items":[""" + string.Join(",", rows.Select(r => $$"""{"id":"{{r.Id}}","createdOn":"{{r.Created}}"}""")) + """],"itemCount":10}""";
+
+    [Fact]
+    public async Task A_scan_asks_for_newest_created_first_and_for_creation_times()
+    {
+        // The API's default order isn't by date (checked live), and the hint below depends on it.
+        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, Empty);
+
+        await TicketScan.RunAsync(TestFactory.Client(handler), new TicketListQuery { Select = "id,status" }, t => t, 10, 10, Ct);
+
+        Dictionary<string, string> query = TestFactory.Query(handler.Requests.Single().Uri);
+        Assert.Equal(("createdDateTime", "DESC", "id,status,createdOn"), (query["orderBy"], query["order"], query["select"]));
+    }
+
+    [Fact]
+    public async Task A_scan_keeps_an_order_the_caller_chose()
+    {
+        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, Empty);
+
+        await TicketScan.RunAsync(TestFactory.Client(handler), new TicketListQuery { OrderBy = "priority", Order = "ASC" }, t => t, 10, 10, Ct);
+
+        Assert.Equal("priority", TestFactory.Query(handler.Requests.Single().Uri)["orderBy"]);
+    }
+
+    [Fact]
+    public async Task A_truncated_scan_names_the_createdBefore_to_continue_with_in_local_days()
+    {
+        // 03:00 UTC on the 20th is still the 19th in US Central (UTC-5 then).
+        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, Tickets(("a", "2026-09-25T12:00:00Z"), ("b", "2026-09-20T03:00:00Z")));
+        var q = new TicketListQuery { TimezoneOffset = -5 };
+
+        TicketScan.Result<Ticket> r = await TicketScan.RunAsync(TestFactory.Client(handler), q, t => t, 2, 2, Ct);
+        string hint = TicketScan.TruncationHint(r, q, TestFactory.Client(new FakeHttpHandler()).TimeZones)!;
+
+        Assert.True(r.Truncated);
+        Assert.Contains("the oldest checked was created on 2026-09-19", hint, StringComparison.Ordinal);
+        Assert.Contains("createdBefore '2026-09-20'", hint, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null)]          // every ticket checked is from one day: the suggestion would read the same tickets again
+    [InlineData("2026-09-19")]  // the suggestion (the 19th: oldest is the 18th) isn't earlier than the createdBefore given
+    public async Task A_truncated_scan_says_when_a_date_cant_reach_the_rest(string? createdBefore)
+    {
+        (string, string)[] rows = createdBefore is null
+            ? [("a", "2026-09-19T20:00:00Z"), ("b", "2026-09-19T15:00:00Z")]
+            : [("a", "2026-09-19T20:00:00Z"), ("b", "2026-09-18T15:00:00Z")];
+        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, Tickets(rows));
+        var q = new TicketListQuery { TimezoneOffset = -5, CreatedBefore = createdBefore is null ? null : D(createdBefore) };
+
+        TicketScan.Result<Ticket> r = await TicketScan.RunAsync(TestFactory.Client(handler), q, t => t, 2, 2, Ct);
+        string hint = TicketScan.TruncationHint(r, q, TestFactory.Client(new FakeHttpHandler()).TimeZones)!;
+
+        Assert.Contains("a date filter can't reach the rest", hint, StringComparison.Ordinal);
+        Assert.DoesNotContain("call again with createdBefore", hint, StringComparison.Ordinal);
+    }
+
     // ---- The tools ------------------------------------------------------------------------------------------------
 
     [Fact]

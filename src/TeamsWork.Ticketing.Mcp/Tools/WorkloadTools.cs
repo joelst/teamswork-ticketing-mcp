@@ -93,7 +93,7 @@ public sealed class WorkloadTools
 
             TicketScan.Result<TicketSummary> scan = await TicketScan.RunAsync(
                 _client, query, t => Mine(t) ? TicketSummary.From(t) : null, _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
-            return Summaries(scan, max);
+            return Summaries(scan, max, query);
         });
     }
 
@@ -170,7 +170,7 @@ public sealed class WorkloadTools
                 FullTicketPageSize,
                 cancellationToken);
 
-            ScanResult<TicketSummary> result = Summaries(scan, max);
+            ScanResult<TicketSummary> result = Summaries(scan, max, query);
             return scan.Scanned > 0 && !anyFlags
                 ? result with
                 {
@@ -270,7 +270,7 @@ public sealed class WorkloadTools
                 .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            return new CountResult(by, groups, scan.Scanned, scan.Total, scan.Truncated, TicketScan.TruncationHint(scan));
+            return new CountResult(by, groups, scan.Scanned, scan.Total, scan.Truncated, TicketScan.TruncationHint(scan, query, _client.TimeZones));
         });
     }
 
@@ -321,11 +321,11 @@ public sealed class WorkloadTools
         return Guid.TryParse(id, out Guid theirs) && Guid.TryParse(me.Id, out Guid mine) ? theirs == mine : string.Equals(id, me.Id.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
-    private static ScanResult<TicketSummary> Summaries(TicketScan.Result<TicketSummary> scan, int max)
+    private ScanResult<TicketSummary> Summaries(TicketScan.Result<TicketSummary> scan, int max, TicketListQuery query)
     {
         List<TicketSummary> items = scan.Matches.Take(max).ToList();
         string? more = scan.Matches.Count > max ? $"{scan.Matches.Count} tickets matched; raise 'limit' or add filters to see more." : null;
-        string? hint = string.Join(" ", new[] { TicketScan.TruncationHint(scan), more }.OfType<string>()) is { Length: > 0 } both ? both : null;
+        string? hint = string.Join(" ", new[] { TicketScan.TruncationHint(scan, query, _client.TimeZones), more }.OfType<string>()) is { Length: > 0 } both ? both : null;
         return new ScanResult<TicketSummary>(items, items.Count, scan.Matches.Count, scan.Scanned, scan.Total, scan.Truncated, hint);
     }
 

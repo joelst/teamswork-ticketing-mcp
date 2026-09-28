@@ -49,6 +49,10 @@ internal static class TicketDateFilters
             return null;
         }
 
+        // The caller's offset is checked even where it goes unused (expected dates alone), as on every other request, so
+        // an invalid one is refused rather than silently ignored.
+        _ = zones.Resolve(q.TimezoneOffset);
+
         int timezone;
         if (instants.Count > 0)
         {
@@ -93,12 +97,20 @@ internal static class TicketDateFilters
         int days = hours % 24 == 12 || hours % 24 == -12
             ? (int)(after ? Math.Ceiling(hours / 24.0) : Math.Floor(hours / 24.0))
             : (int)Math.Round(hours / 24.0);
-        return day.AddDays(days);
+        return Shift(day, days);
     }
 
     /// <summary>Hours from <paramref name="day"/>'s 00:00 UTC to noon of the day before in the instance's zone.</summary>
     private static int NoonBefore(DateOnly day, TimeZoneOffsetResolver zones) =>
-        -12 - zones.DefaultOffsetAt(day.AddDays(-1), new TimeOnly(12, 0));
+        -12 - zones.DefaultOffsetAt(Shift(day, -1), new TimeOnly(12, 0));
+
+    /// <summary>
+    /// <paramref name="day"/> moved by <paramref name="days"/>, held at the ends of the calendar rather than throwing: a
+    /// boundary a day past the first or last date there is has no ticket beyond it anyway. The tools refuse such dates
+    /// already; this keeps the rule true for any other caller.
+    /// </summary>
+    private static DateOnly Shift(DateOnly day, int days) =>
+        DateOnly.FromDayNumber(Math.Clamp(day.DayNumber + days, DateOnly.MinValue.DayNumber, DateOnly.MaxValue.DayNumber));
 
     private static void Add(List<(string, DateOnly)> filters, string name, DateOnly? day)
     {
