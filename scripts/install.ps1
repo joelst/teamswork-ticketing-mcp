@@ -404,11 +404,12 @@
     # object, as .NET refuses any other root. An array isn't unrolled into its items (PowerShell 7 would make a
     # one-item array look like an object without -NoEnumerate; Windows PowerShell 5.1 never unrolls it and has no such
     # switch), and a scalar would otherwise be copied in by its properties (a string's Length).
+    # A JSON null is refused like any other non-object; only a file with no text at all is read as empty.
     function ConvertFrom-SecretsJson([string] $Text) {
-        if (-not $Text) { return $null }
+        if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
         $parsed = if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('NoEnumerate')) { $Text | ConvertFrom-Json -NoEnumerate } else { $Text | ConvertFrom-Json }
-        if ($null -ne $parsed -and $parsed -isnot [System.Management.Automation.PSCustomObject]) {
-            throw 'it must hold one JSON object ({ "Ticketing:...": "..." }), not an array or a single value'
+        if ($parsed -isnot [System.Management.Automation.PSCustomObject]) {
+            throw 'it must hold one JSON object ({ "Ticketing:...": "..." }), not null, an array or a single value'
         }
         return $parsed
     }
