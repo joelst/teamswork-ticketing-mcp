@@ -375,6 +375,53 @@
         finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
     }
 
+    # Whether a secrets file, as ConvertFrom-Json read it, has a nested object or array as a value. Checked per
+    # property, since piping the values would flatten an array into its items, and against the real PSCustomObject
+    # type: [pscustomobject] is [psobject], which PowerShell 7 also wraps plain strings in, so it matched every value.
+    function Test-NestedSecrets($Parsed) {
+        if (-not $Parsed) { return $false }
+        foreach ($property in $Parsed.PSObject.Properties) {
+            if ($property.Value -is [System.Management.Automation.PSCustomObject] -or $property.Value -is [array]) { return $true }
+        }
+        return $false
+    }
+
+    # The Entra object ID and display name for an email, so nobody has to know their own GUID: from the help desk's
+    # assignee list (read with the API key just entered), then from the directory through the Azure CLI. $null when
+    # neither has exactly one match. The key is sent only to the vendor's endpoint for the region, never to a
+    # configured base URL, which a planted setting could point elsewhere; and as it is in the request URL, a failure
+    # is reported without the error text.
+    function Find-Person([string] $Email, [string] $ApiKey, [string] $RegionName, [string] $CustomBaseUrl) {
+        $endpoints = @{
+            US  = 'https://teamswork.azure-api.net/ticketing/v1'
+            EU  = 'https://ticketing-apim-eu.azure-api.net/ticketing/v1'
+            AUS = 'https://ticketing-apim-aus.azure-api.net/ticketing/v1'
+        }
+        $base = $endpoints[(Get-First $RegionName 'US').Trim().ToUpperInvariant()]
+        if ($ApiKey -and $base -and -not $CustomBaseUrl) {
+            try {
+                $instance = Invoke-RestMethod -UseBasicParsing -TimeoutSec 20 -Uri "$base/instance?key=$([Uri]::EscapeDataString($ApiKey))&timezone=0"
+                $people = @($instance.item.assignees.peoples | Where-Object { $_.id -and $_.email -and $_.email.Trim() -ieq $Email })
+                if ($people.Count -eq 1) { return [pscustomobject]@{ Id = $people[0].id; Name = $people[0].name; Source = "the help desk's assignee list" } }
+            }
+            catch { Write-Host "    couldn't read the help desk's assignee list" }
+        }
+
+        $az = Get-Command az -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($az) {
+            $ErrorActionPreference = 'Continue'
+            # Guests, or an account without directory read rights, get an error here; that just means no match.
+            $json = & $az.Source ad user show --id $Email --query '{id:id,name:displayName}' -o json 2>$null
+            $found = $LASTEXITCODE -eq 0 -and $json
+            $ErrorActionPreference = 'Stop'
+            if ($found) {
+                $user = ($json -join "`n") | ConvertFrom-Json
+                if ($user.id) { return [pscustomobject]@{ Id = $user.id; Name = $user.name; Source = 'the directory (Azure CLI)' } }
+            }
+        }
+        return $null
+    }
+
     function Set-Secrets {
         Write-Step "Configuring $SecretsPath"
         $secrets = [ordered]@{}
@@ -385,7 +432,7 @@
             catch { throw "$SecretsPath is not valid JSON ($($_.Exception.Message)). Fix or delete it, then run the installer again." }
             # A nested object ("Ticketing": { ... }) would sit beside the flat keys written below, and .NET refuses to
             # load a file where both forms name the same setting.
-            if ($existing -and ($existing.PSObject.Properties.Value | Where-Object { $_ -is [pscustomobject] -or $_ -is [array] })) {
+            if (Test-NestedSecrets $existing) {
                 throw "$SecretsPath uses nested objects. Rewrite it with flat ""Ticketing:..."" keys (see docs/stdio.md), or run again with -SkipSecrets."
             }
             # Windows PowerShell 5.1 has no ConvertFrom-Json -AsHashtable, so copy the properties across. [ordered]
@@ -411,10 +458,35 @@
             if ($hasKey) { break }
         }
 
+        # The email first, since it's the one detail people know: the ID and name are then looked up for it and shown
+        # together, so a default from another account (say, the one signed in to the Azure CLI) is easy to spot.
         Write-Host 'Ticket changes are attributed to this account (use your own):'
-        $secrets['Ticketing:ServiceAccount:Id'] = Read-Value '  Entra object ID' (Get-First $secrets['Ticketing:ServiceAccount:Id'] $signedIn.id)
-        $secrets['Ticketing:ServiceAccount:Name'] = Read-Value '  Display name' (Get-First $secrets['Ticketing:ServiceAccount:Name'] $signedIn.name)
-        $secrets['Ticketing:ServiceAccount:Email'] = Read-Value '  Email' (Get-First $secrets['Ticketing:ServiceAccount:Email'] $signedIn.email)
+        $storedEmail = $secrets['Ticketing:ServiceAccount:Email']
+        $email = Read-Value '  Email' (Get-First $storedEmail $signedIn.email)
+        # The file's ID and name belong to its email; for any other, they come from the lookup, never the old file.
+        $sameAccount = $storedEmail -and $storedEmail.Trim() -ieq $email -and $secrets['Ticketing:ServiceAccount:Id']
+        if ($sameAccount) {
+            $idDefault = $secrets['Ticketing:ServiceAccount:Id']
+            $nameDefault = $secrets['Ticketing:ServiceAccount:Name']
+        }
+        else {
+            $found = Find-Person $email $secrets['Ticketing:ApiKey'] (Get-First $Region $secrets['Ticketing:Region']) (Get-First $secrets['Ticketing:BaseUrl'] $env:Ticketing__BaseUrl)
+            if (-not $found -and $signedIn.id -and $signedIn.email -and $signedIn.email.Trim() -ieq $email) {
+                $found = [pscustomobject]@{ Id = $signedIn.id; Name = $signedIn.name; Source = 'your Azure CLI sign-in' }
+            }
+            if ($found) {
+                Write-Host "    found $($found.Name) <$email> in $($found.Source)"
+            }
+            else {
+                Write-Host ("    $email isn't in the assignee list or the directory. Your Entra object ID is on your user page in " +
+                    'the Entra admin center (Users > your name > Object ID), or run: az ad signed-in-user show --query id -o tsv')
+            }
+            $idDefault = $found.Id
+            $nameDefault = $found.Name
+        }
+        $secrets['Ticketing:ServiceAccount:Email'] = $email
+        $secrets['Ticketing:ServiceAccount:Name'] = Read-Value '  Display name' $nameDefault
+        $secrets['Ticketing:ServiceAccount:Id'] = Read-Value '  Entra object ID' $idDefault
         if ($Region) { $secrets['Ticketing:Region'] = $Region }
 
         New-Item -ItemType Directory -Force -Path (Split-Path $SecretsPath) | Out-Null

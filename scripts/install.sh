@@ -354,6 +354,60 @@ ask() {
     done
 }
 
+# Reads the instance JSON on stdin and prints "id<TAB>name" (still JSON-escaped) for each person object whose email
+# is $1, compared in lower case. People objects hold no nested braces, so splitting at "{" puts each on a line.
+people_with_email() {
+    tr '{' '\n' | awk -v want="$1" '
+        function field(s, k,   re, m) {
+            re = "\"" k "\"[ \t]*:[ \t]*\"([^\"\\\\]|\\\\.)*\""
+            if (!match(s, re)) return ""
+            m = substr(s, RSTART, RLENGTH)
+            sub("^\"" k "\"[ \t]*:[ \t]*\"", "", m)
+            sub("\"$", "", m)
+            return m
+        }
+        { if (tolower(field($0, "email")) == want) { i = field($0, "id"); if (i != "") printf "%s\t%s\n", i, field($0, "name") } }'
+}
+
+# Prints the Entra object ID and display name (JSON-escaped) and where they came from, one per line, for the email
+# $1, so nobody has to know their own GUID: from the help desk's assignee list (read with the API key $2), then from
+# the directory through the Azure CLI. Prints nothing unless exactly one person matches. The key goes only to the
+# vendor's endpoint for the region, never to a configured base URL (which a planted setting could point elsewhere),
+# on curl's stdin rather than its command line, and only when it needs no escaping in a URL.
+find_person() {
+    fp_email="$1"; fp_key="$2"
+    fp_want=$(printf '%s' "$fp_email" | tr '[:upper:]' '[:lower:]')
+    fp_region=$REGION
+    [ -n "$fp_region" ] || fp_region=$(secret_get 'Ticketing:Region' | tr '[:lower:]' '[:upper:]')
+    case "$fp_region" in
+        ''|US) fp_base='https://teamswork.azure-api.net/ticketing/v1' ;;
+        EU) fp_base='https://ticketing-apim-eu.azure-api.net/ticketing/v1' ;;
+        AUS) fp_base='https://ticketing-apim-aus.azure-api.net/ticketing/v1' ;;
+        *) fp_base='' ;;
+    esac
+    if [ -n "$fp_base" ] && [ -z "$(secret_get 'Ticketing:BaseUrl')" ] && [ -z "${Ticketing__BaseUrl:-}" ] &&
+        printf '%s' "$fp_key" | grep -qE '^[A-Za-z0-9._~-]+$'; then
+        if fp_json=$(printf 'url = "%s/instance?key=%s&timezone=0"\n' "$fp_base" "$fp_key" | curl -fsS --max-time 20 -K - 2>/dev/null); then
+            fp_people=$(printf '%s' "$fp_json" | people_with_email "$fp_want")
+            if [ -n "$fp_people" ] && [ "$(printf '%s\n' "$fp_people" | cut -f1 | sort -u | wc -l | tr -d ' ')" = 1 ]; then
+                printf '%s\n' "$fp_people" | head -n1 | cut -f1
+                printf '%s\n' "$fp_people" | head -n1 | cut -f2
+                echo "the help desk's assignee list"
+                return
+            fi
+        else
+            echo "    couldn't read the help desk's assignee list" >/dev/tty
+        fi
+    fi
+    # Guests, or an account without directory read rights, get an error here; that just means no match.
+    if have az && fp_me=$(az ad user show --id "$fp_email" --query '[id, displayName]' -o tsv 2>/dev/null | tr -d '\r') &&
+        [ -n "$(printf '%s\n' "$fp_me" | sed -n 1p)" ]; then
+        printf '%s\n' "$fp_me" | sed -n 1p
+        json_escape "$(printf '%s\n' "$fp_me" | sed -n 2p)"; echo
+        echo 'the directory (Azure CLI)'
+    fi
+}
+
 set_secrets() {
     step "Configuring $SECRETS_PATH"
     # In a subshell: dash exits the whole shell when a redirect on a builtin fails.
@@ -368,13 +422,14 @@ set_secrets() {
     name=$(secret_get 'Ticketing:ServiceAccount:Name')
     email=$(secret_get 'Ticketing:ServiceAccount:Email')
 
-    # Offer the signed-in Azure CLI account as the default identity, when there is one.
+    # The signed-in Azure CLI account, offered as the default email when the file has none.
+    me_id=""; me_name=""; me_email=""
     if [ -z "$id" ] && have az; then
         # One value per line. Strip CRs, which the Windows az prints when it is reached from WSL.
         if me=$(az ad signed-in-user show --query '[id, displayName, mail || userPrincipalName]' -o tsv 2>/dev/null | tr -d '\r'); then
-            id=$(json_escape "$(printf '%s\n' "$me" | sed -n 1p)")
-            [ -n "$name" ] || name=$(json_escape "$(printf '%s\n' "$me" | sed -n 2p)")
-            [ -n "$email" ] || email=$(json_escape "$(printf '%s\n' "$me" | sed -n 3p)")
+            me_id=$(json_escape "$(printf '%s\n' "$me" | sed -n 1p)")
+            me_name=$(json_escape "$(printf '%s\n' "$me" | sed -n 2p)")
+            me_email=$(json_escape "$(printf '%s\n' "$me" | sed -n 3p)")
         fi
     fi
 
@@ -396,10 +451,31 @@ set_secrets() {
         if [ -n "$key" ]; then break; fi
     done
 
+    # The email first, since it's the one detail people know: the ID and name are then looked up for it and shown
+    # together, so a default from another account (say, the one signed in to the Azure CLI) is easy to spot. The
+    # file's ID and name belong to its email; for any other, they come from the lookup, never the old file.
     echo 'Ticket changes are attributed to this account (use your own):' >/dev/tty
-    id=$(ask '  Entra object ID' "$id")
+    stored_email=$email
+    new_email=$(ask '  Email' "${stored_email:-$me_email}")
+    lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+    if [ -n "$stored_email" ] && [ -n "$id" ] && [ "$(lower "$stored_email")" = "$(lower "$new_email")" ]; then
+        : # the same account: keep its ID and name as the defaults
+    else
+        found=$(find_person "$new_email" "$key")
+        if [ -z "$found" ] && [ -n "$me_id" ] && [ "$(lower "$me_email")" = "$(lower "$new_email")" ]; then
+            found=$(printf '%s\n%s\n%s' "$me_id" "$me_name" 'your Azure CLI sign-in')
+        fi
+        id=$(printf '%s\n' "$found" | sed -n 1p)
+        name=$(printf '%s\n' "$found" | sed -n 2p)
+        if [ -n "$id" ]; then
+            printf '    found %s <%s> in %s\n' "$name" "$new_email" "$(printf '%s\n' "$found" | sed -n 3p)" >/dev/tty
+        else
+            printf "    %s isn't in the assignee list or the directory. Your Entra object ID is on your user page in the Entra admin center (Users > your name > Object ID), or run: az ad signed-in-user show --query id -o tsv\n" "$new_email" >/dev/tty
+        fi
+    fi
+    email=$new_email
     name=$(ask '  Display name' "$name")
-    email=$(ask '  Email' "$email")
+    id=$(ask '  Entra object ID' "$id")
 
     # Settings written below, so their old lines aren't kept too.
     written='ApiKey|ServiceAccount:Id|ServiceAccount:Name|ServiceAccount:Email'

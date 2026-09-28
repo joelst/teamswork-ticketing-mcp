@@ -30,8 +30,10 @@ The install script is the quickest way to set up one machine. It:
    - Windows: `%LOCALAPPDATA%\Programs\teamswork-ticketing-mcp\TeamsWork.Ticketing.Mcp.exe`
    - macOS/Linux: `~/.local/share/teamswork-ticketing-mcp/TeamsWork.Ticketing.Mcp`
 3. Asks for the Ticketing API key (hidden input) and the account that ticket changes are attributed to, and saves
-   them to the [user-secrets file](#settings). If the Azure CLI is signed in, your Entra object ID, name, and email are
-   offered as defaults. Press Enter at any prompt to keep the current value.
+   them to the [user-secrets file](#settings). It asks for your email first, then looks up your name and Entra object
+   ID for it (in the help desk's assignee list, using the key just entered, or in the directory through the Azure CLI)
+   and shows them as `Name <email>`, so you never need to know your own GUID. Press Enter at any prompt to keep the
+   value offered.
 4. Starts the server once over stdio to check that it comes up. It also lists, by name only, any `Ticketing__*`
    environment variables that are set, since for clients that pass them on to the server they override what was
    just saved (see [Settings](#settings)).
