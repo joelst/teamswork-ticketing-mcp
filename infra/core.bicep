@@ -46,7 +46,14 @@ var logAnalyticsName = '${base}-law'
 var identityName = '${base}-id'
 var containerAppsEnvName = '${base}-cae'
 var registryName = toLower(replace('${namePrefix}${environmentName}acr${suffix}', '-', ''))
-var keyVaultName = take('${base}-kv-${suffix}', 24)
+// Key Vault names are at most 24 characters and can't end in a hyphen. Cutting '<base>-kv-<suffix>' to 24 ends in the
+// hyphen when base is 20 characters, so that one case is squeezed instead (hyphens removed, cut to 12, eight suffix
+// characters). Every other length keeps the name it has always had, since a new name would mean a new, empty vault.
+// A long base keeps little or none of the suffix (none at 21), so prefer prefixes that keep base to 16 or fewer.
+var keyVaultNameCut = take('${base}-kv-${suffix}', 24)
+var keyVaultName = endsWith(keyVaultNameCut, '-')
+  ? '${take(toLower(replace(base, '-', '')), 12)}-kv-${take(suffix, 8)}'
+  : keyVaultNameCut
 
 // Built-in role definition IDs
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'

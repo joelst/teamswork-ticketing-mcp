@@ -15,12 +15,14 @@ public sealed class TicketTools
 {
     private readonly TicketingClient _client;
     private readonly IActingUserProvider _actingUser;
+    private readonly InstanceCache _cache;
     private readonly TicketingOptions _options;
 
-    public TicketTools(TicketingClient client, IActingUserProvider actingUser, IOptions<TicketingOptions> options)
+    public TicketTools(TicketingClient client, IActingUserProvider actingUser, InstanceCache cache, IOptions<TicketingOptions> options)
     {
         _client = client;
         _actingUser = actingUser;
+        _cache = cache;
         _options = options.Value;
     }
 
@@ -103,19 +105,20 @@ public sealed class TicketTools
 
     [McpServerTool(Name = "create_ticket", Title = "Create ticket", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description(
-        "Create a new ticket. Only 'title' is required; the requestor defaults to the signed-in user. Call get_instance first when you " +
-        "need custom field IDs or the assignee list, and list_tag_categories for tag IDs. 'expectedDate' must be a plain YYYY-MM-DD date. " +
+        "Create a new ticket. Only 'title' is required; the requestor defaults to the signed-in user. People can be given by email or name " +
+        "alone (looked up in the assignee list), tags by category name, and custom fields by title; get_instance and list_tag_categories " +
+        "list what exists. Call find_similar_tickets first to avoid filing a duplicate. 'expectedDate' must be a plain YYYY-MM-DD date. " +
         "The ticket is recorded as created by the authenticated caller; the agent cannot choose a different actor.")]
     public Task<string> CreateTicket(
         [Description("Short ticket title.")] string title,
         [Description("Plain-text description (line breaks preserved). Use descriptionHtml instead for formatted content.")] string? description = null,
         [Description("HTML description (formatting, lists, tables, links). Ignored when 'description' is also supplied. Script, forms, images, and inline styles are removed; use add_ticket_link_attachments for screenshots.")] string? descriptionHtml = null,
-        [Description("Person raising the ticket. Defaults to the signed-in user. To trigger the email-to-ticket flow, set id, name, and email all to the requestor's email address.")] UserRef? requestor = null,
-        [Description("Person to assign the ticket to (from get_instance assignees).")] UserRef? assignee = null,
+        [Description("Person raising the ticket. Defaults to the signed-in user. An email or name alone is looked up in the assignee list; for anyone else pass id, name, and email. To trigger the email-to-ticket flow, set id, name, and email all to the requestor's email address.")] UserRef? requestor = null,
+        [Description("Person to assign the ticket to: an email or name from the get_instance assignee list is enough.")] UserRef? assignee = null,
         [Description("Priority: Low, Medium, Important, or Urgent.")] string? priority = null,
         [Description("Expected completion date in YYYY-MM-DD form only.")] string? expectedDate = null,
         [Description("Tags to apply.")] IReadOnlyList<TagRef>? tags = null,
-        [Description("Custom field values keyed by the 36-character custom field ID from get_instance. Value type depends on the field: string for text/date, boolean for toggle, array of option keys for list, array of {id,name,email} for people picker.")] Dictionary<string, JsonElement>? customFields = null,
+        [Description("Custom field values keyed by the custom field ID or title from get_instance. Value type depends on the field: string for text/date, boolean for toggle, array of option keys (or option texts) for list, array of {id,name,email} for people picker. Values are checked against the field definitions.")] Dictionary<string, JsonElement>? customFields = null,
         [Description("Return description_HTML in the created ticket.")] bool includeHtml = false,
         [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
@@ -123,22 +126,64 @@ public sealed class TicketTools
         return ToolRunner.RunAsync(async () =>
         {
             ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);
+            string validTitle = ToolValidation.RequireText(title, "title", 500);
+            string? validDescription = ToolValidation.OptionalText(description, "description");
+            string? validHtml = validDescription is null ? ToolValidation.OptionalHtml(descriptionHtml, "descriptionHtml") : null;
+            string? validPriority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities);
+            string? validDate = ToolValidation.OptionalDateOnly(expectedDate, "expectedDate");
+            CheckSizes(tags, customFields);
 
+            var lookup = new InstanceLookup(_client, _cache, timezoneOffset, cancellationToken, _options.ExternalEmailDomainSet());
             var ticket = new TicketWrite
             {
-                Title = ToolValidation.RequireText(title, "title", 500),
-                Description = ToolValidation.OptionalText(description, "description"),
-                DescriptionHtml = description is null ? ToolValidation.OptionalHtml(descriptionHtml, "descriptionHtml") : null,
-                Requestor = requestor?.ToTicketUser("requestor") ?? actor.ToTicketUser(),
-                Assignee = assignee?.ToTicketUser("assignee"),
-                Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
-                ExpectedDate = ToolValidation.OptionalDateOnly(expectedDate, "expectedDate"),
-                Tags = ValidateTags(tags),
-                CustomFields = ValidateCustomFields(customFields),
+                Title = validTitle,
+                Description = validDescription,
+                DescriptionHtml = validHtml,
+                Requestor = await lookup.PersonAsync(requestor, "requestor", assigneeOnly: false) ?? actor.ToTicketUser(),
+                Assignee = await lookup.PersonAsync(assignee, "assignee", assigneeOnly: true),
+                Priority = validPriority,
+                ExpectedDate = validDate,
+                Tags = await lookup.TagsAsync(tags),
+                CustomFields = await lookup.CustomFieldsAsync(customFields),
             };
 
             Ticket created = await _client.CreateTicketAsync(ticket, actor.ToTicketUser(), includeHtml, timezoneOffset, cancellationToken);
-            return new WriteResult<Ticket>(created, ActedAs.From(actor));
+
+            // The live API ignores priority on create (the ticket gets the instance default) but honours it on update.
+            // The ticket exists from here on, so a failure setting the priority must not look like a failed create:
+            // an agent that saw an error would create the ticket again.
+            string? warning = null;
+            if (validPriority is not null && !string.Equals(created.Priority, validPriority, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!Guid.TryParse(created.Id, out Guid createdId))
+                {
+                    warning = $"The ticket was created, but its priority is {created.Priority ?? "unset"} rather than {validPriority}, and the " +
+                              "API returned no ID to correct it with. Don't create it again; find it with list_tickets and use update_ticket.";
+                }
+                else
+                {
+                    // The ticket exists now, so the follow-up doesn't use the caller's token: a caller that gives up here would
+                    // otherwise get an error for a ticket that was created, and might create it again. Its own time limit,
+                    // the longest the client's retries can take, keeps the call from hanging without cutting a retry short.
+                    // Settings that pass validation can make that longer than a timer can wait (about 49 days), so it is
+                    // capped there, and the token is made inside the try so nothing here can fail a created ticket.
+                    try
+                    {
+                        using var followUp = new CancellationTokenSource(TicketingClient.TimerLimit(TicketingClient.LongestRequest(_options)));
+                        created = await _client.UpdateTicketAsync(createdId, new TicketWrite { Priority = validPriority }, actor.ToTicketUser(), includeHtml, timezoneOffset, followUp.Token);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Only the API's own messages are written for the agent; anything else stays generic.
+                        string reason = ex is TicketingApiException api ? api.Message : ex is OperationCanceledException ? "it took too long." : "the request failed.";
+                        string which = created.TicketNo is int no ? $"Ticket #{no}" : $"Ticket {created.Id}";
+                        warning = $"{which} was created, but setting its priority to {validPriority} failed: {reason} " +
+                                  $"Don't create it again; call update_ticket with ticketId {created.Id} and the priority.";
+                    }
+                }
+            }
+
+            return new WriteResult<Ticket>(created, ActedAs.From(actor), warning);
         });
     }
 
@@ -151,12 +196,12 @@ public sealed class TicketTools
         [Description("New title.")] string? title = null,
         [Description("New plain-text description.")] string? description = null,
         [Description("New HTML description (formatting, lists, tables, links). Ignored when 'description' is also supplied. Script, forms, images, and inline styles are removed; use add_ticket_link_attachments for screenshots.")] string? descriptionHtml = null,
-        [Description("New requestor.")] UserRef? requestor = null,
-        [Description("New assignee (from get_instance assignees).")] UserRef? assignee = null,
+        [Description("New requestor. An email or name alone is looked up in the assignee list; for anyone else pass id, name, and email.")] UserRef? requestor = null,
+        [Description("New assignee: an email or name from the get_instance assignee list is enough.")] UserRef? assignee = null,
         [Description("New priority: Low, Medium, Important, or Urgent.")] string? priority = null,
         [Description("New expected date in YYYY-MM-DD form only.")] string? expectedDate = null,
-        [Description("Replacement tag list.")] IReadOnlyList<TagRef>? tags = null,
-        [Description("Custom field values to set, keyed by custom field ID from get_instance.")] Dictionary<string, JsonElement>? customFields = null,
+        [Description("Replacement tag list (category by ID or name).")] IReadOnlyList<TagRef>? tags = null,
+        [Description("Custom field values to set, keyed by custom field ID or title from get_instance. Values are checked against the field definitions.")] Dictionary<string, JsonElement>? customFields = null,
         [Description("Return description_HTML in the updated ticket.")] bool includeHtml = false,
         [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
@@ -165,18 +210,25 @@ public sealed class TicketTools
         {
             Guid id = ToolValidation.RequireGuid(ticketId, "ticketId");
             ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);
+            string? validTitle = ToolValidation.OptionalText(title, "title", 500);
+            string? validDescription = ToolValidation.OptionalText(description, "description");
+            string? validHtml = validDescription is null ? ToolValidation.OptionalHtml(descriptionHtml, "descriptionHtml") : null;
+            string? validPriority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities);
+            string? validDate = ToolValidation.OptionalDateOnly(expectedDate, "expectedDate");
+            CheckSizes(tags, customFields);
 
+            var lookup = new InstanceLookup(_client, _cache, timezoneOffset, cancellationToken, _options.ExternalEmailDomainSet());
             var ticket = new TicketWrite
             {
-                Title = ToolValidation.OptionalText(title, "title", 500),
-                Description = ToolValidation.OptionalText(description, "description"),
-                DescriptionHtml = description is null ? ToolValidation.OptionalHtml(descriptionHtml, "descriptionHtml") : null,
-                Requestor = requestor?.ToTicketUser("requestor"),
-                Assignee = assignee?.ToTicketUser("assignee"),
-                Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
-                ExpectedDate = ToolValidation.OptionalDateOnly(expectedDate, "expectedDate"),
-                Tags = ValidateTags(tags),
-                CustomFields = ValidateCustomFields(customFields),
+                Title = validTitle,
+                Description = validDescription,
+                DescriptionHtml = validHtml,
+                Requestor = await lookup.PersonAsync(requestor, "requestor", assigneeOnly: false),
+                Assignee = await lookup.PersonAsync(assignee, "assignee", assigneeOnly: true),
+                Priority = validPriority,
+                ExpectedDate = validDate,
+                Tags = await lookup.TagsAsync(tags),
+                CustomFields = await lookup.CustomFieldsAsync(customFields),
             };
 
             if (ticket.Title is null && ticket.Description is null && ticket.DescriptionHtml is null && ticket.Requestor is null &&
@@ -190,7 +242,8 @@ public sealed class TicketTools
         });
     }
 
-    [McpServerTool(Name = "update_ticket_status", Title = "Change ticket status", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false)]
+    // Not idempotent: a status change with a comment records the comment each time.
+    [McpServerTool(Name = "update_ticket_status", Title = "Change ticket status", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false)]
     [Description(
         "Move a ticket to another workflow state (for example resolve, close, or reopen it). The target must be one of the allowed " +
         "next steps for the ticket's current state: check the 'workflow' and 'status' fields from get_ticket first. For default workflows " +
@@ -216,33 +269,41 @@ public sealed class TicketTools
         });
     }
 
+    [McpServerTool(Name = "assign_ticket", Title = "Assign ticket", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false)]
+    [Description(
+        "Assign a ticket to someone in the instance's assignee list, given their email or name (a unique partial name is enough). " +
+        "Shorthand for update_ticket with only an assignee.")]
+    public Task<string> AssignTicket(
+        [Description("Ticket UUID.")] string ticketId,
+        [Description("Email address or display name of the new assignee.")] string assignee,
+        [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
+        CancellationToken cancellationToken = default)
+    {
+        return ToolRunner.RunAsync(async () =>
+        {
+            Guid id = ToolValidation.RequireGuid(ticketId, "ticketId");
+            string who = ToolValidation.RequireText(assignee, "assignee", 320);
+            ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);
+
+            UserRef person = who.Contains('@', StringComparison.Ordinal) ? new UserRef(Email: who) : new UserRef(Name: who);
+            TicketUser? resolved = await new InstanceLookup(_client, _cache, timezoneOffset, cancellationToken, _options.ExternalEmailDomainSet()).PersonAsync(person, "assignee", assigneeOnly: true);
+
+            Ticket updated = await _client.UpdateTicketAsync(id, new TicketWrite { Assignee = resolved }, actor.ToTicketUser(), includeHtml: false, timezoneOffset, cancellationToken);
+            return new WriteResult<Ticket>(updated, ActedAs.From(actor));
+        });
+    }
+
     // Far more than a ticket form has; they only bound the size of one request.
     private const int MaxTags = 50;
     private const int MaxCustomFields = 100;
 
-    private static List<TicketTag>? ValidateTags(IReadOnlyList<TagRef>? tags)
+    private static void CheckSizes(IReadOnlyList<TagRef>? tags, Dictionary<string, JsonElement>? customFields)
     {
         ToolValidation.MaxCount(tags, "tags", MaxTags);
-        return tags?.Select((t, i) => t.ToTicketTag(i)).ToList();
-    }
-
-    private static JsonElement? ValidateCustomFields(Dictionary<string, JsonElement>? customFields)
-    {
-        if (customFields is null || customFields.Count == 0)
-        {
-            return null;
-        }
-
         ToolValidation.MaxCount(customFields, "customFields", MaxCustomFields);
-
-        foreach (string key in customFields.Keys)
+        if (customFields?.Keys.FirstOrDefault(k => k.Length > 256) is string longKey)
         {
-            if (!Guid.TryParse(key, out _))
-            {
-                throw new McpException($"'customFields' key '{key}' is not a custom field ID. Use the 36-character IDs from get_instance.");
-            }
+            throw new McpException($"'customFields' key '{longKey[..40]}...' is too long to be a field ID or title.");
         }
-
-        return JsonSerializer.SerializeToElement(customFields, TicketingClient.JsonOptions);
     }
 }

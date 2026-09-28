@@ -18,6 +18,12 @@ on:
 permissions:
   contents: read
 
+# One run per tag at a time (a tag push and a manual rebuild of it, say), so two can't both find no release and race to
+# create it, or interleave their uploads. A second run waits rather than cancelling one that may be mid-upload.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 env:
   DOTNET_NOLOGO: "true"
   DOTNET_CLI_TELEMETRY_OPTOUT: "true"
@@ -153,7 +159,7 @@ jobs:
         timeout-minutes: 2
         env:
           Ticketing__ApiKey: ci-dummy-key
-          Ticketing__ServiceAccount__Id: ci
+          Ticketing__ServiceAccount__Id: 00000000-0000-0000-0000-0000000000c1
           Ticketing__ServiceAccount__Name: CI
           Ticketing__ServiceAccount__Email: ci@example.test
         run: |

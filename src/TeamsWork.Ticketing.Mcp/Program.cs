@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
 using Azure.Identity;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -23,7 +24,7 @@ using TeamsWork.Ticketing.Mcp.Tools;
 //   * --stdio / MCP_TRANSPORT=stdio  -> stdio for local clients (Claude Code, VS Code), Ticketing:ServiceAccount required
 // ---------------------------------------------------------------------------------------------------------------
 
-bool useStdio = args.Contains("--stdio", StringComparer.OrdinalIgnoreCase) ||
+bool useStdio = args.Contains(ModeFlags.Stdio, StringComparer.OrdinalIgnoreCase) ||
                 string.Equals(Environment.GetEnvironmentVariable("MCP_TRANSPORT"), "stdio", StringComparison.OrdinalIgnoreCase);
 
 // A configuration problem that ends the process gets a plain explanation on stderr (never stdout, the stdio MCP
@@ -54,7 +55,9 @@ else
 
 static async Task RunStdioAsync(string[] args)
 {
-    HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
+    HostApplicationBuilder builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { Args = ModeFlags.SettingsArguments(args), ContentRootPath = AppContext.BaseDirectory });
+
+    UseBuiltInDefaultsInsteadOfFiles(builder.Configuration);
 
     // stdout is the MCP channel; every log line must go to stderr.
     builder.Logging.ClearProviders();
@@ -67,29 +70,79 @@ static async Task RunStdioAsync(string[] args)
     AddTicketingServices(builder.Services, builder.Configuration, requireServiceAccount: true);
     builder.Services.AddSingleton<IActingUserProvider, ServiceAccountActingUserProvider>();
 
-    builder.Services
+    IMcpServerBuilder mcp = builder.Services
         .AddMcpServer(ConfigureServerOptions)
-        .WithStdioServerTransport()
-        .WithTools<TicketTools>()
-        .WithTools<ActivityTools>()
-        .WithTools<AttachmentTools>()
-        .WithTools<InstanceTools>();
+        .WithStdioServerTransport();
+    AddTools(mcp);
+
+    // File uploads read the local disk, so they are offered only here, and only once a folder has been chosen.
+    bool uploadsRequested = !string.IsNullOrWhiteSpace(builder.Configuration[$"{TicketingOptions.SectionName}:{nameof(TicketingOptions.UploadRoot)}"]);
+    // Only where the open file can be verified (Windows, Linux); elsewhere the tool isn't offered at all.
+    bool uploads = uploadsRequested && UploadFolder.IsSupported;
+    if (uploads)
+    {
+        builder.Services.AddSingleton(sp => UploadFolder.Create(
+            sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<TicketingOptions>>().Value, UserSecretsFilePath()));
+        mcp.WithTools<FileUploadTools>();
+    }
 
     IHost host = builder.Build();
     ActingUser actor = await host.Services.GetRequiredService<IActingUserProvider>().GetActingUserAsync(CancellationToken.None);
-    host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup")
-        .LogInformation("stdio transport; ticket changes will be attributed to {Name} <{Email}>.", actor.Name, actor.Email);
+    ILogger startupLog = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
+    startupLog.LogInformation("stdio transport; ticket changes will be attributed to {Name} <{Email}>.", actor.Name, actor.Email);
+    if (uploadsRequested && !uploads)
+    {
+        startupLog.LogWarning("Ticketing:UploadRoot is set, but file uploads are available on Windows and Linux only, so upload_ticket_files isn't offered.");
+    }
+
+    if (uploads)
+    {
+        // Resolved now so a bad folder stops startup with a clear message rather than failing the first upload.
+        startupLog.LogInformation("File uploads are on, from {Folder}.", host.Services.GetRequiredService<UploadFolder>().Root);
+    }
 
     await host.RunAsync();
 }
 
+// The local modes run from wherever the executable was installed, which may be a shared folder (~/.local/bin, a
+// downloads folder) where anyone or anything can leave an appsettings.json; the single-file builds don't ship one. So
+// they read no settings files: the few defaults a file would add are built in here, and everything else is configured
+// through user secrets, environment variables, or the command line. The hosted server keeps the file in its image.
+static void UseBuiltInDefaultsInsteadOfFiles(IConfigurationBuilder configuration)
+{
+    List<IConfigurationSource> files = configuration.Sources.Where(SettingsFiles.IsSettingsFile).ToList();
+    int at = files.Count > 0 ? configuration.Sources.IndexOf(files[0]) : 0;
+    foreach (IConfigurationSource file in files)
+    {
+        configuration.Sources.Remove(file);
+    }
+
+    configuration.Sources.Insert(at, new Microsoft.Extensions.Configuration.Memory.MemoryConfigurationSource
+    {
+        InitialData = new Dictionary<string, string?>
+        {
+            ["Logging:LogLevel:Default"] = "Information",
+            ["Logging:LogLevel:Microsoft.AspNetCore"] = "Warning",
+            ["Logging:LogLevel:Microsoft.Identity.Web"] = "Warning",
+            ["Logging:LogLevel:System.Net.Http.HttpClient"] = "None",
+        },
+    });
+}
+
 static async Task RunHttpAsync(string[] args)
 {
-    WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
-    AuthMode authMode = AuthModeResolver.Resolve(builder.Configuration, args);
+    WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = ModeFlags.SettingsArguments(args), ContentRootPath = AppContext.BaseDirectory });
+    // Whether the files are trusted depends on the mode, so the mode can't come from them: an appsettings.json left
+    // beside the executable could otherwise switch it to unauthenticated local mode (or stop startup).
+    AuthMode authMode;
+    using (ConfigurationRoot trusted =SettingsFiles.Without(builder.Configuration))
+    {
+        authMode = AuthModeResolver.Resolve(trusted, args);
+    }
 
     if (authMode == AuthMode.Local)
     {
+        UseBuiltInDefaultsInsteadOfFiles(builder.Configuration);
         UserSecretsConfiguration.Add(builder.Configuration, Assembly.GetExecutingAssembly());
         Program.UserSecretsLoaded = true;
     }
@@ -124,11 +177,8 @@ static async Task RunHttpAsync(string[] args)
         {
             // Stateless is required by Foundry and removes session-hijack surface (no Mcp-Session-Id to steal).
             o.SessionMode = HttpServerSessionMode.Stateless;
-        })
-        .WithTools<TicketTools>()
-        .WithTools<ActivityTools>()
-        .WithTools<AttachmentTools>()
-        .WithTools<InstanceTools>();
+        });
+    AddTools(mcp);
 
     if (authMode == AuthMode.Entra)
     {
@@ -137,6 +187,10 @@ static async Task RunHttpAsync(string[] args)
 
     WebApplication app = builder.Build();
     app.Use((ctx, next) => RequestLimits.RejectOversizedBodiesAsync(ctx, next, maxRequestBodyBytes));
+    if (!string.IsNullOrWhiteSpace(app.Configuration[$"{TicketingOptions.SectionName}:{nameof(TicketingOptions.UploadRoot)}"]))
+    {
+        app.Logger.LogWarning("Ticketing:UploadRoot is ignored: file uploads are only offered over stdio.");
+    }
 
     if (authMode == AuthMode.Local)
     {
@@ -279,6 +333,7 @@ static EntraOptions ConfigureEntraMode(WebApplicationBuilder builder)
     builder.Services.AddOptions<EntraOptions>().Bind(builder.Configuration.GetSection(EntraOptions.SectionName));
     builder.Services.AddHttpContextAccessor();
     builder.Services.AddScoped<IActingUserProvider, HttpActingUserProvider>();
+    builder.Services.AddSingleton<IUpstreamCaller, HttpUpstreamCaller>();
 
     // Container Apps ingress terminates TLS; honour its forwarded scheme so the resource metadata says https. The
     // ingress passes the public Host through unchanged, so X-Forwarded-Host isn't needed, and it must not be
@@ -335,6 +390,15 @@ static EntraOptions ConfigureEntraMode(WebApplicationBuilder builder)
 
 // ---------------------------------------------------------------------------------------------------------------
 
+/// <summary>The tools every transport offers.</summary>
+static void AddTools(IMcpServerBuilder mcp) =>
+    mcp.WithTools<TicketTools>()
+        .WithTools<LookupTools>()
+        .WithTools<WorkloadTools>()
+        .WithTools<ActivityTools>()
+        .WithTools<AttachmentTools>()
+        .WithTools<InstanceTools>();
+
 static void ConfigureServerOptions(ModelContextProtocol.Server.McpServerOptions options)
 {
     string version = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
@@ -350,11 +414,14 @@ static void ConfigureServerOptions(ModelContextProtocol.Server.McpServerOptions 
 
     options.ServerInstructions =
         "Tools for a TeamsWork Ticketing (Ticketing as a Service) help-desk. " +
-        "Tickets are identified by a UUID 'id' (use it for ticketId parameters) and also have a human-readable 'ticketNo'. " +
-        "Start with list_tickets or get_ticket for reads. Before creating or updating tickets with custom fields, assignees, or " +
-        "custom workflow states, call get_instance to discover the IDs; call list_tag_categories for tag IDs. " +
+        "Tickets are identified by a UUID 'id' (use it for ticketId parameters) and also have a human-readable 'ticketNo'; when someone " +
+        "quotes a number, use find_ticket_by_number. For 'my tickets' use list_my_tickets (list_tickets can't filter by person); for " +
+        "SLA problems list_sla_risk; for totals count_tickets; to understand one ticket get_ticket_context. Before create_ticket, call " +
+        "find_similar_tickets to avoid duplicates. People can be given by email or name, tag categories by name, and custom fields by " +
+        "title; get_instance (use 'section') and list_tag_categories list what exists, and custom workflow state IDs. " +
         "Dates in filters are local to the timezone offset (default US Central). 'expectedDate' must be YYYY-MM-DD. " +
-        "All writes are attributed to the authenticated caller; tools never accept a user to impersonate. " +
+        "Writes are attributed to the signed-in caller, or to the configured service account for app-only callers and local (stdio) use; " +
+        "whoami shows which, and tools never accept a user to impersonate. " +
         "The upstream API allows 100 requests per minute, so prefer 'select' and sensible page sizes.";
 }
 
@@ -396,7 +463,30 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
     services.AddOptions<TicketingOptions>()
         // Bound by hand so a value of the wrong type (Ticketing__MaxPageSize=abc) is reported as a setting to fix.
         .Configure(o => StartupConfigurationException.ReadSetting(() => { section.Bind(o); return o; }, TicketingOptions.SectionName))
+        // A region replaces the built-in US endpoint only; a BaseUrl someone set to something else is reported below.
+        .PostConfigure(o =>
+        {
+            if (o.RegionBaseUrl() is string regional && string.Equals(o.BaseUrl?.TrimEnd('/'), TicketingOptions.DefaultBaseUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                o.BaseUrl = regional;
+            }
+
+            // The service account in the form every person is compared and sent in, once, for every transport (the Entra
+            // app-only path as well as stdio). An invalid one is left as it is and refused by validation below.
+            if (o.ServiceAccount?.Canonical() is (string id, string name, string email))
+            {
+                o.ServiceAccount.Id = id;
+                o.ServiceAccount.Name = name;
+                o.ServiceAccount.Email = email;
+            }
+        })
         .ValidateDataAnnotations()
+        .Validate(o => string.IsNullOrWhiteSpace(o.Region) || o.RegionBaseUrl() is not null,
+            $"Ticketing:Region must be one of {string.Join(", ", TicketingOptions.RegionBaseUrls.Keys)}, or left unset for US.")
+        .Validate(o => o.RegionBaseUrl() is not string regional || string.Equals(o.BaseUrl?.TrimEnd('/'), regional, StringComparison.OrdinalIgnoreCase),
+            "Ticketing:Region and Ticketing:BaseUrl name different endpoints. Set only one of them.")
+        .Validate(o => string.IsNullOrWhiteSpace(o.UploadRoot) || Path.IsPathFullyQualified(o.UploadRoot.Trim()),
+            "Ticketing:UploadRoot must be an absolute folder path, or left unset to turn file uploads off.")
         .Validate(o => !string.IsNullOrWhiteSpace(o.ApiKey),
             "Ticketing:ApiKey is not set. Use your Ticketing instance's API key (Ticketing app > Settings > API). " +
             "In Azure it is read from Key Vault (KeyVault:Uri, secret Ticketing--ApiKey).")
@@ -410,6 +500,14 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
         .Validate(o => !string.IsNullOrWhiteSpace(o.DefaultTimeZoneId) && TimeZoneInfo.TryFindSystemTimeZoneById(o.DefaultTimeZoneId, out _),
             "Ticketing:DefaultTimeZoneId is not a time zone this machine knows. Use an IANA name such as America/Chicago " +
             "(on Linux, the tzdata package provides them).")
+        .Validate(o => o.InvalidExternalEmailDomains().Count == 0,
+            "Ticketing:ExternalEmailDomains must list plain domain names, such as contoso.com, separated by commas: no wildcards, and " +
+            "an internationalised domain in its xn-- punycode form. Matching is exact, so list each subdomain that should be allowed.")
+        // The ID is what the help desk records and matches people by. Anything but an Entra object ID (or the email, in
+        // the email-to-ticket form) attributes every write to someone the help desk doesn't know, silently.
+        .Validate(o => o.ServiceAccount?.IsConfigured != true || o.ServiceAccount.IsValidIdentity,
+            "Ticketing:ServiceAccount:Email must be a valid email address, and Ticketing:ServiceAccount:Id the account's Entra object ID " +
+            "(a GUID, from 'az ad signed-in-user show --query id' or the Entra admin center) or that same email address.")
         .Validate(o => !requireServiceAccount || o.ServiceAccount?.IsConfigured == true,
             "Ticketing:ServiceAccount:Id, :Name and :Email must all be set when running with --stdio or --local. " +
             "Ticket changes are attributed to this account (Id is your Entra object ID).")
@@ -418,6 +516,10 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
     services.AddSingleton(TimeProvider.System);
     services.AddSingleton<TimeZoneOffsetResolver>();
     services.AddSingleton<TicketingRateLimiter>();
+    services.AddSingleton<InstanceCache>();
+    services.AddSingleton<UpstreamQuota>();
+    // One user in stdio and local mode; Entra mode replaces this with the authenticated caller.
+    services.TryAddSingleton<IUpstreamCaller, SingleUserUpstreamCaller>();
 
     services.AddHttpClient<TicketingClient>((sp, http) =>
         {

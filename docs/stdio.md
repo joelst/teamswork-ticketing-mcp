@@ -22,10 +22,10 @@ The install script is the quickest way to set up one machine. It:
 
 1. Downloads the executable for your platform from the newest release that has one (pre-releases included), and
    checks it against the release's `SHA256SUMS.txt`. The checksum file comes from the same release, so it only
-   proves the download is intact. On Windows the script also requires a valid Authenticode signature, which proves
-   the file was signed with a trusted code-signing certificate and not changed since, and prints the signer. When it
-   replaces an installed copy, it warns if the new copy's publisher (the certificate subject) differs from the old
-   one's, or if the old copy's signature is no longer valid, so an unexpected change of publisher is noticed.
+   proves the download is intact. On Windows the script also requires a valid Authenticode signature made with this
+   project's Artifact Signing identity (checked by the EKU its certificates carry, which stays the same as they are
+   reissued), so a file signed with some other trusted certificate is refused, and prints the signer. Linux and macOS
+   builds are unsigned, so there the checksum is the only check.
 2. Puts the executable at a fixed per-user path, so client configurations keep working across upgrades:
    - Windows: `%LOCALAPPDATA%\Programs\teamswork-ticketing-mcp\TeamsWork.Ticketing.Mcp.exe`
    - macOS/Linux: `~/.local/share/teamswork-ticketing-mcp/TeamsWork.Ticketing.Mcp`
@@ -69,6 +69,7 @@ hits that limit, set `GITHUB_TOKEN` to any GitHub token and the scripts will use
 | `-Version v0.2.0` | `--version v0.2.0` | Install a specific release, or `latest` for the newest |
 | `-InstallDir <dir>` | `--install-dir <dir>` | Install somewhere else |
 | `-SkipSecrets` | `--skip-secrets` | Don't prompt; keep the secrets file as it is (or use environment variables) |
+| `-Region EU` | `--region EU` | Data region of your Ticketing instance: `US` (the default), `EU`, or `AUS`. Saved in the secrets file; leave it out to keep the saved region. Not allowed with `-SkipSecrets` |
 | `-Uninstall` | `--uninstall` | Unregister from the clients and delete the server's files (and the folder, if it is then empty) |
 | `-RemoveSecrets` | `--remove-secrets` | With uninstall, also delete the secrets file |
 
@@ -99,10 +100,21 @@ the client's config, such as `env` settings, survives an upgrade. A registration
 replaced. For VS Code the scripts check only the default profile's user `mcp.json`, and re-add the entry if they don't
 find it there. If a registration fails, the scripts end with an error that names the client.
 
-To uninstall, run the script with `-Uninstall` / `--uninstall`. It deletes only the files it installed (the
-executable and a `.version` file beside it), so an `-InstallDir` shared with other programs is safe. Quit the MCP
-clients first on Windows, where a running executable can't be deleted. VS Code has no command to remove a server:
-run **MCP: Open User Configuration** and delete the `teamswork-ticketing` entry.
+To uninstall, run the script with `-Uninstall` / `--uninstall`:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.ps1))) -Uninstall
+```
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.sh | sh -s -- --uninstall
+```
+
+Running a downloaded `install.ps1` as a file (`.\install.ps1 -Uninstall`) is blocked by Windows' default execution
+policy; the script-block form isn't. Uninstalling deletes only the files the script installed (the executable and a
+`.version` file beside it), so an `-InstallDir` shared with other programs is safe. Quit the MCP clients first
+on Windows, where a running executable can't be deleted. VS Code has no command to remove a server: run **MCP:
+Open User Configuration** and delete the `teamswork-ticketing` entry.
 
 ## Settings
 
@@ -148,6 +160,38 @@ Optional: `Ticketing:DefaultTimeZoneId` (for example `America/New_York`) if your
 Add it to the secrets file; the install script keeps it when you run it again. The server checks it at startup and
 refuses to start with a zone the machine doesn't know.
 
+Optional: `Ticketing:Region` if your Ticketing instance is hosted outside the US: `EU` or `AUS` (`US` is the
+default). The install script's `-Region` / `--region` option writes it. It picks the vendor's endpoint for that
+region; don't also set `Ticketing:BaseUrl`, or the server stops at startup and asks you to choose one.
+
+### File uploads
+
+`upload_ticket_files` sends files, such as screenshots and logs, from your machine to a ticket. It is off until you
+choose a folder for it, and it can only read files inside that folder:
+
+```json
+{
+  "Ticketing:UploadRoot": "C:\\Users\\you\\TicketUploads"
+}
+```
+
+Put it in the secrets file (or set `Ticketing__UploadRoot`) and restart the client; the tool list then has 21 tools.
+Save or copy the files you want to send into that folder, then ask the agent to upload them by name, as they appear
+in the folder (letter case included). A OneDrive folder works. The folder must exist and must be a dedicated one: the
+server refuses to start with a drive root, a folder that contains your home folder, the application data or
+configuration folders, or the user-secrets file, a folder inside an application settings folder (such as AppData
+or `~/.config`) or a hidden folder such as `~/.ssh`, or the temporary folder itself (a folder inside it is fine). The tool refuses paths outside the folder, hidden files and folders
+(names starting with `.`), paths through symbolic links or junctions, short 8.3 names, and alternate data streams, so
+text an agent has read can't make it send other files. Up to 10 files per call, 10 MiB in total by default
+(`Ticketing:MaxUploadBytes`). Uploads are private (visible to agents, not the requestor) unless the agent passes
+`isPrivate: false`. Uploads are never offered by the HTTP transports.
+
+Only put files in the folder that you are willing to send. Anything you place there can be uploaded (hard links to
+files elsewhere, FIFOs, devices, and, on Linux, files on a mount inside the folder are refused; Linux needs kernel 5.8
+or later to identify mounts). Uploads are available on Windows and Linux; on macOS the server logs a
+warning and doesn't offer the tool, because it can't identify the file it has open there. The guard limits what this tool reads; an
+agent that also has shell or file tools could copy a file into the folder first, so keep the folder out of their reach.
+
 `install.sh` updates the file without a JSON parser, so it only edits the form `dotnet user-secrets` writes: one
 `"key": "value"` setting per line. It stops, without changing anything, if the file looks different, and keeps the
 previous version as `secrets.json.bak`.
@@ -166,7 +210,7 @@ example, replace `<exe>` with the full path to the executable:
 Write the path out in full: not every client expands `~` or environment variables in the command. For the portable
 build, the command is `dotnet` and the arguments are `<folder>/TeamsWork.Ticketing.Mcp.dll --stdio`.
 
-Every client should then list `teamswork-ticketing` with 12 tools. Try "list my five most recent open tickets".
+Every client should then list `teamswork-ticketing` with 20 tools (21 with [file uploads](#file-uploads) on). Try "list my five most recent open tickets".
 
 ### Claude Code
 

@@ -7,10 +7,18 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <!-- Without this the .editorconfig style rules only show in the editor; with it they fail the build like any warning. -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <NuGetAudit>true</NuGetAudit>
     <NuGetAuditMode>all</NuGetAuditMode>
     <NuGetAuditLevel>low</NuGetAuditLevel>
+    <!-- Pins every package, transitive ones included, to the committed packages.lock.json; CI restores with locked mode,
+         so a changed dependency graph fails the build instead of arriving silently. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <!-- On CI (GitHub Actions sets CI, Azure Pipelines TF_BUILD) every restore is locked, including the implicit ones in
+         publish, so what ships is built from exactly the locked graph. -->
+    <RestoreLockedMode Condition="'$(CI)' == 'true' or '$(TF_BUILD)' == 'True'">true</RestoreLockedMode>
     <!-- Linux builds (the release executable and the container) don't need ICU, which minimal distributions and some
          WSL images lack. Nothing here is culture-sensitive: formatting and parsing use the invariant culture. Windows
          and macOS keep ICU, which .NET on Windows needs to look up IANA time zone names such as America/Chicago.
@@ -19,6 +27,7 @@
     <InvariantGlobalization Condition="$(RuntimeIdentifier.StartsWith('linux'))">true</InvariantGlobalization>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <Deterministic>true</Deterministic>
-    <ContinuousIntegrationBuild Condition="'$(TF_BUILD)' == 'true'">true</ContinuousIntegrationBuild>
+    <!-- Normalised paths in what CI builds, the release publish included (GitHub Actions sets CI, Azure Pipelines TF_BUILD). -->
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true' or '$(TF_BUILD)' == 'True'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
 </Project>

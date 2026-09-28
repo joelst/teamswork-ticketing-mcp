@@ -66,7 +66,7 @@ tool = {
     "allowed_tools": ["list_tickets", "get_ticket", "list_ticket_activities", "get_instance",
                       "list_tag_categories", "add_ticket_comment", "create_ticket"],
     "require_approval": {"always": ["create_ticket", "add_ticket_comment", "update_ticket", "update_ticket_status",
-                                    "add_ticket_link_attachments"]},
+                                    "assign_ticket", "add_ticket_link_attachments"]},
 }
 ```
 

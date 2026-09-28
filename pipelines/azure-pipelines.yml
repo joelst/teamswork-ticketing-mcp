@@ -10,15 +10,19 @@
 # Required in Azure DevOps
 #   * Service connection (Azure Resource Manager, workload identity federation) named in $(azureServiceConnection)
 #     with Contributor + User Access Administrator (or Role Based Access Control Administrator) on the resource group.
-#   * Variable group "taas-mcp-prod" with:
+#   * Variable group "taas-mcp-prod" (used only by the main-branch deploy stages, never by pull-request builds) with:
 #       azureServiceConnection, azureResourceGroup, azureLocation,
 #       namePrefix (e.g. taasmcp), environmentName (e.g. prod),
 #       entraTenantId, entraClientId (from infra/scripts/New-EntraAppRegistrations.ps1),
 #       serviceAccountId, serviceAccountName, serviceAccountEmail (optional, for app-only callers),
-#       publicBaseUrl (optional custom domain)
+#       publicBaseUrl (optional custom domain),
+#       externalEmailDomains (optional; comma-separated domains allowed for requestors outside the assignee list)
+#     An optional variable left out of the group is deployed as empty.
 #     Optional secret variable: ticketingApiKey (only if you want the pipeline to seed Key Vault; otherwise
 #     run infra/scripts/Set-TicketingApiKey.ps1 once).
 #   * Environment "taas-mcp-prod" with an approval check on it.
+#   * Branch control checks limiting the service connection and the variable group to refs/heads/main, so a
+#     pull request that edits this file still can't reach production credentials.
 # ---------------------------------------------------------------------------------------------------------------
 
 trigger:
@@ -35,8 +39,9 @@ pr:
     include:
       - main
 
+# The production variable group (and its optional API key secret) is attached only to the deploy stages below, which run
+# for main alone: the Build stage runs for pull requests, whose code and YAML are the author's.
 variables:
-  - group: taas-mcp-prod
   - name: buildConfiguration
     value: Release
   - name: dotnetVersion
@@ -66,7 +71,8 @@ stages:
               version: $(dotnetVersion)
               includePreviewVersions: false
 
-          - script: dotnet restore --locked-mode || dotnet restore
+          # Every package, transitive ones included, is pinned by the committed packages.lock.json files.
+          - script: dotnet restore --locked-mode
             displayName: Restore
 
           # NuGetAudit is enabled in Directory.Build.props (level: low, warnings as errors), so restore already
@@ -91,23 +97,25 @@ stages:
               searchFolder: $(Agent.TempDirectory)/TestResults
               failTaskOnFailedTests: true
 
-          - task: AzureCLI@2
+          # Compiling Bicep needs no Azure sign-in, so pull-request builds get no service connection.
+          - script: |
+              set -euo pipefail
+              az bicep install
+              az bicep build --file infra/core.bicep --stdout > /dev/null
+              az bicep build --file infra/app.bicep --stdout > /dev/null
+              # The parameter files too: that is where a value outside a template's limits shows.
+              az bicep build-params --file infra/core.bicepparam --stdout > /dev/null
+              az bicep build-params --file infra/app.bicepparam --stdout > /dev/null
+              echo "Bicep templates and parameter files compile."
             displayName: Lint Bicep
-            inputs:
-              azureSubscription: $(azureServiceConnection)
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                set -euo pipefail
-                az bicep build --file infra/core.bicep --stdout > /dev/null
-                az bicep build --file infra/app.bicep --stdout > /dev/null
-                echo "Bicep templates compile."
 
   # ---------------------------------------------------------------------------------------------------------------
   - stage: Core
     displayName: Deploy core infrastructure
     dependsOn: Build
     condition: and(succeeded(), eq(variables.isMain, 'true'))
+    variables:
+      - group: taas-mcp-prod
     jobs:
       - job: CoreInfra
         displayName: core.bicep
@@ -125,16 +133,20 @@ stages:
                 set -euo pipefail
                 az group create --name "$(azureResourceGroup)" --location "$(azureLocation)" --output none
 
-                EXTRA=""
-                if [ -n "${TICKETING_API_KEY:-}" ] && [ "${TICKETING_API_KEY}" != '$(ticketingApiKey)' ]; then
-                  EXTRA="ticketingApiKey=${TICKETING_API_KEY}"
+                # Azure Pipelines leaves an undefined variable in the environment as its own macro text: a dollar sign,
+                # an opening parenthesis, and the name. That start is matched below with both characters escaped, and
+                # this comment never spells the macro out, because the pipeline expands macros anywhere in this script,
+                # comments included, and would write the secret into the script file.
+                EXTRA=()
+                if [ -n "${TICKETING_API_KEY:-}" ] && [[ "${TICKETING_API_KEY}" != \$\(* ]]; then
+                  EXTRA=(ticketingApiKey="${TICKETING_API_KEY}")
                 fi
 
                 OUT=$(az deployment group create \
                   --name "core-$(Build.BuildNumber)" \
                   --resource-group "$(azureResourceGroup)" \
                   --template-file infra/core.bicep \
-                  --parameters namePrefix="$(namePrefix)" environmentName="$(environmentName)" $EXTRA \
+                  --parameters namePrefix="$(namePrefix)" environmentName="$(environmentName)" "${EXTRA[@]}" \
                   --query properties.outputs -o json)
 
                 for key in registryName registryLoginServer keyVaultName apiKeySecretUri identityId containerAppsEnvironmentName; do
@@ -149,8 +161,11 @@ stages:
     dependsOn: Core
     condition: and(succeeded(), eq(variables.isMain, 'true'))
     variables:
-      registryName: $[ stageDependencies.Core.CoreInfra.outputs['core.registryName'] ]
-      registryLoginServer: $[ stageDependencies.Core.CoreInfra.outputs['core.registryLoginServer'] ]
+      - group: taas-mcp-prod
+      - name: registryName
+        value: $[ stageDependencies.Core.CoreInfra.outputs['core.registryName'] ]
+      - name: registryLoginServer
+        value: $[ stageDependencies.Core.CoreInfra.outputs['core.registryLoginServer'] ]
     jobs:
       - job: PublishContainer
         displayName: dotnet publish /t:PublishContainer
@@ -191,10 +206,15 @@ stages:
       - Image
     condition: and(succeeded(), eq(variables.isMain, 'true'))
     variables:
-      registryLoginServer: $[ stageDependencies.Core.CoreInfra.outputs['core.registryLoginServer'] ]
-      apiKeySecretUri: $[ stageDependencies.Core.CoreInfra.outputs['core.apiKeySecretUri'] ]
-      identityId: $[ stageDependencies.Core.CoreInfra.outputs['core.identityId'] ]
-      containerAppsEnvironmentName: $[ stageDependencies.Core.CoreInfra.outputs['core.containerAppsEnvironmentName'] ]
+      - group: taas-mcp-prod
+      - name: registryLoginServer
+        value: $[ stageDependencies.Core.CoreInfra.outputs['core.registryLoginServer'] ]
+      - name: apiKeySecretUri
+        value: $[ stageDependencies.Core.CoreInfra.outputs['core.apiKeySecretUri'] ]
+      - name: identityId
+        value: $[ stageDependencies.Core.CoreInfra.outputs['core.identityId'] ]
+      - name: containerAppsEnvironmentName
+        value: $[ stageDependencies.Core.CoreInfra.outputs['core.containerAppsEnvironmentName'] ]
     jobs:
       - deployment: DeployApp
         displayName: app.bicep
@@ -208,12 +228,22 @@ stages:
                 - task: AzureCLI@2
                   displayName: az deployment group create (app)
                   name: app
+                  # Optional variables go through the environment, where one missing from the variable group arrives as
+                  # its macro text and is turned into an empty value below.
+                  env:
+                    OPT_PUBLIC_BASE_URL: $(publicBaseUrl)
+                    OPT_SERVICE_ACCOUNT_ID: $(serviceAccountId)
+                    OPT_SERVICE_ACCOUNT_NAME: $(serviceAccountName)
+                    OPT_SERVICE_ACCOUNT_EMAIL: $(serviceAccountEmail)
+                    OPT_EXTERNAL_EMAIL_DOMAINS: $(externalEmailDomains)
                   inputs:
                     azureSubscription: $(azureServiceConnection)
                     scriptType: bash
                     scriptLocation: inlineScript
                     inlineScript: |
                       set -euo pipefail
+                      # Empty for a variable the group doesn't define (see the Core stage for how that is detected).
+                      opt() { case "$1" in \$\(*) printf '' ;; *) printf '%s' "$1" ;; esac; }
                       OUT=$(az deployment group create \
                         --name "app-$(Build.BuildNumber)" \
                         --resource-group "$(azureResourceGroup)" \
@@ -228,10 +258,11 @@ stages:
                           apiKeySecretUri="$(apiKeySecretUri)" \
                           entraTenantId="$(entraTenantId)" \
                           entraClientId="$(entraClientId)" \
-                          publicBaseUrl="$(publicBaseUrl)" \
-                          serviceAccountId="$(serviceAccountId)" \
-                          serviceAccountName="$(serviceAccountName)" \
-                          serviceAccountEmail="$(serviceAccountEmail)" \
+                          publicBaseUrl="$(opt "$OPT_PUBLIC_BASE_URL")" \
+                          serviceAccountId="$(opt "$OPT_SERVICE_ACCOUNT_ID")" \
+                          serviceAccountName="$(opt "$OPT_SERVICE_ACCOUNT_NAME")" \
+                          serviceAccountEmail="$(opt "$OPT_SERVICE_ACCOUNT_EMAIL")" \
+                          externalEmailDomains="$(opt "$OPT_EXTERNAL_EMAIL_DOMAINS")" \
                         --query properties.outputs -o json)
 
                       FQDN=$(echo "$OUT" | jq -r '.containerAppFqdn.value')

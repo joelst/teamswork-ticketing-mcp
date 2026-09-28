@@ -30,6 +30,7 @@ VERSION=""
 CLIENTS=""
 INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/teamswork-ticketing-mcp"
 SKIP_SECRETS=0
+REGION=""
 UNINSTALL=0
 REMOVE_SECRETS=0
 FAILED=""
@@ -43,6 +44,8 @@ Usage: install.sh [options]
   --clients <list>      Comma-separated: claude, codex, copilot, vscode, all, or none (default: those on PATH)
   --install-dir <dir>   Where to put the executable (default: $INSTALL_DIR)
   --skip-secrets        Don't prompt for the API key and account; keep what the secrets file already has
+  --region <name>       Data region of your Ticketing instance: US (the default), EU, or AUS. Saved in the secrets
+                        file; leave it out to keep the region already saved there
   --uninstall           Unregister from the clients and delete the server's files (and the folder, if empty)
   --remove-secrets      With --uninstall, also delete $SECRETS_PATH
 EOF
@@ -54,12 +57,25 @@ while [ $# -gt 0 ]; do
         --clients) CLIENTS="$2"; shift 2 ;;
         --install-dir) INSTALL_DIR="$2"; shift 2 ;;
         --skip-secrets) SKIP_SECRETS=1; shift ;;
+        --region) REGION="$2"; shift 2 ;;
         --uninstall) UNINSTALL=1; shift ;;
         --remove-secrets) REMOVE_SECRETS=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
+
+if [ -n "$REGION" ] && [ "$UNINSTALL" = 0 ]; then
+    REGION=$(printf '%s' "$REGION" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+    case "$REGION" in
+        US|EU|AUS) ;;
+        *) echo "Unknown --region '$REGION'. Use US (the default), EU, or AUS." >&2; exit 2 ;;
+    esac
+    if [ "$SKIP_SECRETS" = 1 ]; then
+        echo "--region is saved in the secrets file, which --skip-secrets leaves alone. Drop --skip-secrets, or set the Ticketing__Region environment variable in each client's MCP config instead." >&2
+        exit 2
+    fi
+fi
 
 # Clients start the server from their own working directory, so they must be given an absolute path.
 case "$INSTALL_DIR" in
@@ -202,6 +218,10 @@ detect_rid() {
                 return
             fi ;;
         Linux)
+            # The published Linux executable is built against glibc, and doesn't start on musl (Alpine and others).
+            if [ -e /lib/ld-musl-x86_64.so.1 ] || { have ldd && ldd --version 2>&1 | grep -qi musl; }; then
+                die "This system uses musl libc, which the published Linux executable doesn't support. Use the portable release with the .NET 10 runtime: dotnet TeamsWork.Ticketing.Mcp.dll --stdio"
+            fi
             if [ "$arch" = x86_64 ]; then echo linux-x64; return; fi ;;
         MINGW*|MSYS*|CYGWIN*)
             die "This installer is for macOS and Linux. On Windows use scripts/install.ps1." ;;
@@ -271,6 +291,7 @@ find_release() {
 }
 
 install_binary() {
+    have curl || die "curl is required to download the server. Install it (for example: apt install curl), then run the installer again."
     rid=$(detect_rid)
     find_release "$rid"
     archive_name="${ARCHIVE_URL##*/}"
@@ -304,8 +325,11 @@ install_binary() {
 
 # The secrets file can only be updated safely without a JSON parser when it is a flat object with one
 # "key": "string" pair per line, which is how dotnet user-secrets and this script write it.
+# dotnet user-secrets starts the file with a UTF-8 byte order mark, which grep doesn't count as space, so it is
+# dropped first (in the C locale, where sed takes the bytes as they are).
 secrets_file_editable() {
-    ! grep -vqE '^[[:space:]]*([{}]|\{[[:space:]]*\}|"[^"]+"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?)?[[:space:]]*$' "$SECRETS_PATH"
+    ! LC_ALL=C sed "1s/^$(printf '\357\273\277')//" "$SECRETS_PATH" |
+        grep -vqE '^[[:space:]]*([{}]|\{[[:space:]]*\}|"[^"]+"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?)?[[:space:]]*$'
 }
 
 # Prints a value from the secrets file still JSON-escaped, so an unchanged value is written back exactly as it was
@@ -377,6 +401,10 @@ set_secrets() {
     name=$(ask '  Display name' "$name")
     email=$(ask '  Email' "$email")
 
+    # Settings written below, so their old lines aren't kept too.
+    written='ApiKey|ServiceAccount:Id|ServiceAccount:Name|ServiceAccount:Email'
+    [ -z "$REGION" ] || written="$written|Region"
+
     mkdir -p "$(dirname "$SECRETS_PATH")"
     new="$SECRETS_PATH.new"
     (
@@ -387,10 +415,12 @@ set_secrets() {
             printf '  "Ticketing:ServiceAccount:Id": "%s",\n' "$id"
             printf '  "Ticketing:ServiceAccount:Name": "%s",\n' "$name"
             printf '  "Ticketing:ServiceAccount:Email": "%s"' "$email"
+            # Validated against a fixed list above, so it needs no escaping.
+            [ -z "$REGION" ] || printf ',\n  "Ticketing:Region": "%s"' "$REGION"
             # Keep any other settings already in the file, such as Ticketing:DefaultTimeZoneId.
             if [ -f "$SECRETS_PATH" ]; then
                 grep -E '^[[:space:]]*"[^"]+"[[:space:]]*:' "$SECRETS_PATH" |
-                    grep -viE '^[[:space:]]*"Ticketing:(ApiKey|ServiceAccount:Id|ServiceAccount:Name|ServiceAccount:Email)"' |
+                    grep -viE "^[[:space:]]*\"Ticketing:($written)\"" |
                     sed 's/^[[:space:]]*//; s/[[:space:]]*,\{0,1\}[[:space:]]*$//' |
                     while IFS= read -r line; do printf ',\n  %s' "$line"; done
             fi
@@ -495,5 +525,7 @@ fi
 if [ -n "$FAILED" ]; then
     die "Installed, but registering with$FAILED failed (see above). Fix the problem, then run the installer again with --clients $(printf '%s' "${FAILED# }" | tr ' ' ',')."
 fi
-echo "Done. Restart your MCP client and look for '$SERVER_NAME' (12 tools)."
+# File uploads aren't offered on macOS (the server can't verify the file it opens there).
+if [ "$(uname -s)" = Darwin ]; then tools='20 tools'; else tools='20 tools, 21 with file uploads on'; fi
+echo "Done. Restart your MCP client and look for '$SERVER_NAME' ($tools)."
 echo 'Run the installer again to upgrade; client configurations do not need to change.'

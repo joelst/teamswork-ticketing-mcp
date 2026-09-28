@@ -1,2 +1,5 @@
 # Shell scripts must keep LF line endings to run on macOS and Linux, even when edited on Windows.
 *.sh text eol=lf
+
+# C# is always text, so a stray control character can't make a diff show as binary.
+*.cs text diff=csharp

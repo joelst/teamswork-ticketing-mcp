@@ -39,7 +39,7 @@ public sealed class McpServerFactory : WebApplicationFactory<Program>
         builder.UseSetting("Entra:ClientId", ClientId);
         builder.UseSetting("Ticketing:ApiKey", "integration-test-key");
         builder.UseSetting("Ticketing:BaseUrl", "https://ticketing.invalid/v1");
-        builder.UseSetting("Ticketing:ServiceAccount:Id", "sa-oid");
+        builder.UseSetting("Ticketing:ServiceAccount:Id", "33333333-3333-3333-3333-333333333333");
         builder.UseSetting("Ticketing:ServiceAccount:Name", "Ticketing Bot");
         builder.UseSetting("Ticketing:ServiceAccount:Email", "bot@example.test");
 
@@ -110,6 +110,8 @@ public sealed class AuthIntegrationTests : IClassFixture<McpServerFactory>
         "list_ticket_activities", "add_ticket_comment",
         "list_ticket_attachments", "add_ticket_link_attachments", "list_activity_attachments",
         "get_instance", "list_tag_categories",
+        "find_ticket_by_number", "get_ticket_context", "find_similar_tickets", "assign_ticket",
+        "whoami", "list_my_tickets", "list_sla_risk", "count_tickets",
     ];
 
     private readonly McpServerFactory _factory;

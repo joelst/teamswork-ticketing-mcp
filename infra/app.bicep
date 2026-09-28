@@ -38,7 +38,7 @@ param entraClientId string
 @description('Optional public base URL (custom domain) used in protected-resource metadata. Leave empty to derive from the request.')
 param publicBaseUrl string = ''
 
-@description('Upstream Ticketing API base URL.')
+@description('Upstream Ticketing API base URL: US (default) https://teamswork.azure-api.net/ticketing/v1, EU https://ticketing-apim-eu.azure-api.net/ticketing/v1, AUS https://ticketing-apim-aus.azure-api.net/ticketing/v1.')
 param ticketingBaseUrl string = 'https://teamswork.azure-api.net/ticketing/v1'
 
 @description('IANA time zone used to compute the default timezone offset.')
@@ -49,13 +49,19 @@ param serviceAccountId string = ''
 param serviceAccountName string = ''
 param serviceAccountEmail string = ''
 
+@description('Comma-separated email domains allowed for people outside the assignee list (requestors, people fields), e.g. contoso.com. Empty allows any domain.')
+param externalEmailDomains string = ''
+
 @minValue(0)
 @maxValue(10)
 param minReplicas int = 0
 
+// One replica: the upstream rate limit (the vendor's 100 requests per minute for the API key), each caller's share of
+// it, and the in-flight cap are kept in the server's memory, so a second replica would double every one of them. Raise
+// this only after moving those limits to a store the replicas share.
 @minValue(1)
-@maxValue(10)
-param maxReplicas int = 2
+@maxValue(1)
+param maxReplicas int = 1
 
 param tags object = {
   workload: 'teamswork-taas-mcp'
@@ -72,6 +78,10 @@ var serviceAccountEnv = empty(serviceAccountId) ? [] : [
   { name: 'Ticketing__ServiceAccount__Id', value: serviceAccountId }
   { name: 'Ticketing__ServiceAccount__Name', value: serviceAccountName }
   { name: 'Ticketing__ServiceAccount__Email', value: serviceAccountEmail }
+]
+
+var externalEmailDomainsEnv = empty(externalEmailDomains) ? [] : [
+  { name: 'Ticketing__ExternalEmailDomains', value: externalEmailDomains }
 ]
 
 resource app 'Microsoft.App/containerApps@2024-03-01' = {
@@ -135,7 +145,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'Entra__TenantId', value: entraTenantId }
             { name: 'Entra__ClientId', value: entraClientId }
             { name: 'Entra__PublicBaseUrl', value: publicBaseUrl }
-          ], serviceAccountEnv)
+          ], serviceAccountEnv, externalEmailDomainsEnv)
           probes: [
             {
               type: 'Startup'

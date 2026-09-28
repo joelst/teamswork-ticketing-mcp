@@ -42,7 +42,7 @@ public sealed class LocalModeFactory : WebApplicationFactory<Program>
         builder.UseSetting("Ticketing:BaseUrl", "https://ticketing.invalid/v1");
 
         // Set even when excluded, so Ticketing__ServiceAccount__* variables on a developer machine cannot fill them in.
-        builder.UseSetting("Ticketing:ServiceAccount:Id", IncludeServiceAccount ? "local-oid" : "");
+        builder.UseSetting("Ticketing:ServiceAccount:Id", IncludeServiceAccount ? "44444444-4444-4444-4444-444444444444" : "");
         builder.UseSetting("Ticketing:ServiceAccount:Name", IncludeServiceAccount ? "Local Dev" : "");
         builder.UseSetting("Ticketing:ServiceAccount:Email", IncludeServiceAccount ? "dev@example.test" : "");
 
@@ -69,7 +69,9 @@ public sealed class LocalModeIntegrationTests
         await using McpClient client = await McpClient.CreateAsync(transport, cancellationToken: Ct);
 
         IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: Ct);
-        Assert.Equal(12, tools.Count);
+        // Every tool but upload_ticket_files, which only the stdio transport offers.
+        Assert.Equal(20, tools.Count);
+        Assert.DoesNotContain(tools, t => t.Name == "upload_ticket_files");
 
         // Validation still runs and the configured account is what writes would be attributed to.
         CallToolResult result = await client.CallToolAsync("get_ticket", new Dictionary<string, object?> { ["ticketId"] = "nope" }, cancellationToken: Ct);
@@ -209,6 +211,69 @@ public sealed class LocalModeIntegrationTests
 
         Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
         Assert.Contains("Ticketing:DefaultTimeZoneId", report, StringComparison.Ordinal);
+    }
+
+    // Seen live: an ID that isn't an object ID attributed every write to someone the help desk didn't know.
+    [Theory]
+    [InlineData("not-an-object-id", false)]
+    [InlineData("00000000-0000-0000-0000-000000000000", false)] // parses as a GUID, but is no one's object ID
+    [InlineData("dev@example.test", true)] // the email-to-ticket form
+    [InlineData("44444444-4444-4444-4444-444444444444", true)]
+    public async Task Service_account_id_must_be_an_object_id_or_the_email(string id, bool starts)
+    {
+        await using var factory = new LocalModeFactory { Settings = { ["Ticketing:ServiceAccount:Id"] = id } };
+
+        if (starts)
+        {
+            factory.CreateClient().Dispose();
+            return;
+        }
+
+        Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+        Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
+        Assert.Contains("Entra object ID", report, StringComparison.Ordinal);
+        Assert.DoesNotContain(id, report, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("EU", "https://ticketing-apim-eu.azure-api.net/ticketing/v1")]
+    [InlineData("aus", "https://ticketing-apim-aus.azure-api.net/ticketing/v1")]
+    [InlineData("US", TicketingOptions.DefaultBaseUrl)]
+    public async Task Region_picks_the_vendor_endpoint(string region, string expected)
+    {
+        await using var factory = new LocalModeFactory
+        {
+            Settings = { ["Ticketing:BaseUrl"] = TicketingOptions.DefaultBaseUrl, ["Ticketing:Region"] = region },
+        };
+        factory.CreateClient().Dispose();
+
+        TicketingOptions options = factory.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<TicketingOptions>>().Value;
+
+        Assert.Equal(expected, options.BaseUrl);
+    }
+
+    [Fact]
+    public async Task No_region_keeps_the_us_endpoint()
+    {
+        await using var factory = new LocalModeFactory { Settings = { ["Ticketing:BaseUrl"] = TicketingOptions.DefaultBaseUrl } };
+        factory.CreateClient().Dispose();
+
+        TicketingOptions options = factory.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<TicketingOptions>>().Value;
+
+        Assert.Equal(TicketingOptions.DefaultBaseUrl, options.BaseUrl);
+    }
+
+    [Theory]
+    [InlineData("Mars", "Ticketing:Region must be one of")]
+    [InlineData("EU", "name different endpoints")] // the factory's BaseUrl is a custom one
+    public async Task Bad_or_conflicting_region_stops_startup(string region, string message)
+    {
+        await using var factory = new LocalModeFactory { Settings = { ["Ticketing:Region"] = region } };
+
+        Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+
+        Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
+        Assert.Contains(message, report, StringComparison.Ordinal);
     }
 
     // Each bad value must reach the entry point as a configuration failure (reported without a stack trace) that

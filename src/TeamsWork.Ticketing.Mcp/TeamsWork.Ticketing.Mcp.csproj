@@ -14,6 +14,13 @@
          use (see InvariantGlobalization in Directory.Build.props). -->
     <ContainerBaseImage>mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled-extra</ContainerBaseImage>
     <ContainerRuntimeIdentifier>linux-x64</ContainerRuntimeIdentifier>
+    <!-- Every platform the release and the container publish for, so packages.lock.json pins their packages too and a
+         locked restore for any of them succeeds. Keep in step with the release matrix. -->
+    <RuntimeIdentifiers>win-x64;linux-x64;osx-arm64</RuntimeIdentifiers>
+    <!-- The releases are single-file executables, so code that breaks there (Assembly.Location and the like) is reported
+         at build time. It also makes every restore reference the ILLink package single-file publishing uses, so the lock
+         file matches the release publishes. -->
+    <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
     <ContainerUser>app</ContainerUser>
     <ContainerFamily>noble-chiseled-extra</ContainerFamily>
     <EnableSdkContainerSupport>true</EnableSdkContainerSupport>

@@ -43,6 +43,33 @@ internal sealed class FakeHttpHandler : HttpMessageHandler
     }
 }
 
+/// <summary>
+/// Answers every request with <paramref name="body"/>, counting them. Request number <paramref name="hold"/> (the first,
+/// by default; 0 for none) waits until <see cref="Release"/>, after signalling <see cref="Entered"/>, so a test can act
+/// while it is in flight.
+/// </summary>
+internal sealed class HeldHandler(string body, int hold = 1) : HttpMessageHandler
+{
+    private int _count;
+
+    public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public int Count => Volatile.Read(ref _count);
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (Interlocked.Increment(ref _count) == hold)
+        {
+            Entered.SetResult();
+            await Release.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+        }
+
+        return FakeHttpHandler.Json(HttpStatusCode.OK, body);
+    }
+}
+
 internal sealed record CapturedRequest(HttpMethod Method, Uri Uri, string? Body, HttpRequestHeaders Headers);
 
 internal sealed class FixedTimeProvider : TimeProvider

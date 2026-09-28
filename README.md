@@ -31,14 +31,44 @@ or tool output.
 | `list_ticket_attachments` | read | Files and links on a ticket |
 | `add_ticket_link_attachments` | write | Attach hyperlinks with a comment |
 | `list_activity_attachments` | read | Attachments of one attachment activity |
-| `get_instance` | read | Custom field definitions, assignees, workflows, SLA settings |
+| `get_instance` | read | Custom field definitions, assignees, workflows, SLA settings; `section` returns one part |
 | `list_tag_categories` | read | Tag categories and tags |
+| `find_ticket_by_number` | read | Full ticket from the number people quote (`ticketNo`), not the UUID |
+| `get_ticket_context` | read | Ticket, recent activity, and attachments in one call |
+| `find_similar_tickets` | read | Open tickets with similar titles, to check for duplicates before `create_ticket` |
+| `assign_ticket` | write | Assign a ticket by the assignee's email or name |
+| `whoami` | read | The account writes are attributed to |
+| `list_my_tickets` | read | Tickets assigned to or raised by the caller |
+| `list_sla_risk` | read | Unresolved tickets that breached or escalated an SLA |
+| `count_tickets` | read | Ticket counts by status, priority, or assignee |
+| `upload_ticket_files` | write | Upload files from a chosen local folder (stdio only, Windows and Linux, off unless `Ticketing:UploadRoot` is set) |
 
 Every write is attributed to the **authenticated caller** (from the token's claims). Tools never accept a `user`
 argument, so an agent cannot impersonate someone else. App-only callers (for example a Foundry managed identity) are
 attributed to the configured service account.
 
-File uploads are intentionally not exposed (MCP tools are a poor fit for binary uploads); link attachments are.
+Writes accept names where the API wants IDs: a person by email or name (looked up in the instance's assignee list),
+a tag category by name, and a custom field by title. Every person is checked against the assignee list: a reference
+can't pair one listed person's ID with another email, an outsider can't use a listed person's name, and an assignee must
+be on the list. People outside the list (requestors, people fields) are otherwise accepted as given; set
+`Ticketing:ExternalEmailDomains` to limit them to your own domains. Custom field values are checked against the field's
+type and options before they are sent, and a field the server can't check is refused. Instance settings and tags are
+cached for `Ticketing:InstanceCacheSeconds`; a name not found in the cache is looked up once more, and a refresh is
+honoured at most once every 30 seconds for the whole cache (otherwise the cached copy is used).
+
+The API can't filter by assignee, requestor, ticket number, or SLA state, so `list_my_tickets`, `list_sla_risk`,
+`count_tickets`, and `find_ticket_by_number` read tickets and filter them in the server. One call reads at most
+`Ticketing:MaxScanTickets` tickets (default 1000, usually a single request) and says when it stopped early;
+`find_ticket_by_number` reports a number missing only when one response proves it, and otherwise says it may exist.
+`list_sla_risk` says so when the instance has SLA tracking turned off, rather than reporting nothing at risk.
+
+A write that fails after it may have reached the API (a timeout, a 5xx, a connection dropped before or while the
+answer arrived) says it may have gone through, so an agent checks before retrying instead of doing it twice. Only
+writes that are safe to repeat are retried automatically; a status change with a comment isn't.
+
+File uploads are offered only over stdio, and only from the folder named by `Ticketing:UploadRoot`, so an agent can't
+send arbitrary local files; uploads are private unless the agent asks otherwise. See
+[docs/stdio.md](docs/stdio.md#file-uploads). The remote endpoint offers link attachments only.
 
 ## Repository layout
 
@@ -53,7 +83,8 @@ pipelines/azure-pipelines.yml    Azure DevOps: build, test, audit, deploy
 docs/                            Setup guides: Entra, Copilot Studio, Foundry, stdio, security
 ```
 
-The server was built against TeamsWork Ticketing API v1.1.0 (`https://teamswork.azure-api.net/ticketing/v1`). The
+The server was built against TeamsWork Ticketing API v1.1.0. It uses the US endpoint
+(`https://teamswork.azure-api.net/ticketing/v1`) unless `Ticketing:Region` is set to `EU` or `AUS`. The
 vendor's OpenAPI document is not redistributed here; obtain it from TeamsWork. If you keep a local copy in
 `docs/openapi/`, it is git-ignored.
 
@@ -74,7 +105,8 @@ irm https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/script
 curl -fsSL https://raw.githubusercontent.com/joelst/teamswork-ticketing-mcp/main/scripts/install.sh | sh
 ```
 
-Restart your client and look for `teamswork-ticketing` with 12 tools. Run the same command again to upgrade.
+If your Ticketing instance is hosted in the EU or Australia, add `-Region EU` / `--region EU` (or `AUS`); US is
+the default. Restart your client and look for `teamswork-ticketing` with 20 tools. Run the same command again to upgrade.
 [docs/stdio.md](docs/stdio.md) covers the script's options, uninstalling, Visual Studio, and the manual setup for
 each client.
 
@@ -120,9 +152,11 @@ variable overrides the same value in the user-secrets file below, as usual for .
 }
 ```
 
-This is the same file `dotnet user-secrets set` writes, so both approaches below end up in the same place. Don't
-edit the `appsettings.json` shipped next to the executable: it is read from the current directory, which MCP
-clients don't set to the install folder, and every value in it already has a built-in default.
+This is the same file `dotnet user-secrets set` writes, so both approaches below end up in the same place. With
+`--stdio` and `--local`, settings come only from that file, environment variables, and the command line; no
+`appsettings.json` is read, neither in the folder the server is started from (MCP clients start servers in your
+workspace, where a cloned repository or an agent could otherwise redirect requests, API key included, to another host)
+nor next to the executable (which may be a shared folder). Every setting has a built-in default.
 
 ## Run it locally from source
 
@@ -180,7 +214,7 @@ If the API key or account is missing, it exits with a message naming the missing
 claude mcp add --transport stdio --scope user teamswork-ticketing -- "<full path>\publish\TeamsWork.Ticketing.Mcp.exe" --stdio
 ```
 
-Restart Claude Code and run `/mcp`. It should list `teamswork-ticketing` with 12 tools. Try
+Restart Claude Code and run `/mcp`. It should list `teamswork-ticketing` with 20 tools. Try
 "list my five most recent open tickets".
 
 **VS Code / GitHub Copilot Chat** (`.vscode/mcp.json`, or your user `mcp.json` for every workspace):
@@ -241,13 +275,26 @@ Estimated running cost: Container Apps consumption with scale-to-zero (mostly wi
 | Key | Where | Meaning |
 | --- | --- | --- |
 | `Ticketing:ApiKey` | Key Vault secret `Ticketing--ApiKey` → container secret → env `Ticketing__ApiKey`; user secrets locally | Ticketing instance API key |
-| `Ticketing:BaseUrl` | appsettings / env | Ticketing API base URL |
+| `Ticketing:Region` | env / user secrets | Data region of the Ticketing instance: `US` (default), `EU`, or `AUS`; picks the vendor endpoint |
+| `Ticketing:BaseUrl` | appsettings / env | Ticketing API base URL, for an endpoint `Region` doesn't cover. Set one or the other |
+| `Ticketing:InstanceCacheSeconds` | env | How long instance settings and tags are cached, default 300; `0` turns it off |
+| `Ticketing:MaxScanTickets` | env | Most tickets one filtering tool call (or ticket-number lookup) reads, default 1000 |
+| `Ticketing:ExternalEmailDomains` | env / appsettings; hosted: `externalEmailDomains` in app.bicep (pipeline variable `externalEmailDomains`) | Comma-separated email domains allowed for people outside the assignee list (requestors, people fields); unset allows any. Matching is exact (list each subdomain), ASCII only (punycode for an internationalised domain); startup refuses wildcards |
+| `Ticketing:MaxUpstreamRequestsPerCallerPerMinute` | env | Upstream requests one caller may cause per minute, counting every request a tool call makes, default 50; `0` turns it off (Entra mode) |
+| `Ticketing:UploadRoot` | env / user secrets (stdio only) | Folder `upload_ticket_files` may read; unset turns uploads off |
+| `Ticketing:MaxUploadBytes` | env | Largest total size of one upload, default 10 MiB |
 | `Ticketing:DefaultTimeZoneId` | appsettings / env | IANA zone for the API's required `timezone` offset (default `America/Chicago`) |
-| `Ticketing:ServiceAccount:{Id,Name,Email}` | env / user secrets | Actor for app-only callers; **required** in stdio and `--local` modes |
+| `Ticketing:ServiceAccount:{Id,Name,Email}` | env / user secrets | Actor for app-only callers; **required** in stdio and `--local` modes. `Id` must be the account's Entra object ID (a GUID), or its email in the email-to-ticket form; startup refuses anything else |
 | `Auth:Mode` / `--local` | CLI / env (dev only) | `Local` = unauthenticated loopback HTTP on `Local:Port` (default 5188). Unset means `Entra`; any other value stops startup |
 | `Entra:TenantId`, `Entra:ClientId` | env | Server app registration (Entra HTTP mode) |
 | `Entra:PublicBaseUrl` | env | Optional custom domain for protected-resource metadata |
 | `Mcp:RequestsPerMinutePerCaller` | env | Requests one caller (token tenant and object ID) may make per minute, default 60; `0` turns it off (Entra mode) |
 | `Mcp:MaxRequestBodyBytes` | env | Largest request body accepted, default 1 MiB |
 | `Ticketing:MaxResponseBytes` | env | Largest upstream response read, default 8 MiB |
+| `Ticketing:MaxConcurrentUpstreamRequests` | env | Upstream requests in flight at once across all callers, default 8, bounding the memory responses take; up to 32 more wait their turn, and beyond that a request is refused as busy |
+| `Ticketing:RateLimitPermits`, `Ticketing:RateLimitWindowSeconds` | env | The process-wide upstream limit, default 100 requests per 60 s to match the vendor's. Keep `MaxUpstreamRequestsPerCallerPerMinute` below it |
+| `Ticketing:DefaultPageSize`, `Ticketing:MaxPageSize` | env | Page size when a tool call gives none (default 20) and the largest it may ask for (default 100); startup refuses a default above the maximum |
+| `Ticketing:RequestTimeoutSeconds` | env | Time limit for each upstream attempt, default 30 |
+| `Entra:RequiredScope`, `Entra:RequiredAppRole` | appsettings / env | What a caller's token must carry: the delegated scope (default `access_as_user`) or the app role (default `Ticketing.ReadWrite`) |
+| `Entra:Instance` | appsettings / env | Entra sign-in endpoint, default `https://login.microsoftonline.com/` |
 | `KeyVault:Uri` | env (local only) | Load `Ticketing--ApiKey` from Key Vault with `DefaultAzureCredential` |
