@@ -3,6 +3,62 @@
 Status: proposed. Scope: the hosted HTTP server in Entra mode, one Ticketing instance. stdio and `--local` keep
 today's behaviour (one service account, full access).
 
+## Status and next steps
+
+Updated 2026-09-28.
+
+**Done**
+- Milestone 0 (spikes): see [Milestone 0 findings](#milestone-0-findings).
+- Prerequisite fixes the spikes found. Date filters had never filtered: they now take whole days and send the offset the
+  API expects (`TicketDateFilters`). Scans read newest created first and say where to continue. The stdio smoke checks
+  wait for the reply instead of a fixed time.
+
+**Small follow-ups, independent of the milestones**
+
+| # | Item | How | Why |
+| --- | --- | --- | --- |
+| 1 | Reinstall the local MCP server | Run the installer again | The installed copy predates these fixes; its `update_ticket` reported an error for an update that was applied |
+| 2 | Decide on test ticket #2034's due date (2026-10-15) | Keep it as a live regression fixture, or clear it | It's the only ticket with an expected date, so the expected-date live checks depend on it |
+| 3 | Confirm that assignment moves `lastUpdatedOn` | On #2034: assign, then compare `lastUpdatedOn` with the new activity | The index's incremental sync assumes it; only comments and status changes were observed |
+| 4 | Find out what `cc` on a comment means | Ask the vendor, or cc someone on a test comment in the app and see whether they can open the ticket | Until known, `cc` grants no visibility |
+| 5 | Report the API's deviations to the vendor | One issue listing each with the evidence above | Date filters ignore a time of day; list filters apply `timezone` opposite to the spec; lists key custom fields by title; the default order isn't by date; due dates are stored at the setter's midnight. A vendor fix would change the rules in `TicketDateFilters`, so its tests pin today's behaviour |
+| 6 | Delete the merged `feat/more-tools` and `fix/date-filters` branches | After this lands on `main` | Both are merged; their work is on `main` |
+
+**Milestone 1, concretely** (roles and the tool layer; ships behind `Access:Mode = Open`, so nothing changes until it's
+switched on)
+
+1. **Settings**
+   - `Configuration/AccessOptions.cs`: `Access:Mode` (`Open` or `RoleScoped`, validated like `Auth:Mode`; startup
+     refuses `RoleScoped` with stdio or `--local`).
+   - `Ticketing:ApiKeyIsReadOnly` on `TicketingOptions`.
+   - README configuration rows, and `accessMode` / `apiKeyIsReadOnly` parameters in `app.bicep` and `app.bicepparam`.
+2. **The caller's role**
+   - `Auth/AccessContext.cs` (scoped): resolved once per request from the acting user.
+     - Delegated token: staff when the `oid` is on the cached instance's assignee list (compared as object IDs, or by
+       `upn` for entries whose ID is an email); anyone else is a requester.
+     - App-only token: `Ticketing.ReadWrite` is a read-write agent, the new `Ticketing.Read` a read-only one.
+     - An unreadable instance makes a delegated caller a requester, never staff.
+   - `Open` mode resolves everyone to today's full access.
+3. **Policies on the tools**
+   - Authorization requirements `Staff`, `Writer`, `AnyCaller`, with async handlers that read `AccessContext`.
+   - `[Authorize(Policy = ...)]` on every tool method, per the table in [Tools per role](#tools-per-role).
+   - A read-only key denies `Writer` to everyone.
+4. **App registration**: `infra/scripts/New-EntraAppRegistrations.ps1` adds the `Ticketing.Read` app role beside
+   `Ticketing.ReadWrite`, and `docs/setup-entra.md` says when to use each.
+5. **Tests**
+   - One table-driven integration test over `McpServerFactory`: for each role's token, `tools/list` returns exactly
+     that role's tools, and calling any other tool is refused.
+   - `Open` mode lists every tool for every caller, as today.
+   - Role resolution unit tests: an `oid` on or off the list, an email-ID entry matched by `upn`, an unreadable
+     instance, each app role, and the read-only key.
+6. **Exit criteria**
+   - The full suite is green with `Open` as the default.
+   - Deployed with `RoleScoped` to a test instance, a requester's client lists only requester tools, and a staff
+     member's lists all of them.
+
+Milestone 2 (single-ticket checks) follows the same pattern for the row layer. Milestones 3 to 5 are as described
+below; the index's incremental sync uses `TicketDateFilters` with `timezone` 0, so its days are UTC days.
+
 ## Why
 
 The Ticketing API authenticates with one instance API key, which can read and change every ticket. The API knows
