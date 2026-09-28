@@ -86,6 +86,24 @@ function Invoke-GraphPost([string] $Uri, $Body) {
     finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
 }
 
+# Tenant-wide consent (what "Grant admin consent" does) for the client to call a resource with these delegated
+# scopes, written as an oauth2PermissionGrant. `az ad app permission admin-consent` goes through an older portal API
+# that tries to create the client's service principal itself, and fails when it already exists.
+function Grant-DelegatedConsent([string] $ClientSpId, [string] $ResourceSpId, [string[]] $Scopes) {
+    # No query string: az is a .cmd on Windows, and cmd.exe splits an unquoted URI at &.
+    $grants = @(Invoke-Az @('rest', '--method', 'GET', '--uri', "https://graph.microsoft.com/v1.0/servicePrincipals/$ClientSpId/oauth2PermissionGrants", '--query', 'value', '-o', 'json') | ConvertFrom-Json)
+    $grant = @($grants | Where-Object { $_.resourceId -eq $ResourceSpId -and $_.consentType -eq 'AllPrincipals' })[0]
+    if (-not $grant) {
+        Invoke-GraphPost 'https://graph.microsoft.com/v1.0/oauth2PermissionGrants' @{
+            clientId = $ClientSpId; consentType = 'AllPrincipals'; resourceId = $ResourceSpId; scope = ($Scopes -join ' ')
+        }
+        return
+    }
+    $have = @(([string] $grant.scope) -split ' ' | Where-Object { $_ })
+    $missing = @($Scopes | Where-Object { $_ -notin $have })
+    if ($missing) { Invoke-GraphPatch "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($grant.id)" @{ scope = (($have + $missing) -join ' ') } }
+}
+
 function Get-App([string] $DisplayName) {
     Invoke-Az @('ad', 'app', 'list', '--display-name', $DisplayName, '--query', "[?displayName=='$DisplayName'] | [0]", '-o', 'json') | ConvertFrom-Json
 }
@@ -164,13 +182,27 @@ if ($client) {
         }
         Write-Host "    redirect URI and permissions set"
     }
-    if (-not (Get-ServicePrincipal $client.appId) -and $PSCmdlet.ShouldProcess($ClientAppName, 'Create service principal')) {
+    $clientSp = Get-ServicePrincipal $client.appId
+    if (-not $clientSp -and $PSCmdlet.ShouldProcess($ClientAppName, 'Create service principal')) {
         Invoke-Az @('ad', 'sp', 'create', '--id', $client.appId) | Out-Null
+        $clientSp = Get-ServicePrincipal $client.appId
     }
-    if ($PSCmdlet.ShouldProcess($ClientAppName, 'Grant admin consent')) {
+    if ($clientSp -and $PSCmdlet.ShouldProcess($ClientAppName, "Grant admin consent ($ScopeName, offline_access)")) {
         # Consent isn't checked when the portal registration is created, so without it every sign-in fails later.
-        try { Invoke-Az @('ad', 'app', 'permission', 'admin-consent', '--id', $client.appId) | Out-Null; Write-Host '    admin consent granted' }
-        catch { Write-Warning "Admin consent failed ($_). Grant it in Entra admin center > App registrations > $ClientAppName > API permissions." }
+        try {
+            $serverSp = Get-ServicePrincipal $server.appId
+            if (-not $serverSp) { throw "'$ServerAppName' has no enterprise app (service principal). Run New-EntraAppRegistrations.ps1 again." }
+            $graphSp = Get-ServicePrincipal $GraphAppId
+            Grant-DelegatedConsent $clientSp.id $serverSp.id @($ScopeName)
+            Grant-DelegatedConsent $clientSp.id $graphSp.id @('offline_access')
+            Write-Host '    admin consent granted'
+        }
+        catch {
+            # Only the first line: az's errors from Graph run to a screenful of JSON.
+            $first = ("$_" -split "`n")[0]
+            if ($first.Length -gt 300) { $first = $first.Substring(0, 300) + '...' }
+            Write-Warning "Admin consent failed: $first. Grant it in Entra admin center > App registrations > $ClientAppName > API permissions > Grant admin consent."
+        }
     }
 }
 
