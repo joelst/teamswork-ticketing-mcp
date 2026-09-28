@@ -379,10 +379,12 @@
     # $Default, a value about to be written to it), and one may use either separator (Ticketing__BaseUrl or
     # Ticketing:BaseUrl) in any case. The account lookup decides with these where the API key may go, so it must read
     # them exactly as the server does.
+    # A variable that is set wins even when empty: .NET configuration keeps an empty value and it overrides the file,
+    # so an empty Ticketing__Region means the server's default, US.
     function Get-Setting([string] $Name, $Secrets, [string] $Default) {
         $names = @($Name, $Name.Replace(':', '__'))
         foreach ($variable in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
-            if ($names -contains $variable.Key -and $variable.Value) { return [string] $variable.Value }   # -contains ignores case
+            if ($names -contains $variable.Key) { return [string] $variable.Value }   # -contains ignores case
         }
         # [ordered] keys ignore case, like .NET configuration keys.
         Get-First $Default $Secrets[$Name]
@@ -486,7 +488,10 @@
             $nameDefault = $secrets['Ticketing:ServiceAccount:Name']
         }
         else {
-            $found = Find-Person $email $secrets['Ticketing:ApiKey'] (Get-Setting 'Ticketing:Region' $secrets $Region) (Get-Setting 'Ticketing:BaseUrl' $secrets)
+            # The region as the server will resolve it. For the base URL, a custom one in the file still skips the lookup
+            # even if an empty variable blanks it for the server: skipping never sends the key anywhere it shouldn't go.
+            $customBaseUrl = Get-First (Get-Setting 'Ticketing:BaseUrl' $secrets) $secrets['Ticketing:BaseUrl']
+            $found = Find-Person $email $secrets['Ticketing:ApiKey'] (Get-Setting 'Ticketing:Region' $secrets $Region) $customBaseUrl
             if (-not $found -and $signedIn.id -and $signedIn.email -and $signedIn.email.Trim() -ieq $email) {
                 $found = [pscustomobject]@{ Id = $signedIn.id; Name = $signedIn.name; Source = 'your Azure CLI sign-in' }
             }

@@ -417,11 +417,14 @@ people_with_email() {
 # over the secrets file, and the account lookup decides with these where the API key may go, so it must read them as
 # the server does. A shell drops names it can't hold, such as one with a colon, from what it passes to `env`, so on
 # Linux the environment this script started with is read too; macOS has no such view, and no shell there can set one.
+# Succeeds, printing the value, when the variable is set, even to nothing: .NET keeps an empty value and it overrides
+# the file, so an empty Ticketing__Region means the server's default, US. Fails when it isn't set at all.
 env_setting() {
     es_want=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
     { env; if [ -r "/proc/$$/environ" ]; then tr '\0' '\n' <"/proc/$$/environ"; fi; } |
         awk -v a="$es_want" -v b="$(printf '%s' "$es_want" | sed 's/:/__/g')" '
-            { k = $0; sub(/=.*/, "", k); k = tolower(k); if (k == a || k == b) { v = $0; sub(/^[^=]*=/, "", v); if (v != "") { print v; exit } } }'
+            { k = $0; sub(/=.*/, "", k); k = tolower(k); if (k == a || k == b) { v = $0; sub(/^[^=]*=/, "", v); print v; found = 1; exit } }
+            END { exit !found }'
 }
 
 # Prints the Entra object ID and display name (JSON-escaped) and where they came from, one per line, for the email
@@ -433,11 +436,15 @@ find_person() {
     fp_email="$1"; fp_key="$2"
     fp_want=$(printf '%s' "$fp_email" | tr '[:upper:]' '[:lower:]')
     # The region and base URL the server will use: the environment first, then --region, then the secrets file.
-    fp_region=$(env_setting 'Ticketing:Region')
-    [ -n "$fp_region" ] || fp_region=$REGION
-    [ -n "$fp_region" ] || fp_region=$(secret_get 'Ticketing:Region')
+    # A region variable that is set wins even when empty (US), as it does for the server.
+    if ! fp_region=$(env_setting 'Ticketing:Region'); then
+        fp_region=$REGION
+        [ -n "$fp_region" ] || fp_region=$(secret_get 'Ticketing:Region')
+    fi
     fp_region=$(printf '%s' "$fp_region" | tr '[:lower:]' '[:upper:]')
-    fp_custom=$(env_setting 'Ticketing:BaseUrl')
+    # For the base URL, a custom one in the file still skips the lookup even if an empty variable blanks it for the
+    # server: skipping never sends the key anywhere it shouldn't go.
+    fp_custom=$(env_setting 'Ticketing:BaseUrl') || fp_custom=""
     [ -n "$fp_custom" ] || fp_custom=$(secret_get 'Ticketing:BaseUrl')
     case "$fp_region" in
         ''|US) fp_base='https://teamswork.azure-api.net/ticketing/v1' ;;

@@ -69,8 +69,20 @@ else
 fi
 check 'and a lower-case one' "$(env 'ticketing__baseurl=https://elsewhere.example/v1' sh -c "$env_setting_fn
 env_setting Ticketing:BaseUrl")" 'https://elsewhere.example/v1'
-check 'an empty variable counts as unset' "$(env 'Ticketing__BaseUrl=' sh -c "$env_setting_fn
-env_setting Ticketing:BaseUrl")" ''
+check 'an empty variable is set, to nothing, as .NET keeps it' "$(env 'Ticketing__BaseUrl=' sh -c "$env_setting_fn
+v=\$(env_setting Ticketing:BaseUrl) && echo \"set:[\$v]\"")" 'set:[]'
+check 'an unset variable is not set' "$(env -u Ticketing__BaseUrl sh -c "$env_setting_fn
+env_setting Ticketing:BaseUrl || echo unset")" 'unset'
+# An empty region variable overrides the file and --region, and the server then uses its default: so must the lookup.
+printf '{\n  "Ticketing:Region": "EU"\n}\n' >"$SECRETS_PATH"
+Ticketing__Region=''; export Ticketing__Region; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
+check 'an empty region variable over a file region means US, as for the server' "$(cat "$tmp/curl-config")" 'url = "https://teamswork.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
+REGION=EU; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
+check 'and over --region too' "$(cat "$tmp/curl-config")" 'url = "https://teamswork.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
+REGION=""; unset Ticketing__Region
+find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
+check 'without the variable, the file region is used' "$(cat "$tmp/curl-config")" 'url = "https://ticketing-apim-eu.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
+: >"$SECRETS_PATH"
 Ticketing__Region=EU; export Ticketing__Region; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
 check 'a region set in the environment picks the endpoint, as it does for the server' "$(cat "$tmp/curl-config")" 'url = "https://ticketing-apim-eu.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
 unset Ticketing__Region

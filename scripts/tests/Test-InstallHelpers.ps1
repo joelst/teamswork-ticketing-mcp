@@ -26,7 +26,9 @@ Check 'nothing is flat' (-not (Test-NestedSecrets $null))
 # ---- Get-Setting: as the server's .NET configuration reads it --------------------------------------------------------
 # Environment variable names are case-sensitive on Linux and macOS, so each spelling is its own variable there.
 $file = [ordered]@{ 'ticketing:baseurl' = 'https://from-file.example/v1'; 'Ticketing:Region' = 'AUS' }
-function Clear-TicketingVariables { foreach ($n in 'Ticketing:BaseUrl', 'Ticketing__BaseUrl', 'TICKETING__BASEURL', 'ticketing__baseurl', 'Ticketing__Region') { [Environment]::SetEnvironmentVariable($n, $null) } }
+# Deleted with a real null: PowerShell turns $null into "" for a string parameter, which .NET Core keeps as an empty
+# variable rather than deleting it.
+function Clear-TicketingVariables { foreach ($n in 'Ticketing:BaseUrl', 'Ticketing__BaseUrl', 'TICKETING__BASEURL', 'ticketing__baseurl', 'Ticketing__Region') { [Environment]::SetEnvironmentVariable($n, [NullString]::Value) } }
 Clear-TicketingVariables
 Check 'the secrets file is read, whatever the case of its keys' ((Get-Setting 'Ticketing:BaseUrl' $file) -eq 'https://from-file.example/v1')
 Check 'a value about to be written wins over the file' ((Get-Setting 'Ticketing:Region' $file 'EU') -eq 'EU')
@@ -40,6 +42,17 @@ Clear-TicketingVariables
 Check 'a region in the environment wins over -Region and the file, as at runtime' ((Get-Setting 'Ticketing:Region' $file 'EU') -eq 'US')
 Clear-TicketingVariables
 Check 'nothing set anywhere is nothing' ($null -eq (Get-Setting 'Ticketing:BaseUrl' ([ordered]@{})))
+# An empty variable can exist (on Windows too, under .NET Core; Windows PowerShell 5.1 deletes one set to nothing).
+# .NET configuration keeps it, and it overrides the file and -Region: the server then uses its default region, US, so
+# the lookup must see it as set and empty.
+[Environment]::SetEnvironmentVariable('Ticketing__Region', '')
+if ([Environment]::GetEnvironmentVariables().Contains('Ticketing__Region')) {
+    Check 'an empty region variable wins over -Region and the file' ((Get-Setting 'Ticketing:Region' $file 'EU') -eq '')
+}
+else {
+    Write-Host 'skip an empty variable (this PowerShell deletes a variable set to nothing)'
+}
+Clear-TicketingVariables
 Clear-TicketingVariables
 
 # ---- Find-Person -----------------------------------------------------------------------------------------------------
