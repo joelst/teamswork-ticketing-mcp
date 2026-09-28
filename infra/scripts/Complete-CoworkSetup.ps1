@@ -20,8 +20,9 @@
       6. With -OAuthReferenceId and the developer URLs, builds the package with scripts/Build-CoworkPackage.ps1.
          With -Install as well, installs it for you with the Agents Toolkit CLI (atk).
 
-    Requires Azure CLI 2.60+ signed in to the tenant with Application Administrator rights (Cloud Application
-    Administrator can't grant admin consent). -WhatIf shows the Entra changes without making them.
+    Requires Azure CLI 2.60+ signed in to the tenant with rights to register apps, grant admin consent and assign
+    users (Application Administrator, as for New-EntraAppRegistrations.ps1). Assigning a group needs Entra ID P1 or
+    P2. -WhatIf shows the Entra changes without making them.
 
 .EXAMPLE
     ./Complete-CoworkSetup.ps1 -ResourceGroup rg-taasmcp-test -AssignGroup 'Help desk agents' -CreateSecret
@@ -172,9 +173,9 @@ foreach ($s in $secrets | Where-Object { $_.endDateTime }) {
     if ($days -lt 30) { Write-Warning "Secret '$($s.displayName)' on $ClientAppName expires in $days days ($($s.endDateTime))." }
 }
 if ($CreateSecret -and $client) {
-    if (-not (Get-Command Set-Clipboard -ErrorAction SilentlyContinue)) {
-        throw 'No clipboard here (Set-Clipboard), and the secret is never printed. Create it in the Entra admin center instead.'
-    }
+    # Tried before the secret exists: if the clipboard fails afterwards, the secret is made but can't be read.
+    try { Set-Clipboard -Value ' ' -ErrorAction Stop }
+    catch { throw "The clipboard isn't available here ($($_.Exception.Message)), and the secret is never printed. Create it in the Entra admin center instead." }
     if ($PSCmdlet.ShouldProcess($ClientAppName, "Add a client secret valid for $SecretMonths months")) {
         $end = (Get-Date).AddMonths($SecretMonths).ToString('yyyy-MM-dd')
         # Its own call, not Invoke-Az: warnings on stderr mustn't mix into the value, and a failure's text isn't shown
@@ -196,7 +197,9 @@ elseif ($client -and -not @($secrets | Where-Object { $_.endDateTime -and [datet
 if ($AssignUser.Count -or $AssignGroup.Count) {
     $serverSp = Get-ServicePrincipal $server.appId
     if (-not $serverSp) { throw "'$ServerAppName' has no enterprise app (service principal). Run New-EntraAppRegistrations.ps1 again." }
-    $assigned = @(Invoke-Az @('rest', '--method', 'GET', '--uri', "https://graph.microsoft.com/v1.0/servicePrincipals/$($serverSp.id)/appRoleAssignedTo?`$select=principalId&`$top=999", '--query', 'value[].principalId', '-o', 'json') | ConvertFrom-Json)
+    # No query string: az is a .cmd on Windows, so cmd.exe would take an unquoted & in the URI as a command separator.
+    # This reads the first page only; someone assigned beyond it is caught by Graph's "already exists" below.
+    $assigned = @(Invoke-Az @('rest', '--method', 'GET', '--uri', "https://graph.microsoft.com/v1.0/servicePrincipals/$($serverSp.id)/appRoleAssignedTo", '--query', 'value[].principalId', '-o', 'json') | ConvertFrom-Json)
     $principals = @()
     foreach ($u in $AssignUser) { $principals += [pscustomobject]@{ Name = $u; Id = (Invoke-Az @('ad', 'user', 'show', '--id', $u, '--query', 'id', '-o', 'tsv')) } }
     foreach ($g in $AssignGroup) { $principals += [pscustomobject]@{ Name = $g; Id = (Invoke-Az @('ad', 'group', 'show', '--group', $g, '--query', 'id', '-o', 'tsv')) } }
@@ -204,10 +207,15 @@ if ($AssignUser.Count -or $AssignGroup.Count) {
         if ($p.Id -in $assigned) { Write-Host "    $($p.Name) is already assigned to $ServerAppName"; continue }
         if ($PSCmdlet.ShouldProcess($p.Name, "Assign to $ServerAppName")) {
             # The default access role: the server's own app role is for applications, not people.
-            Invoke-GraphPost "https://graph.microsoft.com/v1.0/servicePrincipals/$($serverSp.id)/appRoleAssignedTo" @{
-                principalId = $p.Id; resourceId = $serverSp.id; appRoleId = '00000000-0000-0000-0000-000000000000'
+            try {
+                Invoke-GraphPost "https://graph.microsoft.com/v1.0/servicePrincipals/$($serverSp.id)/appRoleAssignedTo" @{
+                    principalId = $p.Id; resourceId = $serverSp.id; appRoleId = '00000000-0000-0000-0000-000000000000'
+                }
+                Write-Host "    assigned $($p.Name) to $ServerAppName"
             }
-            Write-Host "    assigned $($p.Name) to $ServerAppName"
+            catch {
+                if ("$_" -match 'already exists') { Write-Host "    $($p.Name) is already assigned to $ServerAppName" } else { throw }
+            }
         }
     }
 }
