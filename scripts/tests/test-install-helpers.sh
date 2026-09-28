@@ -73,6 +73,39 @@ check 'an empty variable is set, to nothing, as .NET keeps it' "$(env 'Ticketing
 v=\$(env_setting Ticketing:BaseUrl) && echo \"set:[\$v]\"")" 'set:[]'
 check 'an unset variable is not set' "$(env -u Ticketing__BaseUrl sh -c "$env_setting_fn
 env_setting Ticketing:BaseUrl || echo unset")" 'unset'
+# Two spellings with different values: .NET folds them into one key and which it reads last isn't defined, so the
+# server's value can't be known (2). The same value twice is fine. Each in a child that really has both in its
+# environment, as a colon name can only get there that way.
+if [ -r "/proc/$$/environ" ]; then
+    check 'a colon name and an underscore name with different values are unknowable' "$(env 'Ticketing:BaseUrl=https://elsewhere.example/v1' 'Ticketing__BaseUrl=https://teamswork.azure-api.net/ticketing/v1' sh -c "$env_setting_fn
+env_setting Ticketing:BaseUrl; echo rc=\$?")" 'rc=2'
+    check 'with the same value they are that value' "$(env 'Ticketing:BaseUrl=https://a.example' 'Ticketing__BaseUrl=https://a.example' sh -c "$env_setting_fn
+env_setting Ticketing:BaseUrl; echo; echo rc=\$?")" 'https://a.example
+rc=0'
+    check 'a newline in a colon-named value is unknowable' "$(env 'Ticketing:Region=EU
+not-a-region' sh -c "$env_setting_fn
+env_setting Ticketing:Region; echo rc=\$?")" 'rc=2'
+else
+    echo 'skip conflicts with a colon-separated name (no /proc here)'
+fi
+check 'two cases of one name with different values are unknowable' "$(env 'Ticketing__BaseUrl=https://a.example' 'TICKETING__BASEURL=https://b.example' sh -c "$env_setting_fn
+env_setting Ticketing:BaseUrl; echo rc=\$?")" 'rc=2'
+check 'a value with a newline is unknowable, not cut at the line' "$(env 'Ticketing__Region=EU
+not-a-region' sh -c "$env_setting_fn
+env_setting Ticketing:Region; echo rc=\$?")" 'rc=2'
+check "a line of another variable's value that looks like the setting is not the setting" "$(env -u Ticketing__BaseUrl 'X=a
+Ticketing__BaseUrl=https://elsewhere.example/v1' sh -c "$env_setting_fn
+env_setting Ticketing:BaseUrl; echo rc=\$?")" 'rc=1'
+# End to end, an unknowable setting sends nothing, even with --region or the file giving a vendor endpoint.
+Ticketing__Region='EU'; TICKETING__REGION='AUS'; export Ticketing__Region TICKETING__REGION; REGION=EU; rm -f "$tmp/curl-config"
+check 'conflicting region variables get no request, even with --region' "$(find_person 'pat.lee@contoso.com' 'abc123' 2>/dev/null)$([ -f "$tmp/curl-config" ] && echo requested)" ''
+unset Ticketing__Region TICKETING__REGION; REGION=""
+# .NET refuses a secrets file with one key twice (in any case), so the server wouldn't start: no request either.
+printf '{\n  "Ticketing:Region": "EU",\n  "ticketing:region": "AUS"\n}\n' >"$SECRETS_PATH"; rm -f "$tmp/curl-config"
+check 'a key the file has twice gets no request' "$(find_person 'pat.lee@contoso.com' 'abc123' 2>/dev/null)$([ -f "$tmp/curl-config" ] && echo requested)" ''
+rm -f "$SECRETS_PATH"; rm -f "$tmp/curl-config"; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null 2>&1
+check 'no secrets file at all still looks up US' "$(cat "$tmp/curl-config" 2>/dev/null)" 'url = "https://teamswork.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
+: >"$SECRETS_PATH"
 # An empty region variable overrides the file and --region, and the server then uses its default: so must the lookup.
 printf '{\n  "Ticketing:Region": "EU"\n}\n' >"$SECRETS_PATH"
 Ticketing__Region=''; export Ticketing__Region; rm -f "$tmp/curl-config"; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null

@@ -446,13 +446,32 @@ people_with_email() {
 # the server does. A shell drops names it can't hold, such as one with a colon, from what it passes to `env`, so on
 # Linux the environment this script started with is read too; macOS has no such view, and no shell there can set one.
 # Succeeds, printing the value, when the variable is set, even to nothing: .NET keeps an empty value and it overrides
-# the file, so an empty Ticketing__Region means the server's default, US. Fails when it isn't set at all.
+# the file, so an empty Ticketing__Region means the server's default, US. Returns 1 when it isn't set at all.
+# Returns 2, printing nothing, when the server's view can't be known, so the caller must not guess: two spellings set
+# to different values (.NET folds them into one key, and which one it reads last isn't defined), or a value with a
+# newline, which the server reads whole but a line-based reading would cut short.
+# Values are read whole: through the shell for the names it can hold (`env` only lists names, and a name that isn't
+# really set, a line of some other variable's value, is skipped), and on Linux from the NUL-separated start-up
+# environment with newlines swapped for \001. Each value is marked with a leading "=" so an empty one isn't lost.
 env_setting() {
-    es_want=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-    { env; if [ -r "/proc/$$/environ" ]; then tr '\0' '\n' <"/proc/$$/environ"; fi; } |
-        awk -v a="$es_want" -v b="$(printf '%s' "$es_want" | sed 's/:/__/g')" '
-            { k = $0; sub(/=.*/, "", k); k = tolower(k); if (k == a || k == b) { v = $0; sub(/^[^=]*=/, "", v); print v; found = 1; exit } }
-            END { exit !found }'
+    es_a=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    es_b=$(printf '%s' "$es_a" | sed 's/:/__/g')
+    es_values=$(
+        for es_name in $(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'); do
+            [ "$(printf '%s' "$es_name" | tr '[:upper:]' '[:lower:]')" = "$es_b" ] || continue
+            eval "[ -n \"\${$es_name+x}\" ]" || continue
+            printf '='; eval "printf '%s' \"\$$es_name\"" | tr '\n' '\001'; printf '\n'
+        done
+        if [ -r "/proc/$$/environ" ]; then
+            tr '\n\0' '\001\n' <"/proc/$$/environ" | awk -v a="$es_a" -v b="$es_b" '
+                { k = $0; sub(/=.*/, "", k); k = tolower(k); if (k == a || k == b) { v = $0; sub(/^[^=]*=/, "", v); print "=" v } }'
+        fi
+    )
+    [ -n "$es_values" ] || return 1
+    case "$es_values" in *"$(printf '\001')"*) return 2 ;; esac
+    [ -z "$(printf '%s\n' "$es_values" | sort -u | sed -n 2p)" ] || return 2
+    es_value=$(printf '%s\n' "$es_values" | head -n1)
+    printf '%s' "${es_value#=}"
 }
 
 # Prints the endpoint the server will call for region $1 and base URL $3 ($2 is "set" when a base URL is configured,
@@ -492,16 +511,31 @@ find_person() {
     fp_email="$1"; fp_key="$2"
     fp_want=$(printf '%s' "$fp_email" | tr '[:upper:]' '[:lower:]')
     # The region and base URL the server will see: the environment first (a variable that is set wins even when
-    # empty), then --region, then the secrets file.
-    if ! fp_region=$(env_setting 'Ticketing:Region'); then
+    # empty), then --region, then the secrets file. When that can't be known (conflicting variables, a value with a
+    # newline, or a key the file has twice, which the server refuses), no request is made.
+    fp_blocked=""
+    for fp_setting in 'Ticketing:Region' 'Ticketing:BaseUrl'; do
+        fp_n=$(grep -ciE "^[[:space:]]*\"$fp_setting\"[[:space:]]*:" "$SECRETS_PATH" 2>/dev/null) || :
+        [ "${fp_n:-0}" -le 1 ] || fp_blocked=$fp_setting
+    done
+    fp_rc=0; fp_region=$(env_setting 'Ticketing:Region') || fp_rc=$?
+    if [ "$fp_rc" = 2 ]; then fp_blocked='Ticketing:Region'
+    elif [ "$fp_rc" != 0 ]; then
         fp_region=$REGION
         [ -n "$fp_region" ] || fp_region=$(secret_get 'Ticketing:Region')
     fi
     fp_url_set=""
-    if fp_url=$(env_setting 'Ticketing:BaseUrl'); then fp_url_set='set'
+    fp_rc=0; fp_url=$(env_setting 'Ticketing:BaseUrl') || fp_rc=$?
+    if [ "$fp_rc" = 0 ]; then fp_url_set='set'
+    elif [ "$fp_rc" = 2 ]; then fp_blocked='Ticketing:BaseUrl'
     elif secret_has 'Ticketing:BaseUrl'; then fp_url=$(secret_get 'Ticketing:BaseUrl'); fp_url_set='set'
     fi
-    fp_base=$(vendor_endpoint "$fp_region" "$fp_url_set" "$fp_url")
+    fp_base=""
+    if [ -n "$fp_blocked" ]; then
+        echo "    not reading the help desk's assignee list: $fp_blocked is set more than once, or with a line break" >/dev/tty
+    else
+        fp_base=$(vendor_endpoint "$fp_region" "$fp_url_set" "$fp_url")
+    fi
     if [ -n "$fp_base" ] &&
         printf '%s' "$fp_key" | grep -qE '^[A-Za-z0-9._~-]+$'; then
         if fp_json=$(printf 'url = "%s/instance?key=%s&timezone=0"\n' "$fp_base" "$fp_key" | curl -fsS --max-time 20 -K - 2>/dev/null); then

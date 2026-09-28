@@ -381,10 +381,17 @@
     # them exactly as the server does.
     # A variable that is set wins even when empty: .NET configuration keeps an empty value and it overrides the file,
     # so an empty Ticketing__Region means the server's default, US.
+    # Two spellings set to different values throw: .NET folds them into one key, and which one it reads last isn't
+    # defined, so the server's value can't be known.
     function Get-Setting([string] $Name, $Secrets, [string] $Default) {
         $names = @($Name, $Name.Replace(':', '__'))
+        $values = @()
         foreach ($variable in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
-            if ($names -contains $variable.Key) { return [string] $variable.Value }   # -contains ignores case
+            if ($names -contains $variable.Key) { $values += [string] $variable.Value }   # -contains ignores case
+        }
+        if ($values.Count) {
+            foreach ($value in $values) { if ($value -cne $values[0]) { throw "$Name is set more than once, to different values" } }
+            return $values[0]
         }
         if ($Default) { return $Default }
         # [ordered] keys ignore case, like .NET configuration keys. A key in the file with an empty value is set, and
@@ -426,6 +433,14 @@
         }
         foreach ($endpoint in $endpoints.Values) { if ($url -ieq $endpoint) { return $endpoint } }
         return $null
+    }
+
+    # The endpoint the server will use for the region and base URL it will see (environment first, then $Region, then
+    # the file), or $null: a custom or conflicting one, or a setting whose value for the server can't be known, gets no
+    # request.
+    function Get-LookupEndpoint($Secrets, [string] $Region) {
+        try { Resolve-VendorEndpoint (Get-Setting 'Ticketing:Region' $Secrets $Region) (Get-Setting 'Ticketing:BaseUrl' $Secrets) }
+        catch { Write-Host "    not reading the help desk's assignee list: $($_.Exception.Message)"; $null }
     }
 
     # The Entra object ID and display name for an email, so nobody has to know their own GUID: from the help desk's
@@ -509,10 +524,7 @@
             $nameDefault = $secrets['Ticketing:ServiceAccount:Name']
         }
         else {
-            # The endpoint the server will use for the region and base URL it will see (environment first, then -Region,
-            # then the file); a custom or conflicting one gets no request.
-            $endpoint = Resolve-VendorEndpoint (Get-Setting 'Ticketing:Region' $secrets $Region) (Get-Setting 'Ticketing:BaseUrl' $secrets)
-            $found = Find-Person $email $secrets['Ticketing:ApiKey'] $endpoint
+            $found = Find-Person $email $secrets['Ticketing:ApiKey'] (Get-LookupEndpoint $secrets $Region)
             if (-not $found -and $signedIn.id -and $signedIn.email -and $signedIn.email.Trim() -ieq $email) {
                 $found = [pscustomobject]@{ Id = $signedIn.id; Name = $signedIn.name; Source = 'your Azure CLI sign-in' }
             }

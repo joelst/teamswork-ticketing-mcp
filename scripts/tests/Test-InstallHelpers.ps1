@@ -4,7 +4,7 @@
 $ErrorActionPreference = 'Stop'
 $script = Join-Path $PSScriptRoot '..\install.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script), [ref]$null, [ref]$null)
-foreach ($name in 'Get-First', 'Get-Setting', 'Test-NestedSecrets', 'Resolve-VendorEndpoint', 'Find-Person') {
+foreach ($name in 'Get-First', 'Get-Setting', 'Test-NestedSecrets', 'Resolve-VendorEndpoint', 'Get-LookupEndpoint', 'Find-Person') {
     $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     if (-not $definition) { throw "install.ps1 has no function $name" }
     . ([scriptblock]::Create($definition.Extent.Text))
@@ -28,7 +28,7 @@ Check 'nothing is flat' (-not (Test-NestedSecrets $null))
 $file = [ordered]@{ 'ticketing:baseurl' = 'https://from-file.example/v1'; 'Ticketing:Region' = 'AUS' }
 # Deleted with a real null: PowerShell turns $null into "" for a string parameter, which .NET Core keeps as an empty
 # variable rather than deleting it.
-function Clear-TicketingVariables { foreach ($n in 'Ticketing:BaseUrl', 'Ticketing__BaseUrl', 'TICKETING__BASEURL', 'ticketing__baseurl', 'Ticketing__Region') { [Environment]::SetEnvironmentVariable($n, [NullString]::Value) } }
+function Clear-TicketingVariables { foreach ($n in 'Ticketing:BaseUrl', 'Ticketing__BaseUrl', 'TICKETING__BASEURL', 'ticketing__baseurl', 'Ticketing__Region', 'Ticketing:Region', 'TICKETING__REGION') { [Environment]::SetEnvironmentVariable($n, [NullString]::Value) } }
 Clear-TicketingVariables
 Check 'the secrets file is read, whatever the case of its keys' ((Get-Setting 'Ticketing:BaseUrl' $file) -eq 'https://from-file.example/v1')
 Check 'a value about to be written wins over the file' ((Get-Setting 'Ticketing:Region' $file 'EU') -eq 'EU')
@@ -72,8 +72,9 @@ Check 'a region and a base URL naming different endpoints stop the server: no re
 Check 'a custom base URL: no request' ($null -eq (Resolve-VendorEndpoint '' 'https://elsewhere.example/v1'))
 Check 'nor with a region' ($null -eq (Resolve-VendorEndpoint 'EU' 'https://elsewhere.example/v1'))
 Check 'an empty base URL: no request' ($null -eq (Resolve-VendorEndpoint '' ''))
-# As install.ps1 calls it, with what Get-Setting reads: an unset base URL must reach it as $null, not "".
-function Resolve-FromSettings($secrets) { Resolve-VendorEndpoint (Get-Setting 'Ticketing:Region' $secrets) (Get-Setting 'Ticketing:BaseUrl' $secrets) }
+# ---- Get-LookupEndpoint: as install.ps1 calls it, with what Get-Setting reads -----------------------------------------
+# An unset base URL must reach Resolve-VendorEndpoint as $null, not "".
+function Resolve-FromSettings($secrets) { Get-LookupEndpoint $secrets '' }
 Clear-TicketingVariables
 Check 'end to end, the built-in URL in the file with a region is the regional endpoint' ((Resolve-FromSettings ([ordered]@{ 'Ticketing:BaseUrl' = $us; 'Ticketing:Region' = 'EU' })) -eq $eu)
 Check 'end to end, nothing set is US' ((Resolve-FromSettings ([ordered]@{})) -eq $us)
@@ -86,6 +87,20 @@ if ([Environment]::GetEnvironmentVariables().Contains('Ticketing__BaseUrl')) {
 else {
     Write-Host 'skip an empty variable (this PowerShell deletes a variable set to nothing)'
 }
+Clear-TicketingVariables
+# Two spellings of one setting: .NET folds them into one key and which it reads last isn't defined, so different
+# values mean no request (the colon form is a custom URL, the other the vendor's), and the same value is fine.
+[Environment]::SetEnvironmentVariable('Ticketing:BaseUrl', 'https://elsewhere.example/v1')
+[Environment]::SetEnvironmentVariable('Ticketing__BaseUrl', $us)
+Check 'two spellings with different base URLs: no request' ($null -eq (Resolve-FromSettings ([ordered]@{})))
+[Environment]::SetEnvironmentVariable('Ticketing:BaseUrl', $us)
+Check 'two spellings with the same base URL are that URL' ((Resolve-FromSettings ([ordered]@{})) -eq $us)
+Clear-TicketingVariables
+[Environment]::SetEnvironmentVariable('Ticketing:Region', 'EU')
+[Environment]::SetEnvironmentVariable('Ticketing__Region', 'AUS')
+Check 'two spellings with different regions: no request, even with -Region' ($null -eq (Get-LookupEndpoint ([ordered]@{}) 'EU'))
+[Environment]::SetEnvironmentVariable('Ticketing__Region', 'eu')
+Check 'values that differ only in case still count as different' ($null -eq (Resolve-FromSettings ([ordered]@{})))
 Clear-TicketingVariables
 
 # ---- Find-Person -----------------------------------------------------------------------------------------------------
