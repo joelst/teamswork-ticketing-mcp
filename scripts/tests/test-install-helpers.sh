@@ -30,7 +30,7 @@ cat >"$tmp/instance.json" <<'EOF'
 EOF
 
 # Stubs, defined after the functions they replace would be looked up at call time.
-have() { return 1; }  # no Azure CLI
+have() { echo "asked for $1" >"$tmp/have"; return 1; }  # no Azure CLI, but a record that it was looked for
 curl() { cat >"$tmp/curl-config"; [ -f "$tmp/fail" ] && return 22; cat "$tmp/instance.json"; }
 
 out=$(find_person 'pat.lee@CONTOSO.com' 'abc123')
@@ -205,10 +205,8 @@ check 'a key needing URL escaping makes no request' "$(find_person 'pat.lee@cont
 touch "$tmp/fail"
 check 'a failed request is no match' "$(find_person 'pat.lee@contoso.com' 'abc123' 2>/dev/null </dev/null)" ''
 # Its note goes to the terminal; with none (as in CI), writing it fails, and the directory lookup must still follow.
-have() { echo "asked for $1" >"$tmp/have"; return 1; }
 rm -f "$tmp/have"; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null 2>&1 </dev/null
 check 'after a failed request, the directory is still tried' "$(cat "$tmp/have" 2>/dev/null)" 'asked for az'
-have() { return 1; }
 rm -f "$tmp/fail"
 
 if [ "$failures" -ne 0 ]; then echo "$failures failed"; exit 1; fi
