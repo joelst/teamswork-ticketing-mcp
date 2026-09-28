@@ -1,6 +1,8 @@
 #!/bin/sh
 # Tests install.sh's account lookup without a terminal or the network: loads its functions from the script itself,
 # stubs curl and the Azure CLI, and exits 1 on any failure. POSIX sh, like the installer (CI runs it under dash).
+# The functions are loaded with eval, so shellcheck can't see that they read REGION and SECRETS_PATH.
+# shellcheck disable=SC2034
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 installer="$here/../install.sh"
