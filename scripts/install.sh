@@ -323,22 +323,33 @@ install_binary() {
     echo "    installed $EXE_PATH"
 }
 
+# The secrets file as its lines are read everywhere below, or nothing when there is none. dotnet user-secrets starts
+# the file with a UTF-8 byte order mark, which grep doesn't count as space, so it is dropped first (in the C locale,
+# where sed takes the bytes as they are): every read then sees the same lines, and none misses a key behind the mark.
+secrets_text() {
+    [ -f "$SECRETS_PATH" ] || return 0
+    LC_ALL=C sed "1s/^$(printf '\357\273\277')//" "$SECRETS_PATH"
+}
+
 # The secrets file can only be updated safely without a JSON parser when it is a flat object with one
-# "key": "string" pair per line, which is how dotnet user-secrets and this script write it.
-# dotnet user-secrets starts the file with a UTF-8 byte order mark, which grep doesn't count as space, so it is
-# dropped first (in the C locale, where sed takes the bytes as they are).
+# "key": "string" pair per line, which is how dotnet user-secrets and this script write it. A key with an escape in it
+# ("Ticketing:BaseUrl") is refused: .NET decodes it into a setting that every literal key match below would miss.
 secrets_file_editable() {
-    ! LC_ALL=C sed "1s/^$(printf '\357\273\277')//" "$SECRETS_PATH" |
-        grep -vqE '^[[:space:]]*([{}]|\{[[:space:]]*\}|"[^"]+"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?)?[[:space:]]*$'
+    ! secrets_text |
+        grep -vqE '^[[:space:]]*([{}]|\{[[:space:]]*\}|"[^"\\]+"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?)?[[:space:]]*$'
 }
 
 # Prints a value from the secrets file still JSON-escaped, so an unchanged value is written back exactly as it was
 # (dotnet user-secrets writes non-ASCII characters as \uXXXX escapes).
 # Keys match case-insensitively, as .NET configuration keys do.
 secret_get() {
-    [ -f "$SECRETS_PATH" ] || return 0
-    grep -iE "^[[:space:]]*\"$1\"[[:space:]]*:" "$SECRETS_PATH" | head -n1 |
+    secrets_text | grep -iE "^[[:space:]]*\"$1\"[[:space:]]*:" | head -n1 |
         sed -n 's/^[[:space:]]*"[^"]*"[[:space:]]*:[[:space:]]*"\(.*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p'
+}
+
+# Succeeds when the secrets file has the key, whatever its value: .NET keeps an empty one, so it is set, and empty.
+secret_has() {
+    secrets_text | grep -qiE "^[[:space:]]*\"$1\"[[:space:]]*:"
 }
 
 # Prompts on the terminal, since stdin is the script itself under `curl | sh`. $2 is the current value, JSON-escaped;
@@ -352,6 +363,214 @@ ask() {
         if [ -n "$value" ]; then json_escape "$value"; return; fi
         if [ -n "$current" ]; then printf '%s' "$current"; return; fi
     done
+}
+
+# Reads the instance JSON on stdin and prints "id<TAB>name" (still JSON-escaped) for each person in its assignee list
+# whose email is $1, compared in lower case. Only item.assignees.peoples counts, as in install.ps1: people elsewhere in
+# the response (an SLA escalation contact, a people-picker default) aren't the help desk's list, and one of them with
+# the same email would make the real match look ambiguous.
+# The list is found by walking the JSON, honouring strings, down the exact path item > assignees > peoples, so a null
+# or missing list finds no one and a list of the same name anywhere else doesn't count. Braces and brackets inside
+# strings (a display name such as "A [B]") aren't structure: before the list is split into people at "{", those four
+# characters inside strings are swapped for control characters, which valid JSON never has raw in a string, and the
+# values printed get them back.
+people_with_email() {
+    tr -d '\n' | awk -v want="$1" '
+        function shield(s,   out, c, i, n, quoted, escaped) {
+            n = length(s); out = ""; quoted = 0; escaped = 0
+            for (i = 1; i <= n; i++) {
+                c = substr(s, i, 1)
+                if (quoted) {
+                    if (escaped) escaped = 0
+                    else if (c == "\\") escaped = 1
+                    else if (c == "\"") quoted = 0
+                    else if (c == "{") c = "\001"
+                    else if (c == "}") c = "\002"
+                    else if (c == "[") c = "\003"
+                    else if (c == "]") c = "\004"
+                } else if (c == "\"") quoted = 1
+                out = out c
+            }
+            return out
+        }
+        function unshield(s) {
+            gsub("\001", "{", s); gsub("\002", "}", s); gsub("\003", "[", s); gsub("\004", "]", s)
+            return s
+        }
+        function field(s, k,   re, m) {
+            re = "\"" k "\"[ \t]*:[ \t]*\"([^\"\\\\]|\\\\.)*\""
+            if (!match(s, re)) return ""
+            m = substr(s, RSTART, RLENGTH)
+            sub("^\"" k "\"[ \t]*:[ \t]*\"", "", m)
+            sub("\"$", "", m)
+            return unshield(m)
+        }
+        # The inside of the item.assignees.peoples array, or "" when there is none (a null or missing list, or one
+        # anywhere else, such as under a custom field): walks the JSON once, honouring strings, and keeps the kind of
+        # each open container and the key being read in each object on the way down, so the array is taken only at
+        # that exact path.
+        function peoples(s,   n, i, c, depth, quoted, escaped, from, text, keyed, start) {
+            n = length(s); depth = 0; quoted = 0; escaped = 0; keyed = 0; start = 0
+            for (i = 1; i <= n; i++) {
+                c = substr(s, i, 1)
+                if (quoted) {
+                    if (escaped) escaped = 0
+                    else if (c == "\\") escaped = 1
+                    else if (c == "\"") { quoted = 0; text = substr(s, from + 1, i - from - 1); keyed = 1 }
+                    continue
+                }
+                if (c == "\"") { quoted = 1; from = i; continue }
+                if (c == " " || c == "\t" || c == "\r") continue
+                if (c == ":") { if (keyed && kind[depth] == "{") key[depth] = text; keyed = 0; continue }
+                keyed = 0
+                if (c == "{" || c == "[") {
+                    if (c == "[" && depth == 3 && kind[1] == "{" && kind[2] == "{" && kind[3] == "{" &&
+                        key[1] == "item" && key[2] == "assignees" && key[3] == "peoples") start = i + 1
+                    depth++; kind[depth] = c; key[depth] = ""
+                } else if (c == "}" || c == "]") {
+                    if (start && depth == 4 && c == "]") return substr(s, start, i - start)
+                    depth--
+                } else if (c == ",") key[depth] = ""
+            }
+            return ""
+        }
+        {
+            # The list, then its people: person objects hold no nested braces, so with braces in strings shielded,
+            # splitting at "{" gives one person each.
+            n = split(shield(peoples($0)), people, "{")
+            for (p = 2; p <= n; p++)
+                if (tolower(field(people[p], "email")) == want) {
+                    id = field(people[p], "id")
+                    if (id != "") printf "%s\t%s\n", id, field(people[p], "name")
+                }
+        }'
+}
+
+# Prints a setting as the server's .NET configuration will see it from the environment: either separator
+# (Ticketing__BaseUrl or Ticketing:BaseUrl) in any case. Nothing when it isn't set there. An environment variable wins
+# over the secrets file, and the account lookup decides with these where the API key may go, so it must read them as
+# the server does. A name with a colon can't be a shell variable, and some shells (dash) drop it from what they pass to
+# `env` while others (bash, macOS's sh) pass it on, so on Linux the environment this script started with is read too.
+# Without that view (macOS), a colon name that `env` shows makes the setting unknowable (2, below); one a shell dropped
+# can't be seen at all there.
+# Succeeds, printing the value, when the variable is set, even to nothing: .NET keeps an empty value and it overrides
+# the file, so an empty Ticketing__Region means the server's default, US. Returns 1 when it isn't set at all.
+# Returns 2, printing nothing, when the server's view can't be known, so the caller must not guess: two spellings set
+# to different values (.NET folds them into one key, and which one it reads last isn't defined), or a value with a
+# newline, which the server reads whole but a line-based reading would cut short.
+# Values are read whole: through the shell for the names it can hold (`env` only lists names, and a name that isn't
+# really set, a line of some other variable's value, is skipped), and on Linux from the NUL-separated start-up
+# environment with newlines swapped for \001. Each value is marked with a leading "=" so an empty one isn't lost.
+env_setting() {
+    es_a=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    es_b=$(printf '%s' "$es_a" | sed 's/:/__/g')
+    es_values=$(
+        for es_name in $(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'); do
+            [ "$(printf '%s' "$es_name" | tr '[:upper:]' '[:lower:]')" = "$es_b" ] || continue
+            eval "[ -n \"\${$es_name+x}\" ]" || continue
+            printf '='; eval "printf '%s' \"\$$es_name\"" | tr '\n' '\001'; printf '\n'
+        done
+        if [ -r "/proc/$$/environ" ]; then
+            tr '\n\0' '\001\n' <"/proc/$$/environ" | awk -v a="$es_a" -v b="$es_b" '
+                { k = $0; sub(/=.*/, "", k); k = tolower(k); if (k == a || k == b) { v = $0; sub(/^[^=]*=/, "", v); print "=" v } }'
+        else
+            # Its value can't be read whole from `env`, so it is marked unknowable. A line of another variable's value
+            # that looks like it is marked too, which only means no request.
+            env | awk -v a="$es_a" '{ k = $0; sub(/=.*/, "", k); if (tolower(k) == a) print "=\001" }'
+        fi
+    )
+    [ -n "$es_values" ] || return 1
+    case "$es_values" in *"$(printf '\001')"*) return 2 ;; esac
+    [ -z "$(printf '%s\n' "$es_values" | sort -u | sed -n 2p)" ] || return 2
+    es_value=$(printf '%s\n' "$es_values" | head -n1)
+    printf '%s' "${es_value#=}"
+}
+
+# Prints the endpoint the server will call for region $1 and base URL $3 ($2 is "set" when a base URL is configured,
+# even an empty one), when it is one of the vendor's; nothing otherwise, and then no request is made: the API key is
+# only ever sent to one of these fixed vendor endpoints, and only to the one the server would use for the settings as
+# read here (settings this script can't read as the server does get no request). Follows the server's startup rules
+# (TicketingOptions and its validation in Program.cs), as install.ps1's Resolve-VendorEndpoint does: the base URL is
+# the built-in US one unless set; a region (trimmed at the ends only, any case, blank meaning unset) replaces that
+# built-in value but not one set to anything else; an unknown region, or a region and base URL naming different
+# endpoints, stops the server. A custom base URL, even an empty one, is never a vendor endpoint.
+vendor_endpoint() {
+    ve_us='https://teamswork.azure-api.net/ticketing/v1'
+    ve_eu='https://ticketing-apim-eu.azure-api.net/ticketing/v1'
+    ve_aus='https://ticketing-apim-aus.azure-api.net/ticketing/v1'
+    if [ "$2" = set ]; then ve_url=$(printf '%s' "$3" | sed 's:/*$::' | tr '[:upper:]' '[:lower:]'); else ve_url=$ve_us; fi
+    ve_region=$(printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | tr '[:lower:]' '[:upper:]')
+    if [ -n "$ve_region" ]; then
+        case "$ve_region" in
+            US) ve_regional=$ve_us ;;
+            EU) ve_regional=$ve_eu ;;
+            AUS) ve_regional=$ve_aus ;;
+            *) return 0 ;;
+        esac
+        [ "$ve_url" != "$ve_us" ] || ve_url=$ve_regional
+        [ "$ve_url" = "$ve_regional" ] || return 0
+    fi
+    for ve in "$ve_us" "$ve_eu" "$ve_aus"; do
+        if [ "$ve_url" = "$ve" ]; then printf '%s' "$ve"; return 0; fi
+    done
+}
+
+# Prints the Entra object ID and display name (JSON-escaped) and where they came from, one per line, for the email
+# $1, so nobody has to know their own GUID: from the help desk's assignee list (read with the API key $2), then from
+# the directory through the Azure CLI. Prints nothing unless exactly one person matches. The key goes only to the
+# vendor endpoint vendor_endpoint finds, never to a custom base URL (which a planted setting could point elsewhere),
+# on curl's stdin rather than its command line, and only when it needs no escaping in a URL.
+find_person() {
+    fp_email="$1"; fp_key="$2"
+    fp_want=$(printf '%s' "$fp_email" | tr '[:upper:]' '[:lower:]')
+    # The region and base URL the server will see: the environment first (a variable that is set wins even when
+    # empty), then --region, then the secrets file. When that can't be known (conflicting variables, a value with a
+    # newline, or a key the file has twice, which the server refuses), no request is made.
+    fp_blocked=""
+    for fp_setting in 'Ticketing:Region' 'Ticketing:BaseUrl'; do
+        fp_n=$(secrets_text | grep -ciE "^[[:space:]]*\"$fp_setting\"[[:space:]]*:") || :
+        [ "${fp_n:-0}" -le 1 ] || fp_blocked=$fp_setting
+    done
+    fp_rc=0; fp_region=$(env_setting 'Ticketing:Region') || fp_rc=$?
+    if [ "$fp_rc" = 2 ]; then fp_blocked='Ticketing:Region'
+    elif [ "$fp_rc" != 0 ]; then
+        fp_region=$REGION
+        [ -n "$fp_region" ] || fp_region=$(secret_get 'Ticketing:Region')
+    fi
+    fp_url_set=""
+    fp_rc=0; fp_url=$(env_setting 'Ticketing:BaseUrl') || fp_rc=$?
+    if [ "$fp_rc" = 0 ]; then fp_url_set='set'
+    elif [ "$fp_rc" = 2 ]; then fp_blocked='Ticketing:BaseUrl'
+    elif secret_has 'Ticketing:BaseUrl'; then fp_url=$(secret_get 'Ticketing:BaseUrl'); fp_url_set='set'
+    fi
+    fp_base=""
+    if [ -n "$fp_blocked" ]; then
+        echo "    not reading the help desk's assignee list: $fp_blocked is set more than once, or with a line break" >/dev/tty
+    else
+        fp_base=$(vendor_endpoint "$fp_region" "$fp_url_set" "$fp_url")
+    fi
+    if [ -n "$fp_base" ] &&
+        printf '%s' "$fp_key" | grep -qE '^[A-Za-z0-9._~-]+$'; then
+        if fp_json=$(printf 'url = "%s/instance?key=%s&timezone=0"\n' "$fp_base" "$fp_key" | curl -fsS --max-time 20 -K - 2>/dev/null); then
+            fp_people=$(printf '%s' "$fp_json" | people_with_email "$fp_want")
+            # One person listed twice is still one match (install.ps1 counts the same way); two IDs are ambiguous.
+            if [ -n "$fp_people" ] && [ "$(printf '%s\n' "$fp_people" | cut -f1 | tr '[:upper:]' '[:lower:]' | sort -u | wc -l | tr -d ' ')" = 1 ]; then
+                printf '%s\n' "$fp_people" | head -n1 | cut -f1
+                printf '%s\n' "$fp_people" | head -n1 | cut -f2
+                echo "the help desk's assignee list"
+                return
+            fi
+        else
+            echo "    couldn't read the help desk's assignee list" >/dev/tty
+        fi
+    fi
+    # Guests, or an account without directory read rights, get an error here; that just means no match.
+    if have az && fp_me=$(az ad user show --id "$fp_email" --query '[id, displayName]' -o tsv 2>/dev/null | tr -d '\r') &&
+        [ -n "$(printf '%s\n' "$fp_me" | sed -n 1p)" ]; then
+        printf '%s\n' "$fp_me" | sed -n 1p
+        json_escape "$(printf '%s\n' "$fp_me" | sed -n 2p)"; echo
+        echo 'the directory (Azure CLI)'
+    fi
 }
 
 set_secrets() {
@@ -368,13 +587,16 @@ set_secrets() {
     name=$(secret_get 'Ticketing:ServiceAccount:Name')
     email=$(secret_get 'Ticketing:ServiceAccount:Email')
 
-    # Offer the signed-in Azure CLI account as the default identity, when there is one.
-    if [ -z "$id" ] && have az; then
+    # The signed-in Azure CLI account, when there is one: the email offered when the file has none, and the ID and name
+    # used when its email is the one entered and the lookup finds nothing. Loaded on a reinstall too, since the file's
+    # account may be swapped for this one, and `az ad user show` needs directory rights some lack.
+    me_id=""; me_name=""; me_email=""
+    if have az; then
         # One value per line. Strip CRs, which the Windows az prints when it is reached from WSL.
         if me=$(az ad signed-in-user show --query '[id, displayName, mail || userPrincipalName]' -o tsv 2>/dev/null | tr -d '\r'); then
-            id=$(json_escape "$(printf '%s\n' "$me" | sed -n 1p)")
-            [ -n "$name" ] || name=$(json_escape "$(printf '%s\n' "$me" | sed -n 2p)")
-            [ -n "$email" ] || email=$(json_escape "$(printf '%s\n' "$me" | sed -n 3p)")
+            me_id=$(json_escape "$(printf '%s\n' "$me" | sed -n 1p)")
+            me_name=$(json_escape "$(printf '%s\n' "$me" | sed -n 2p)")
+            me_email=$(json_escape "$(printf '%s\n' "$me" | sed -n 3p)")
         fi
     fi
 
@@ -396,10 +618,31 @@ set_secrets() {
         if [ -n "$key" ]; then break; fi
     done
 
+    # The email first, since it's the one detail people know: the ID and name are then looked up for it and shown
+    # together, so a default from another account (say, the one signed in to the Azure CLI) is easy to spot. The
+    # file's ID and name belong to its email; for any other, they come from the lookup, never the old file.
     echo 'Ticket changes are attributed to this account (use your own):' >/dev/tty
-    id=$(ask '  Entra object ID' "$id")
+    stored_email=$email
+    new_email=$(ask '  Email' "${stored_email:-$me_email}")
+    lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+    if [ -n "$stored_email" ] && [ -n "$id" ] && [ "$(lower "$stored_email")" = "$(lower "$new_email")" ]; then
+        : # the same account: keep its ID and name as the defaults
+    else
+        found=$(find_person "$new_email" "$key")
+        if [ -z "$found" ] && [ -n "$me_id" ] && [ "$(lower "$me_email")" = "$(lower "$new_email")" ]; then
+            found=$(printf '%s\n%s\n%s' "$me_id" "$me_name" 'your Azure CLI sign-in')
+        fi
+        id=$(printf '%s\n' "$found" | sed -n 1p)
+        name=$(printf '%s\n' "$found" | sed -n 2p)
+        if [ -n "$id" ]; then
+            printf '    found %s <%s> in %s\n' "$name" "$new_email" "$(printf '%s\n' "$found" | sed -n 3p)" >/dev/tty
+        else
+            printf "    %s isn't in the assignee list or the directory. Your Entra object ID is on your user page in the Entra admin center (Users > your name > Object ID), or run: az ad signed-in-user show --query id -o tsv\n" "$new_email" >/dev/tty
+        fi
+    fi
+    email=$new_email
     name=$(ask '  Display name' "$name")
-    email=$(ask '  Email' "$email")
+    id=$(ask '  Entra object ID' "$id")
 
     # Settings written below, so their old lines aren't kept too.
     written='ApiKey|ServiceAccount:Id|ServiceAccount:Name|ServiceAccount:Email'
@@ -419,7 +662,7 @@ set_secrets() {
             [ -z "$REGION" ] || printf ',\n  "Ticketing:Region": "%s"' "$REGION"
             # Keep any other settings already in the file, such as Ticketing:DefaultTimeZoneId.
             if [ -f "$SECRETS_PATH" ]; then
-                grep -E '^[[:space:]]*"[^"]+"[[:space:]]*:' "$SECRETS_PATH" |
+                secrets_text | grep -E '^[[:space:]]*"[^"]+"[[:space:]]*:' |
                     grep -viE "^[[:space:]]*\"Ticketing:($written)\"" |
                     sed 's/^[[:space:]]*//; s/[[:space:]]*,\{0,1\}[[:space:]]*$//' |
                     while IFS= read -r line; do printf ',\n  %s' "$line"; done

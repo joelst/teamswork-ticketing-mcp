@@ -375,17 +375,132 @@
         finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
     }
 
+    # A setting as the server's .NET configuration will see it: an environment variable wins over the secrets file (or
+    # $Default, a value about to be written to it), and one may use either separator (Ticketing__BaseUrl or
+    # Ticketing:BaseUrl) in any case. The account lookup decides with these where the API key may go, so it must read
+    # them exactly as the server does.
+    # A variable that is set wins even when empty: .NET configuration keeps an empty value and it overrides the file,
+    # so an empty Ticketing__Region means the server's default, US.
+    # Two spellings set to different values throw: .NET folds them into one key, and which one it reads last isn't
+    # defined, so the server's value can't be known.
+    function Get-Setting([string] $Name, $Secrets, [string] $Default) {
+        $names = @($Name, $Name.Replace(':', '__'))
+        $values = @()
+        foreach ($variable in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
+            if ($names -contains $variable.Key) { $values += [string] $variable.Value }   # -contains ignores case
+        }
+        if ($values.Count) {
+            foreach ($value in $values) { if ($value -cne $values[0]) { throw "$Name is set more than once, to different values" } }
+            return $values[0]
+        }
+        if ($Default) { return $Default }
+        # [ordered] keys ignore case, like .NET configuration keys. A key in the file with an empty value is set, and
+        # empty, as .NET keeps it; $null only when the file doesn't have the key.
+        if ($Secrets -and $Secrets.Contains($Name)) { return [string] $Secrets[$Name] }
+        return $null
+    }
+
+    # The secrets file's text as ConvertFrom-Json reads it, or $null when it is empty; throws unless it is one JSON
+    # object, as .NET refuses any other root. An array isn't unrolled into its items (PowerShell 7 would make a
+    # one-item array look like an object without -NoEnumerate; Windows PowerShell 5.1 never unrolls it and has no such
+    # switch), and a scalar would otherwise be copied in by its properties (a string's Length).
+    # A JSON null is refused like any other non-object; only a file with no text at all is read as empty.
+    function ConvertFrom-SecretsJson([string] $Text) {
+        if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+        $parsed = if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('NoEnumerate')) { $Text | ConvertFrom-Json -NoEnumerate } else { $Text | ConvertFrom-Json }
+        if ($parsed -isnot [System.Management.Automation.PSCustomObject]) {
+            throw 'it must hold one JSON object ({ "Ticketing:...": "..." }), not null, an array or a single value'
+        }
+        return $parsed
+    }
+
+    # Whether a secrets file, as ConvertFrom-Json read it, has a nested object or array as a value. Checked per
+    # property, since piping the values would flatten an array into its items, and against the real PSCustomObject
+    # type: [pscustomobject] is [psobject], which PowerShell 7 also wraps plain strings in, so it matched every value.
+    function Test-NestedSecrets($Parsed) {
+        if (-not $Parsed) { return $false }
+        foreach ($property in $Parsed.PSObject.Properties) {
+            if ($property.Value -is [System.Management.Automation.PSCustomObject] -or $property.Value -is [array]) { return $true }
+        }
+        return $false
+    }
+
+    # The endpoint the server will call for these settings, when it is one of the vendor's, or $null: the API key is
+    # only ever sent where the server itself would send it, and only to the vendor. Follows the server's startup rules
+    # (TicketingOptions and its validation in Program.cs): the base URL is the built-in US one unless set; a region
+    # (trimmed at the ends, any case, blank meaning unset) replaces that built-in value but not one set to anything
+    # else; an unknown region, or a region and base URL naming different endpoints, stops the server, so gets $null. A
+    # custom base URL, even an empty one, is never a vendor endpoint, so it gets $null too. $BaseUrl is $null when unset.
+    function Resolve-VendorEndpoint([string] $RegionName, $BaseUrl) {
+        $endpoints = [ordered]@{
+            US  = 'https://teamswork.azure-api.net/ticketing/v1'
+            EU  = 'https://ticketing-apim-eu.azure-api.net/ticketing/v1'
+            AUS = 'https://ticketing-apim-aus.azure-api.net/ticketing/v1'
+        }
+        $url = if ($null -eq $BaseUrl) { $endpoints.US } else { ([string] $BaseUrl).TrimEnd('/') }
+        $regionKey = if ($RegionName) { $RegionName.Trim() } else { '' }
+        if ($regionKey) {
+            $regional = $endpoints[$regionKey.ToUpperInvariant()]
+            if (-not $regional) { return $null }
+            if ($url -ieq $endpoints.US) { $url = $regional }
+            if ($url -ine $regional) { return $null }
+        }
+        foreach ($endpoint in $endpoints.Values) { if ($url -ieq $endpoint) { return $endpoint } }
+        return $null
+    }
+
+    # The endpoint the server will use for the region and base URL it will see (environment first, then $Region, then
+    # the file), or $null: a custom or conflicting one, or a setting whose value for the server can't be known, gets no
+    # request.
+    function Get-LookupEndpoint($Secrets, [string] $Region) {
+        try { Resolve-VendorEndpoint (Get-Setting 'Ticketing:Region' $Secrets $Region) (Get-Setting 'Ticketing:BaseUrl' $Secrets) }
+        catch { Write-Host "    not reading the help desk's assignee list: $($_.Exception.Message)"; $null }
+    }
+
+    # The Entra object ID and display name for an email, so nobody has to know their own GUID: from the help desk's
+    # assignee list (read with the API key just entered, at $Endpoint from Resolve-VendorEndpoint, and not at all when
+    # it is $null), then from the directory through the Azure CLI. $null when neither has exactly one match. As the key
+    # is in the request URL, a failure is reported without the error text.
+    function Find-Person([string] $Email, [string] $ApiKey, [string] $Endpoint) {
+        $base = $Endpoint
+        if ($ApiKey -and $base) {
+            try {
+                $instance = Invoke-RestMethod -UseBasicParsing -TimeoutSec 20 -Uri "$base/instance?key=$([Uri]::EscapeDataString($ApiKey))&timezone=0"
+                $people = @($instance.item.assignees.peoples | Where-Object { $_.id -and $_.email -and $_.email.Trim() -ieq $Email })
+                # One person listed twice is still one match (install.sh counts the same way); two IDs are ambiguous.
+                if (@($people | ForEach-Object { $_.id.ToLowerInvariant() } | Sort-Object -Unique).Count -eq 1) {
+                    return [pscustomobject]@{ Id = $people[0].id; Name = $people[0].name; Source = "the help desk's assignee list" }
+                }
+            }
+            catch { Write-Host "    couldn't read the help desk's assignee list" }
+        }
+
+        $az = Get-Command az -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($az) {
+            $ErrorActionPreference = 'Continue'
+            # Guests, or an account without directory read rights, get an error here; that just means no match.
+            $json = & $az.Source ad user show --id $Email --query '{id:id,name:displayName}' -o json 2>$null
+            $found = $LASTEXITCODE -eq 0 -and $json
+            $ErrorActionPreference = 'Stop'
+            if ($found) {
+                $user = ($json -join "`n") | ConvertFrom-Json
+                if ($user.id) { return [pscustomobject]@{ Id = $user.id; Name = $user.name; Source = 'the directory (Azure CLI)' } }
+            }
+        }
+        return $null
+    }
+
     function Set-Secrets {
         Write-Step "Configuring $SecretsPath"
         $secrets = [ordered]@{}
         if (Test-Path $SecretsPath) {
             # As UTF-8 whether or not the file has a byte order mark: Windows PowerShell 5.1 would otherwise read one
             # without it (as pwsh 7 writes it) in the ANSI code page, garbling any non-ASCII name.
-            try { $existing = Get-Content -Raw -Encoding UTF8 $SecretsPath | ConvertFrom-Json }
-            catch { throw "$SecretsPath is not valid JSON ($($_.Exception.Message)). Fix or delete it, then run the installer again." }
+            try { $existing = ConvertFrom-SecretsJson (Get-Content -Raw -Encoding UTF8 $SecretsPath) }
+            catch { throw "$SecretsPath can't be read as settings ($($_.Exception.Message)). Fix or delete it, then run the installer again." }
             # A nested object ("Ticketing": { ... }) would sit beside the flat keys written below, and .NET refuses to
             # load a file where both forms name the same setting.
-            if ($existing -and ($existing.PSObject.Properties.Value | Where-Object { $_ -is [pscustomobject] -or $_ -is [array] })) {
+            if (Test-NestedSecrets $existing) {
                 throw "$SecretsPath uses nested objects. Rewrite it with flat ""Ticketing:..."" keys (see docs/stdio.md), or run again with -SkipSecrets."
             }
             # Windows PowerShell 5.1 has no ConvertFrom-Json -AsHashtable, so copy the properties across. [ordered]
@@ -393,10 +508,12 @@
             if ($existing) { $existing.PSObject.Properties | ForEach-Object { $secrets[$_.Name] = $_.Value } }
         }
 
-        # Offer the signed-in Azure CLI account as the default identity, when there is one.
+        # The signed-in Azure CLI account, when there is one: the email offered when the file has none, and the ID and
+        # name used when its email is the one entered and the lookup finds nothing. Loaded on a reinstall too, since
+        # the file's account may be swapped for this one, and `az ad user show` needs directory rights some lack.
         $signedIn = $null
         $az = Get-Command az -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $secrets['Ticketing:ServiceAccount:Id'] -and $az) {
+        if ($az) {
             $ErrorActionPreference = 'Continue'
             $json = & $az.Source ad signed-in-user show --query '{id:id,name:displayName,email:mail || userPrincipalName}' -o json 2>$null
             if ($LASTEXITCODE -eq 0 -and $json) { $signedIn = ($json -join "`n") | ConvertFrom-Json }
@@ -411,10 +528,35 @@
             if ($hasKey) { break }
         }
 
+        # The email first, since it's the one detail people know: the ID and name are then looked up for it and shown
+        # together, so a default from another account (say, the one signed in to the Azure CLI) is easy to spot.
         Write-Host 'Ticket changes are attributed to this account (use your own):'
-        $secrets['Ticketing:ServiceAccount:Id'] = Read-Value '  Entra object ID' (Get-First $secrets['Ticketing:ServiceAccount:Id'] $signedIn.id)
-        $secrets['Ticketing:ServiceAccount:Name'] = Read-Value '  Display name' (Get-First $secrets['Ticketing:ServiceAccount:Name'] $signedIn.name)
-        $secrets['Ticketing:ServiceAccount:Email'] = Read-Value '  Email' (Get-First $secrets['Ticketing:ServiceAccount:Email'] $signedIn.email)
+        $storedEmail = $secrets['Ticketing:ServiceAccount:Email']
+        $email = Read-Value '  Email' (Get-First $storedEmail $signedIn.email)
+        # The file's ID and name belong to its email; for any other, they come from the lookup, never the old file.
+        $sameAccount = $storedEmail -and $storedEmail.Trim() -ieq $email -and $secrets['Ticketing:ServiceAccount:Id']
+        if ($sameAccount) {
+            $idDefault = $secrets['Ticketing:ServiceAccount:Id']
+            $nameDefault = $secrets['Ticketing:ServiceAccount:Name']
+        }
+        else {
+            $found = Find-Person $email $secrets['Ticketing:ApiKey'] (Get-LookupEndpoint $secrets $Region)
+            if (-not $found -and $signedIn.id -and $signedIn.email -and $signedIn.email.Trim() -ieq $email) {
+                $found = [pscustomobject]@{ Id = $signedIn.id; Name = $signedIn.name; Source = 'your Azure CLI sign-in' }
+            }
+            if ($found) {
+                Write-Host "    found $($found.Name) <$email> in $($found.Source)"
+            }
+            else {
+                Write-Host ("    $email isn't in the assignee list or the directory. Your Entra object ID is on your user page in " +
+                    'the Entra admin center (Users > your name > Object ID), or run: az ad signed-in-user show --query id -o tsv')
+            }
+            $idDefault = $found.Id
+            $nameDefault = $found.Name
+        }
+        $secrets['Ticketing:ServiceAccount:Email'] = $email
+        $secrets['Ticketing:ServiceAccount:Name'] = Read-Value '  Display name' $nameDefault
+        $secrets['Ticketing:ServiceAccount:Id'] = Read-Value '  Entra object ID' $idDefault
         if ($Region) { $secrets['Ticketing:Region'] = $Region }
 
         New-Item -ItemType Directory -Force -Path (Split-Path $SecretsPath) | Out-Null
