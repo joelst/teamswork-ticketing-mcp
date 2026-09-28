@@ -6,7 +6,7 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 installer="$here/../install.sh"
-for fn in json_escape secrets_text secret_get secret_has people_with_email env_setting vendor_endpoint find_person; do
+for fn in json_escape secrets_text secrets_file_editable secret_get secret_has people_with_email env_setting vendor_endpoint find_person; do
     body=$(sed -n "/^$fn() {/,/^}/p" "$installer")
     [ -n "$body" ] || { echo "install.sh has no function $fn"; exit 1; }
     eval "$body"
@@ -88,6 +88,21 @@ env_setting Ticketing:Region; echo rc=\$?")" 'rc=2'
 else
     echo 'skip conflicts with a colon-separated name (no /proc here)'
 fi
+# Without the start-up environment (macOS), a colon name that `env` shows is unknowable. Tested under each shell that
+# passes such a name on (bash, macOS's sh; dash drops it), with /proc hidden from the function where there is one.
+noproc_fn=$(printf '%s\n' "$env_setting_fn" | sed 's:/proc/\$\$/environ:/nonexistent/environ:g')
+for sh_name in sh bash; do
+    command -v "$sh_name" >/dev/null 2>&1 || continue
+    if env 'Ticketing:BaseUrl=x' "$sh_name" -c env | grep -q '^Ticketing:BaseUrl='; then
+        check "without /proc, a colon name $sh_name passes on is unknowable" "$(env 'Ticketing:BaseUrl=https://elsewhere.example/v1' "$sh_name" -c "$noproc_fn
+env_setting Ticketing:BaseUrl; echo rc=\$?")" 'rc=2'
+        check "without /proc under $sh_name, an underscore name is still read" "$(env -u Ticketing__BaseUrl 'Ticketing__BaseUrl=https://a.example' "$sh_name" -c "$noproc_fn
+env_setting Ticketing:BaseUrl; echo; echo rc=\$?")" 'https://a.example
+rc=0'
+    else
+        echo "skip a colon name without /proc under $sh_name (it drops the name)"
+    fi
+done
 check 'two cases of one name with different values are unknowable' "$(env 'Ticketing__BaseUrl=https://a.example' 'TICKETING__BASEURL=https://b.example' sh -c "$env_setting_fn
 env_setting Ticketing:BaseUrl; echo rc=\$?")" 'rc=2'
 check 'a value with a newline is unknowable, not cut at the line' "$(env 'Ticketing__Region=EU
@@ -111,6 +126,12 @@ printf '%s"Ticketing:BaseUrl": "https://elsewhere.example/v1",\n' "$bom" >"$SECR
 check 'a key right after the mark is found' "$(secret_has 'Ticketing:BaseUrl' && secret_get 'Ticketing:BaseUrl')" 'https://elsewhere.example/v1'
 printf '%s"Ticketing:Region": "EU",\n  "ticketing:region": "AUS"\n' "$bom" >"$SECRETS_PATH"; rm -f "$tmp/curl-config"
 check 'and counts toward a key the file has twice' "$(find_person 'pat.lee@contoso.com' 'abc123' 2>/dev/null)$([ -f "$tmp/curl-config" ] && echo requested)" ''
+# .NET decodes an escaped key into the setting it spells, which a literal match would miss: such a file isn't edited
+# (and the lookup, which runs only after this check, never sees it). Escapes in values are fine.
+printf '{\n  "Ticketing\\u003aBaseUrl": "https://elsewhere.example/v1"\n}\n' >"$SECRETS_PATH"
+check 'a file with an escaped key is not editable' "$(secrets_file_editable && echo editable)" ''
+printf '%s{\n  "Ticketing:ServiceAccount:Name": "Pat \\"PJ\\" L\\u00e9e",\n  "Ticketing:ApiKey": "k"\n}\n' "$bom" >"$SECRETS_PATH"
+check 'escapes in values are fine' "$(secrets_file_editable && echo editable)" 'editable'
 rm -f "$SECRETS_PATH"; rm -f "$tmp/curl-config"; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null 2>&1
 check 'no secrets file at all still looks up US' "$(cat "$tmp/curl-config" 2>/dev/null)" 'url = "https://teamswork.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
 : >"$SECRETS_PATH"

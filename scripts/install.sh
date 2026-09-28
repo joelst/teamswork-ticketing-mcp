@@ -332,10 +332,11 @@ secrets_text() {
 }
 
 # The secrets file can only be updated safely without a JSON parser when it is a flat object with one
-# "key": "string" pair per line, which is how dotnet user-secrets and this script write it.
+# "key": "string" pair per line, which is how dotnet user-secrets and this script write it. A key with an escape in it
+# ("Ticketing:BaseUrl") is refused: .NET decodes it into a setting that every literal key match below would miss.
 secrets_file_editable() {
     ! secrets_text |
-        grep -vqE '^[[:space:]]*([{}]|\{[[:space:]]*\}|"[^"]+"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?)?[[:space:]]*$'
+        grep -vqE '^[[:space:]]*([{}]|\{[[:space:]]*\}|"[^"\\]+"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?)?[[:space:]]*$'
 }
 
 # Prints a value from the secrets file still JSON-escaped, so an unchanged value is written back exactly as it was
@@ -448,8 +449,10 @@ people_with_email() {
 # Prints a setting as the server's .NET configuration will see it from the environment: either separator
 # (Ticketing__BaseUrl or Ticketing:BaseUrl) in any case. Nothing when it isn't set there. An environment variable wins
 # over the secrets file, and the account lookup decides with these where the API key may go, so it must read them as
-# the server does. A shell drops names it can't hold, such as one with a colon, from what it passes to `env`, so on
-# Linux the environment this script started with is read too; macOS has no such view, and no shell there can set one.
+# the server does. A name with a colon can't be a shell variable, and some shells (dash) drop it from what they pass to
+# `env` while others (bash, macOS's sh) pass it on, so on Linux the environment this script started with is read too.
+# Without that view (macOS), a colon name that `env` shows makes the setting unknowable (2, below); one a shell dropped
+# can't be seen at all there.
 # Succeeds, printing the value, when the variable is set, even to nothing: .NET keeps an empty value and it overrides
 # the file, so an empty Ticketing__Region means the server's default, US. Returns 1 when it isn't set at all.
 # Returns 2, printing nothing, when the server's view can't be known, so the caller must not guess: two spellings set
@@ -470,6 +473,10 @@ env_setting() {
         if [ -r "/proc/$$/environ" ]; then
             tr '\n\0' '\001\n' <"/proc/$$/environ" | awk -v a="$es_a" -v b="$es_b" '
                 { k = $0; sub(/=.*/, "", k); k = tolower(k); if (k == a || k == b) { v = $0; sub(/^[^=]*=/, "", v); print "=" v } }'
+        else
+            # Its value can't be read whole from `env`, so it is marked unknowable. A line of another variable's value
+            # that looks like it is marked too, which only means no request.
+            env | awk -v a="$es_a" '{ k = $0; sub(/=.*/, "", k); if (tolower(k) == a) print "=\001" }'
         fi
     )
     [ -n "$es_values" ] || return 1
@@ -481,7 +488,8 @@ env_setting() {
 
 # Prints the endpoint the server will call for region $1 and base URL $3 ($2 is "set" when a base URL is configured,
 # even an empty one), when it is one of the vendor's; nothing otherwise, and then no request is made: the API key is
-# only ever sent where the server itself would send it, and only to the vendor. Follows the server's startup rules
+# only ever sent to one of these fixed vendor endpoints, and only to the one the server would use for the settings as
+# read here (settings this script can't read as the server does get no request). Follows the server's startup rules
 # (TicketingOptions and its validation in Program.cs), as install.ps1's Resolve-VendorEndpoint does: the base URL is
 # the built-in US one unless set; a region (trimmed at the ends only, any case, blank meaning unset) replaces that
 # built-in value but not one set to anything else; an unknown region, or a region and base URL naming different
