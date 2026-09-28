@@ -10,6 +10,7 @@ Foundry use, and every write is attributed to the Cowork user signed in through 
 | Cowork manifest template and icons | `plugin/cowork/` |
 | Claude Code plugin manifest (skills only) | `plugin/.claude-plugin/plugin.json` |
 | Package builder and checks | `scripts/Build-CoworkPackage.ps1`, `scripts/tests/Test-CoworkPlugin.ps1` |
+| Setup helper (Entra client, consent, users, build, install) | `infra/scripts/Complete-CoworkSetup.ps1` |
 | Tool description (a copy of `tools/list`) | `plugin/cowork/tools/`, refreshed by `scripts/Update-CoworkToolDescription.ps1` |
 
 The skills:
@@ -28,6 +29,25 @@ The skills:
   is refused.
 - The Microsoft 365 Agents Toolkit CLI 1.1.12 or later, for installing it for yourself:
   `npm install -g @microsoft/m365agentstoolkit-cli`.
+
+## The quick route
+
+`infra/scripts/Complete-CoworkSetup.ps1` does steps 1, 3 and 4 below, as well as assigning users. It prints step 2's
+values ready to paste. Run it in two passes, signed in with `az login` as an Application Administrator:
+
+```powershell
+# Pass 1: the Entra client, consent, users, and a secret copied to the clipboard (never printed)
+./infra/scripts/Complete-CoworkSetup.ps1 -ResourceGroup rg-taasmcp-test -AssignGroup 'Help desk agents' -CreateSecret -OpenPortal
+
+# Create the developer portal registration from the printed values, then pass 2: build, validate and install
+./infra/scripts/Complete-CoworkSetup.ps1 -ResourceGroup rg-taasmcp-test -OAuthReferenceId '<OAuth client registration ID>' `
+    -DeveloperName '<your organization>' -WebsiteUrl 'https://<your site>' `
+    -PrivacyUrl 'https://<your site>/privacy' -TermsUrl 'https://<your site>/terms' -Install
+```
+
+It's safe to run again: it finds what exists and updates it. `-WhatIf` shows the Entra changes without making them.
+Without `-CreateSecret`, create the secret yourself as in step 1. The steps below describe what it does, for doing
+them by hand.
 
 ## 1. Register an OAuth client in Entra
 
