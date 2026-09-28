@@ -587,9 +587,11 @@ set_secrets() {
     name=$(secret_get 'Ticketing:ServiceAccount:Name')
     email=$(secret_get 'Ticketing:ServiceAccount:Email')
 
-    # The signed-in Azure CLI account, offered as the default email when the file has none.
+    # The signed-in Azure CLI account, when there is one: the email offered when the file has none, and the ID and name
+    # used when its email is the one entered and the lookup finds nothing. Loaded on a reinstall too, since the file's
+    # account may be swapped for this one, and `az ad user show` needs directory rights some lack.
     me_id=""; me_name=""; me_email=""
-    if [ -z "$id" ] && have az; then
+    if have az; then
         # One value per line. Strip CRs, which the Windows az prints when it is reached from WSL.
         if me=$(az ad signed-in-user show --query '[id, displayName, mail || userPrincipalName]' -o tsv 2>/dev/null | tr -d '\r'); then
             me_id=$(json_escape "$(printf '%s\n' "$me" | sed -n 1p)")

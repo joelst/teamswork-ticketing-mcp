@@ -508,10 +508,12 @@
             if ($existing) { $existing.PSObject.Properties | ForEach-Object { $secrets[$_.Name] = $_.Value } }
         }
 
-        # Offer the signed-in Azure CLI account as the default identity, when there is one.
+        # The signed-in Azure CLI account, when there is one: the email offered when the file has none, and the ID and
+        # name used when its email is the one entered and the lookup finds nothing. Loaded on a reinstall too, since
+        # the file's account may be swapped for this one, and `az ad user show` needs directory rights some lack.
         $signedIn = $null
         $az = Get-Command az -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $secrets['Ticketing:ServiceAccount:Id'] -and $az) {
+        if ($az) {
             $ErrorActionPreference = 'Continue'
             $json = & $az.Source ad signed-in-user show --query '{id:id,name:displayName,email:mail || userPrincipalName}' -o json 2>$null
             if ($LASTEXITCODE -eq 0 -and $json) { $signedIn = ($json -join "`n") | ConvertFrom-Json }
