@@ -63,7 +63,8 @@ public sealed class WorkloadTools
         [Description("assignee (default): tickets assigned to me; requestor: tickets I raised; either: both.")] string? role = null,
         [Description("true to include resolved and closed tickets.")] bool includeResolved = false,
         [Description("Only this priority: Low, Medium, Important, or Urgent.")] string? priority = null,
-        [Description("Only tickets created after this local datetime (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss).")] string? createdAfter = null,
+        [Description(DateFilterText.CreatedAfter)] string? createdAfter = null,
+        [Description(DateFilterText.CreatedBefore)] string? createdBefore = null,
         [Description("Maximum tickets to return (default 20, max 100).")] int? limit = null,
         [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
@@ -76,7 +77,8 @@ public sealed class WorkloadTools
             {
                 IsResolved = includeResolved ? null : false,
                 Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
-                CreatedAfter = ToolValidation.OptionalDateTime(createdAfter, "createdAfter"),
+                CreatedAfter = ToolValidation.OptionalDateFilter(createdAfter, "createdAfter"),
+                CreatedBefore = ToolValidation.OptionalDateFilter(createdBefore, "createdBefore"),
                 Select = SummaryFields,
                 TimezoneOffset = timezoneOffset,
             };
@@ -91,7 +93,7 @@ public sealed class WorkloadTools
 
             TicketScan.Result<TicketSummary> scan = await TicketScan.RunAsync(
                 _client, query, t => Mine(t) ? TicketSummary.From(t) : null, _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
-            return Summaries(scan, max);
+            return Summaries(scan, max, query);
         });
     }
 
@@ -103,7 +105,8 @@ public sealed class WorkloadTools
     public Task<string> ListSlaRisk(
         [Description("any (default): breached or escalated; breached: breached only; escalated: escalated only.")] string? kind = null,
         [Description("Only this priority: Low, Medium, Important, or Urgent.")] string? priority = null,
-        [Description("Only tickets created after this local datetime (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss).")] string? createdAfter = null,
+        [Description(DateFilterText.CreatedAfter)] string? createdAfter = null,
+        [Description(DateFilterText.CreatedBefore)] string? createdBefore = null,
         [Description("Maximum tickets to return (default 20, max 100).")] int? limit = null,
         [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
@@ -116,7 +119,8 @@ public sealed class WorkloadTools
             {
                 IsResolved = false,
                 Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
-                CreatedAfter = ToolValidation.OptionalDateTime(createdAfter, "createdAfter"),
+                CreatedAfter = ToolValidation.OptionalDateFilter(createdAfter, "createdAfter"),
+                CreatedBefore = ToolValidation.OptionalDateFilter(createdBefore, "createdBefore"),
                 TimezoneOffset = timezoneOffset,
             };
 
@@ -166,7 +170,7 @@ public sealed class WorkloadTools
                 FullTicketPageSize,
                 cancellationToken);
 
-            ScanResult<TicketSummary> result = Summaries(scan, max);
+            ScanResult<TicketSummary> result = Summaries(scan, max, query);
             return scan.Scanned > 0 && !anyFlags
                 ? result with
                 {
@@ -234,8 +238,8 @@ public sealed class WorkloadTools
         [Description("Only this priority: Low, Medium, Important, or Urgent.")] string? priority = null,
         [Description("Only tickets matching this full-text search.")] string? search = null,
         [Description("Comma-separated tag filter in the form tagCategoryId_tagText (IDs from list_tag_categories).")] string? tags = null,
-        [Description("Only tickets created after this local datetime (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss).")] string? createdAfter = null,
-        [Description("Only tickets created before this local datetime (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss).")] string? createdBefore = null,
+        [Description(DateFilterText.CreatedAfter)] string? createdAfter = null,
+        [Description(DateFilterText.CreatedBefore)] string? createdBefore = null,
         [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
     {
@@ -248,8 +252,8 @@ public sealed class WorkloadTools
                 Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
                 Search = ToolValidation.OptionalText(search, "search", 500),
                 Tags = ToolValidation.OptionalText(tags, "tags", 2000),
-                CreatedAfter = ToolValidation.OptionalDateTime(createdAfter, "createdAfter"),
-                CreatedBefore = ToolValidation.OptionalDateTime(createdBefore, "createdBefore"),
+                CreatedAfter = ToolValidation.OptionalDateFilter(createdAfter, "createdAfter"),
+                CreatedBefore = ToolValidation.OptionalDateFilter(createdBefore, "createdBefore"),
                 Select = "id,status,priority,assignee",
                 TimezoneOffset = timezoneOffset,
             };
@@ -266,7 +270,7 @@ public sealed class WorkloadTools
                 .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            return new CountResult(by, groups, scan.Scanned, scan.Total, scan.Truncated, TicketScan.TruncationHint(scan));
+            return new CountResult(by, groups, scan.Scanned, scan.Total, scan.Truncated, TicketScan.TruncationHint(scan, query, _client.TimeZones));
         });
     }
 
@@ -317,11 +321,11 @@ public sealed class WorkloadTools
         return Guid.TryParse(id, out Guid theirs) && Guid.TryParse(me.Id, out Guid mine) ? theirs == mine : string.Equals(id, me.Id.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
-    private static ScanResult<TicketSummary> Summaries(TicketScan.Result<TicketSummary> scan, int max)
+    private ScanResult<TicketSummary> Summaries(TicketScan.Result<TicketSummary> scan, int max, TicketListQuery query)
     {
         List<TicketSummary> items = scan.Matches.Take(max).ToList();
         string? more = scan.Matches.Count > max ? $"{scan.Matches.Count} tickets matched; raise 'limit' or add filters to see more." : null;
-        string? hint = string.Join(" ", new[] { TicketScan.TruncationHint(scan), more }.OfType<string>()) is { Length: > 0 } both ? both : null;
+        string? hint = string.Join(" ", new[] { TicketScan.TruncationHint(scan, query, _client.TimeZones), more }.OfType<string>()) is { Length: > 0 } both ? both : null;
         return new ScanResult<TicketSummary>(items, items.Count, scan.Matches.Count, scan.Scanned, scan.Total, scan.Truncated, hint);
     }
 

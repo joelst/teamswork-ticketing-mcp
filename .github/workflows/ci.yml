@@ -152,14 +152,20 @@ jobs:
           dotnet publish src/TeamsWork.Ticketing.Mcp -c Release -r linux-x64 --self-contained \
             -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -o out
 
+      # The request is written, then stdin is held open until a reply arrives (up to 60 s), then closed so the server
+      # exits. A fixed wait raced a slow start: the server read the request and end of input together, and shut
+      # down before answering. The reply goes to a file, read once the server has exited.
       - name: Starts without ICU
         run: |
-          RESPONSE=$( (printf '%s\n' "$INIT"; sleep 8) | docker run --rm -i \
+          REPLY="$RUNNER_TEMP/reply-icu"; : > "$REPLY"
+          ( printf '%s\n' "$INIT"; i=0; while [ ! -s "$REPLY" ] && [ "$i" -lt 120 ]; do sleep 0.5; i=$((i + 1)); done ) \
+            | docker run --rm -i \
             -v "$PWD/out:/app:ro" -v /usr/share/zoneinfo:/usr/share/zoneinfo:ro \
             -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=00000000-0000-0000-0000-0000000000c1 \
             -e Ticketing__ServiceAccount__Name=CI -e Ticketing__ServiceAccount__Email=ci@example.test \
             ubuntu:24.04 sh -c 'if ls /usr/lib/*/libicu* >/dev/null 2>&1; then echo "image has ICU" >&2; exit 1; fi; exec /app/TeamsWork.Ticketing.Mcp --stdio' \
-            | head -n1 )
+            > "$REPLY"
+          RESPONSE=$(head -n1 "$REPLY")
           echo "$RESPONSE"
           echo "$RESPONSE" | grep -q '"serverInfo"'
 
@@ -193,9 +199,13 @@ jobs:
       - name: Start the image
         run: |
           INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
-          RESPONSE=$( (printf '%s\n' "$INIT"; sleep 8) | docker run --rm -i \
+          # As in linux-without-icu: stdin stays open until the reply arrives, rather than for a fixed time.
+          REPLY="$RUNNER_TEMP/reply-image"; : > "$REPLY"
+          ( printf '%s\n' "$INIT"; i=0; while [ ! -s "$REPLY" ] && [ "$i" -lt 120 ]; do sleep 0.5; i=$((i + 1)); done ) \
+            | docker run --rm -i \
             -e Ticketing__ApiKey=ci-dummy-key -e Ticketing__ServiceAccount__Id=00000000-0000-0000-0000-0000000000c1 \
             -e Ticketing__ServiceAccount__Name=CI -e Ticketing__ServiceAccount__Email=ci@example.test \
-            teamswork-taas-mcp:ci --stdio | head -n1 )
+            teamswork-taas-mcp:ci --stdio > "$REPLY"
+          RESPONSE=$(head -n1 "$REPLY")
           echo "$RESPONSE"
           echo "$RESPONSE" | grep -q '"serverInfo"'

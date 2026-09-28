@@ -262,12 +262,17 @@ public sealed record TicketListQuery
     public string? OrderBy { get; init; }
     public string? Order { get; init; }
     public string? Select { get; init; }
-    public string? CreatedAfter { get; init; }
-    public string? CreatedBefore { get; init; }
-    public string? ExpectedDateAfter { get; init; }
-    public string? ExpectedDateBefore { get; init; }
-    public string? LastUpdateAfter { get; init; }
-    public string? LastUpdateBefore { get; init; }
+
+    // Date filters are whole days: the API ignores one with a time of day and returns every ticket, so they are dates
+    // here and TicketDateFilters formats them. "After" includes the named day and "before" excludes it. Created and
+    // updated days are the caller's local days; an expected date is a calendar date. See TicketDateFilters.
+    public DateOnly? CreatedAfter { get; init; }
+    public DateOnly? CreatedBefore { get; init; }
+    public DateOnly? ExpectedDateAfter { get; init; }
+    public DateOnly? ExpectedDateBefore { get; init; }
+    public DateOnly? LastUpdateAfter { get; init; }
+    public DateOnly? LastUpdateBefore { get; init; }
+
     public int? Limit { get; init; }
     public int? Offset { get; init; }
     public string? ContinuationToken { get; init; }

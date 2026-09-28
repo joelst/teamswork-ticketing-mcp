@@ -58,7 +58,8 @@ honoured at most once every 30 seconds for the whole cache (otherwise the cached
 
 The API can't filter by assignee, requestor, ticket number, or SLA state, so `list_my_tickets`, `list_sla_risk`,
 `count_tickets`, and `find_ticket_by_number` read tickets and filter them in the server. One call reads at most
-`Ticketing:MaxScanTickets` tickets (default 1000, usually a single request) and says when it stopped early;
+`Ticketing:MaxScanTickets` tickets (default 1000, usually a single request) and says when it stopped early. The first three
+read newest created first, so their note names the `createdBefore` to call again with to continue;
 `find_ticket_by_number` reports a number missing only when one response proves it, and otherwise says it may exist.
 `list_sla_risk` says so when the instance has SLA tracking turned off, rather than reporting nothing at risk.
 

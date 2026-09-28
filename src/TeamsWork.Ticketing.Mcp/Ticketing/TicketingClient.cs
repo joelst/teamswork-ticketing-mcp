@@ -58,6 +58,9 @@ public sealed class TicketingClient
         _caller = caller;
     }
 
+    /// <summary>The offsets this client sends, for tools that describe days in the caller's local time.</summary>
+    internal TimeZoneOffsetResolver TimeZones => _timeZones;
+
     // ---- Tickets ----------------------------------------------------------------------------------------------
 
     public Task<ListResponse<Ticket>> ListTicketsAsync(TicketListQuery q, CancellationToken cancellationToken)
@@ -76,29 +79,30 @@ public sealed class TicketingClient
             new("orderBy", q.OrderBy),
             new("order", q.Order),
             new("select", q.Select),
-            new("createdAfter", q.CreatedAfter),
-            new("createdBefore", q.CreatedBefore),
-            new("expectedDateAfter", q.ExpectedDateAfter),
-            new("expectedDateBefore", q.ExpectedDateBefore),
-            new("lastUpdateAfter", q.LastUpdateAfter),
-            new("lastUpdateBefore", q.LastUpdateBefore),
             new("include", q.IncludeHtml ? "description_HTML" : null),
         };
 
-        return SendAsync<ListResponse<Ticket>>(HttpMethod.Get, "tickets", query, body: null, q.ContinuationToken, includeTimezone: true, q.TimezoneOffset, cancellationToken);
+        // Date filters take their 'timezone' the opposite way to every other request; TicketDateFilters works out both.
+        if (TicketDateFilters.For(q, _timeZones) is TicketDateFilters.Plan dates)
+        {
+            query.AddRange(dates.Parameters);
+            return SendAsync<ListResponse<Ticket>>(HttpMethod.Get, "tickets", query, body: null, q.ContinuationToken, dates.Timezone, cancellationToken);
+        }
+
+        return SendAsync<ListResponse<Ticket>>(HttpMethod.Get, "tickets", query, body: null, q.ContinuationToken, CallerOffset(q.TimezoneOffset), cancellationToken);
     }
 
     public async Task<Ticket> GetTicketAsync(Guid ticketId, bool includeHtml, int? timezoneOffset, CancellationToken cancellationToken)
     {
         var query = new List<KeyValuePair<string, string?>> { new("include", includeHtml ? "description_HTML" : null) };
-        ItemResponse<Ticket> r = await SendAsync<ItemResponse<Ticket>>(HttpMethod.Get, $"tickets/{ticketId:D}", query, null, null, true, timezoneOffset, cancellationToken);
+        ItemResponse<Ticket> r = await SendAsync<ItemResponse<Ticket>>(HttpMethod.Get, $"tickets/{ticketId:D}", query, null, null, CallerOffset(timezoneOffset), cancellationToken);
         return r.Item ?? throw new TicketingApiException(HttpStatusCode.NotFound, "The Ticketing API returned no ticket for that ID.");
     }
 
     public async Task<Ticket> CreateTicketAsync(TicketWrite ticket, TicketUser actor, bool includeHtml, int? timezoneOffset, CancellationToken cancellationToken)
     {
         var query = new List<KeyValuePair<string, string?>> { new("include", includeHtml ? "description_HTML" : null) };
-        ItemResponse<Ticket> r = await SendAsync<ItemResponse<Ticket>>(HttpMethod.Post, "tickets", query, new InsertTicketRequest(ticket, actor), null, true, timezoneOffset, cancellationToken);
+        ItemResponse<Ticket> r = await SendAsync<ItemResponse<Ticket>>(HttpMethod.Post, "tickets", query, new InsertTicketRequest(ticket, actor), null, CallerOffset(timezoneOffset), cancellationToken);
         return r.Item ?? throw TicketingApiException.Unknown(
             HttpStatusCode.OK,
             "The Ticketing API reported success but returned no ticket. This is known to happen when 'expectedDate' is not " +
@@ -108,7 +112,7 @@ public sealed class TicketingClient
     public async Task<Ticket> UpdateTicketAsync(Guid ticketId, TicketWrite ticket, TicketUser actor, bool includeHtml, int? timezoneOffset, CancellationToken cancellationToken)
     {
         var query = new List<KeyValuePair<string, string?>> { new("include", includeHtml ? "description_HTML" : null) };
-        ItemResponse<Ticket> r = await SendAsync<ItemResponse<Ticket>>(HttpMethod.Put, $"tickets/{ticketId:D}", query, new UpdateTicketRequest(ticket, actor), null, true, timezoneOffset, cancellationToken);
+        ItemResponse<Ticket> r = await SendAsync<ItemResponse<Ticket>>(HttpMethod.Put, $"tickets/{ticketId:D}", query, new UpdateTicketRequest(ticket, actor), null, CallerOffset(timezoneOffset), cancellationToken);
         return r.Item ?? throw new TicketingApiException("The Ticketing API reported success but returned no ticket.");
     }
 
@@ -116,7 +120,7 @@ public sealed class TicketingClient
     {
         var body = new UpdateTicketStatusRequest(status, resolution, comment, actor);
         // Moving to the same state twice is harmless, but a status change with a note records the note each time.
-        ItemResponse<Ticket> r = await SendAsync<ItemResponse<Ticket>>(HttpMethod.Put, $"tickets/{ticketId:D}/status", [], body, null, true, timezoneOffset, cancellationToken, idempotent: comment is null);
+        ItemResponse<Ticket> r = await SendAsync<ItemResponse<Ticket>>(HttpMethod.Put, $"tickets/{ticketId:D}/status", [], body, null, CallerOffset(timezoneOffset), cancellationToken, idempotent: comment is null);
         return r.Item ?? throw new TicketingApiException("The Ticketing API reported success but returned no ticket.");
     }
 
@@ -129,21 +133,21 @@ public sealed class TicketingClient
             new("include", includeHtml ? "comment_HTML" : null),
             new("limit", limit?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
         };
-        return SendAsync<ListResponse<Activity>>(HttpMethod.Get, $"tickets/{ticketId:D}/activities", query, null, continuationToken, includeTimezone: false, null, cancellationToken);
+        return SendAsync<ListResponse<Activity>>(HttpMethod.Get, $"tickets/{ticketId:D}/activities", query, null, continuationToken, timezone: null, cancellationToken);
     }
 
     public async Task<CommentActivity> AddCommentAsync(Guid ticketId, string? comment, string? commentHtml, bool isPrivate, TicketUser actor, bool includeHtml, CancellationToken cancellationToken)
     {
         var query = new List<KeyValuePair<string, string?>> { new("include", includeHtml ? "comment_HTML" : null) };
         var body = new InsertCommentRequest(comment, commentHtml, isPrivate, actor);
-        ItemResponse<CommentActivity> r = await SendAsync<ItemResponse<CommentActivity>>(HttpMethod.Post, $"tickets/{ticketId:D}/activities", query, body, null, false, null, cancellationToken);
+        ItemResponse<CommentActivity> r = await SendAsync<ItemResponse<CommentActivity>>(HttpMethod.Post, $"tickets/{ticketId:D}/activities", query, body, null, timezone: null, cancellationToken);
         return r.Item ?? throw TicketingApiException.Unknown(HttpStatusCode.OK, "The Ticketing API reported success but returned no comment.");
     }
 
     // ---- Attachments ------------------------------------------------------------------------------------------
 
     public Task<ListResponse<Attachment>> ListTicketAttachmentsAsync(Guid ticketId, int? timezoneOffset, CancellationToken cancellationToken) =>
-        SendAsync<ListResponse<Attachment>>(HttpMethod.Get, $"tickets/{ticketId:D}/attachments", [], null, null, true, timezoneOffset, cancellationToken);
+        SendAsync<ListResponse<Attachment>>(HttpMethod.Get, $"tickets/{ticketId:D}/attachments", [], null, null, CallerOffset(timezoneOffset), cancellationToken);
 
     public async Task<CommentActivity> AddLinkAttachmentsAsync(
         Guid ticketId,
@@ -158,7 +162,7 @@ public sealed class TicketingClient
     {
         var query = new List<KeyValuePair<string, string?>> { new("include", includeHtml ? "comment_HTML" : null) };
         var body = new InsertAttachmentLinkRequest(comment, commentHtml, links, isPrivate, actor);
-        ItemResponse<CommentActivity> r = await SendAsync<ItemResponse<CommentActivity>>(HttpMethod.Post, $"tickets/{ticketId:D}/attachments", query, body, null, true, timezoneOffset, cancellationToken);
+        ItemResponse<CommentActivity> r = await SendAsync<ItemResponse<CommentActivity>>(HttpMethod.Post, $"tickets/{ticketId:D}/attachments", query, body, null, CallerOffset(timezoneOffset), cancellationToken);
         return r.Item ?? throw TicketingApiException.Unknown(HttpStatusCode.OK, "The Ticketing API reported success but returned no attachment activity.");
     }
 
@@ -203,12 +207,12 @@ public sealed class TicketingClient
             return form;
         });
 
-        ItemResponse<CommentActivity> r = await SendAsync<ItemResponse<CommentActivity>>(HttpMethod.Post, $"tickets/{ticketId:D}/attachments", query, body, null, true, timezoneOffset, cancellationToken);
+        ItemResponse<CommentActivity> r = await SendAsync<ItemResponse<CommentActivity>>(HttpMethod.Post, $"tickets/{ticketId:D}/attachments", query, body, null, CallerOffset(timezoneOffset), cancellationToken);
         return r.Item ?? throw TicketingApiException.Unknown(HttpStatusCode.OK, "The Ticketing API reported success but returned no attachment activity.");
     }
 
     public Task<ListResponse<Attachment>> ListActivityAttachmentsAsync(string activityId, int? timezoneOffset, CancellationToken cancellationToken) =>
-        SendAsync<ListResponse<Attachment>>(HttpMethod.Get, $"tickets/activity/{Uri.EscapeDataString(activityId)}/attachments", [], null, null, true, timezoneOffset, cancellationToken);
+        SendAsync<ListResponse<Attachment>>(HttpMethod.Get, $"tickets/activity/{Uri.EscapeDataString(activityId)}/attachments", [], null, null, CallerOffset(timezoneOffset), cancellationToken);
 
     // ---- Instance / tags --------------------------------------------------------------------------------------
 
@@ -218,17 +222,25 @@ public sealed class TicketingClient
     /// </param>
     public async Task<Instance> GetInstanceAsync(int? timezoneOffset, CancellationToken cancellationToken, bool shared = false)
     {
-        ItemResponse<Instance> r = await SendAsync<ItemResponse<Instance>>(HttpMethod.Get, "instance", [], null, null, true, timezoneOffset, cancellationToken, chargeCaller: !shared);
+        ItemResponse<Instance> r = await SendAsync<ItemResponse<Instance>>(HttpMethod.Get, "instance", [], null, null, CallerOffset(timezoneOffset), cancellationToken, chargeCaller: !shared);
         return r.Item ?? throw new TicketingApiException("The Ticketing API returned no instance details.");
     }
 
     /// <param name="shared">As for <see cref="GetInstanceAsync"/>.</param>
     public Task<ListResponse<TagCategory>> ListTagCategoriesAsync(CancellationToken cancellationToken, bool shared = false) =>
-        SendAsync<ListResponse<TagCategory>>(HttpMethod.Get, "tags", [], null, null, false, null, cancellationToken, chargeCaller: !shared);
+        SendAsync<ListResponse<TagCategory>>(HttpMethod.Get, "tags", [], null, null, timezone: null, cancellationToken, chargeCaller: !shared);
 
     // ---- Plumbing ---------------------------------------------------------------------------------------------
 
-    private Uri BuildUri(string path, IEnumerable<KeyValuePair<string, string?>> query, bool includeTimezone, int? timezoneOffset)
+    /// <summary>
+    /// The <c>timezone</c> value for a request that follows the spec's convention (local = UTC + offset), which the live
+    /// API does for instance times and writes: the caller's offset as given, or the configured zone's. Resolved (and an
+    /// out-of-range value refused) before anything is sent.
+    /// </summary>
+    private int CallerOffset(int? timezoneOffset) => _timeZones.Resolve(timezoneOffset);
+
+    /// <summary>Builds the request URI. <paramref name="timezone"/> is sent as given: each caller states its convention.</summary>
+    private Uri BuildUri(string path, IEnumerable<KeyValuePair<string, string?>> query, int? timezone)
     {
         if (string.IsNullOrWhiteSpace(_options.ApiKey))
         {
@@ -239,9 +251,9 @@ public sealed class TicketingClient
         sb.Append('/').Append(path);
         sb.Append("?key=").Append(Uri.EscapeDataString(_options.ApiKey));
 
-        if (includeTimezone)
+        if (timezone is int tz)
         {
-            sb.Append("&timezone=").Append(_timeZones.Resolve(timezoneOffset).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            sb.Append("&timezone=").Append(tz.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
 
         foreach ((string name, string? value) in query)
@@ -261,13 +273,12 @@ public sealed class TicketingClient
         IEnumerable<KeyValuePair<string, string?>> query,
         object? body,
         string? continuationToken,
-        bool includeTimezone,
-        int? timezoneOffset,
+        int? timezone,
         CancellationToken cancellationToken,
         bool? idempotent = null,
         bool chargeCaller = true)
     {
-        Uri uri = BuildUri(path, query, includeTimezone, timezoneOffset);
+        Uri uri = BuildUri(path, query, timezone);
         // Whether repeating a request is harmless belongs to the operation, not the HTTP method. By default a POST (which
         // creates tickets, comments and attachments) isn't, and anything else is; callers say otherwise.
         // The caller is identified once, before any retry, so a retry after the caller's request has ended is still
