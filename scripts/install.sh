@@ -323,12 +323,18 @@ install_binary() {
     echo "    installed $EXE_PATH"
 }
 
+# The secrets file as its lines are read everywhere below, or nothing when there is none. dotnet user-secrets starts
+# the file with a UTF-8 byte order mark, which grep doesn't count as space, so it is dropped first (in the C locale,
+# where sed takes the bytes as they are): every read then sees the same lines, and none misses a key behind the mark.
+secrets_text() {
+    [ -f "$SECRETS_PATH" ] || return 0
+    LC_ALL=C sed "1s/^$(printf '\357\273\277')//" "$SECRETS_PATH"
+}
+
 # The secrets file can only be updated safely without a JSON parser when it is a flat object with one
 # "key": "string" pair per line, which is how dotnet user-secrets and this script write it.
-# dotnet user-secrets starts the file with a UTF-8 byte order mark, which grep doesn't count as space, so it is
-# dropped first (in the C locale, where sed takes the bytes as they are).
 secrets_file_editable() {
-    ! LC_ALL=C sed "1s/^$(printf '\357\273\277')//" "$SECRETS_PATH" |
+    ! secrets_text |
         grep -vqE '^[[:space:]]*([{}]|\{[[:space:]]*\}|"[^"]+"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?)?[[:space:]]*$'
 }
 
@@ -336,14 +342,13 @@ secrets_file_editable() {
 # (dotnet user-secrets writes non-ASCII characters as \uXXXX escapes).
 # Keys match case-insensitively, as .NET configuration keys do.
 secret_get() {
-    [ -f "$SECRETS_PATH" ] || return 0
-    grep -iE "^[[:space:]]*\"$1\"[[:space:]]*:" "$SECRETS_PATH" | head -n1 |
+    secrets_text | grep -iE "^[[:space:]]*\"$1\"[[:space:]]*:" | head -n1 |
         sed -n 's/^[[:space:]]*"[^"]*"[[:space:]]*:[[:space:]]*"\(.*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p'
 }
 
 # Succeeds when the secrets file has the key, whatever its value: .NET keeps an empty one, so it is set, and empty.
 secret_has() {
-    [ -f "$SECRETS_PATH" ] && grep -qiE "^[[:space:]]*\"$1\"[[:space:]]*:" "$SECRETS_PATH"
+    secrets_text | grep -qiE "^[[:space:]]*\"$1\"[[:space:]]*:"
 }
 
 # Prompts on the terminal, since stdin is the script itself under `curl | sh`. $2 is the current value, JSON-escaped;
@@ -515,7 +520,7 @@ find_person() {
     # newline, or a key the file has twice, which the server refuses), no request is made.
     fp_blocked=""
     for fp_setting in 'Ticketing:Region' 'Ticketing:BaseUrl'; do
-        fp_n=$(grep -ciE "^[[:space:]]*\"$fp_setting\"[[:space:]]*:" "$SECRETS_PATH" 2>/dev/null) || :
+        fp_n=$(secrets_text | grep -ciE "^[[:space:]]*\"$fp_setting\"[[:space:]]*:") || :
         [ "${fp_n:-0}" -le 1 ] || fp_blocked=$fp_setting
     done
     fp_rc=0; fp_region=$(env_setting 'Ticketing:Region') || fp_rc=$?
@@ -647,7 +652,7 @@ set_secrets() {
             [ -z "$REGION" ] || printf ',\n  "Ticketing:Region": "%s"' "$REGION"
             # Keep any other settings already in the file, such as Ticketing:DefaultTimeZoneId.
             if [ -f "$SECRETS_PATH" ]; then
-                grep -E '^[[:space:]]*"[^"]+"[[:space:]]*:' "$SECRETS_PATH" |
+                secrets_text | grep -E '^[[:space:]]*"[^"]+"[[:space:]]*:' |
                     grep -viE "^[[:space:]]*\"Ticketing:($written)\"" |
                     sed 's/^[[:space:]]*//; s/[[:space:]]*,\{0,1\}[[:space:]]*$//' |
                     while IFS= read -r line; do printf ',\n  %s' "$line"; done

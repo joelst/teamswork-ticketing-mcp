@@ -6,7 +6,7 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 installer="$here/../install.sh"
-for fn in json_escape secret_get secret_has people_with_email env_setting vendor_endpoint find_person; do
+for fn in json_escape secrets_text secret_get secret_has people_with_email env_setting vendor_endpoint find_person; do
     body=$(sed -n "/^$fn() {/,/^}/p" "$installer")
     [ -n "$body" ] || { echo "install.sh has no function $fn"; exit 1; }
     eval "$body"
@@ -103,6 +103,14 @@ unset Ticketing__Region TICKETING__REGION; REGION=""
 # .NET refuses a secrets file with one key twice (in any case), so the server wouldn't start: no request either.
 printf '{\n  "Ticketing:Region": "EU",\n  "ticketing:region": "AUS"\n}\n' >"$SECRETS_PATH"; rm -f "$tmp/curl-config"
 check 'a key the file has twice gets no request' "$(find_person 'pat.lee@contoso.com' 'abc123' 2>/dev/null)$([ -f "$tmp/curl-config" ] && echo requested)" ''
+# dotnet user-secrets starts the file with a byte order mark; every read sees past it, even to a key on that line.
+bom=$(printf '\357\273\277')
+printf '%s{\n  "Ticketing:BaseUrl": ""\n}\n' "$bom" >"$SECRETS_PATH"; rm -f "$tmp/curl-config"
+check 'an empty base URL in a file with a byte order mark gets no request' "$(find_person 'pat.lee@contoso.com' 'abc123' 2>/dev/null)$([ -f "$tmp/curl-config" ] && echo requested)" ''
+printf '%s"Ticketing:BaseUrl": "https://elsewhere.example/v1",\n' "$bom" >"$SECRETS_PATH"
+check 'a key right after the mark is found' "$(secret_has 'Ticketing:BaseUrl' && secret_get 'Ticketing:BaseUrl')" 'https://elsewhere.example/v1'
+printf '%s"Ticketing:Region": "EU",\n  "ticketing:region": "AUS"\n' "$bom" >"$SECRETS_PATH"; rm -f "$tmp/curl-config"
+check 'and counts toward a key the file has twice' "$(find_person 'pat.lee@contoso.com' 'abc123' 2>/dev/null)$([ -f "$tmp/curl-config" ] && echo requested)" ''
 rm -f "$SECRETS_PATH"; rm -f "$tmp/curl-config"; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null 2>&1
 check 'no secrets file at all still looks up US' "$(cat "$tmp/curl-config" 2>/dev/null)" 'url = "https://teamswork.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
 : >"$SECRETS_PATH"
