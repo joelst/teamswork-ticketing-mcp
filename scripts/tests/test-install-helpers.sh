@@ -6,7 +6,7 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 installer="$here/../install.sh"
-for fn in json_escape secret_get people_with_email env_setting vendor_endpoint find_person; do
+for fn in json_escape secret_get secret_has people_with_email env_setting vendor_endpoint find_person; do
     body=$(sed -n "/^$fn() {/,/^}/p" "$installer")
     [ -n "$body" ] || { echo "install.sh has no function $fn"; exit 1; }
     eval "$body"
@@ -109,6 +109,9 @@ check 'an unknown region: no request' "$(vendor_endpoint 'XX' '' '')" ''
 check 'the server trims a region only at the ends, so E U is unknown: no request' "$(vendor_endpoint 'E U' '' '')" ''
 printf '{\n  "Ticketing:BaseUrl": "%s",\n  "Ticketing:Region": "EU"\n}\n' "$us" >"$SECRETS_PATH"; rm -f "$tmp/curl-config"
 check 'end to end, the built-in URL in the file with a region looks up the regional list' "$(find_person 'pat.lee@contoso.com' 'abc123' | sed -n 1p)$(cat "$tmp/curl-config" 2>/dev/null)" '1111aaaa-1111-1111-1111-111111111111url = "https://ticketing-apim-eu.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
+# An empty base URL in the file is set and empty, as .NET keeps it, and the server refuses it: no request.
+printf '{\n  "Ticketing:BaseUrl": ""\n}\n' >"$SECRETS_PATH"; rm -f "$tmp/curl-config"
+check 'an empty base URL in the file gets no request' "$(find_person 'pat.lee@contoso.com' 'abc123')$([ -f "$tmp/curl-config" ] && echo requested)" ''
 : >"$SECRETS_PATH"
 
 # Only item.assignees.peoples counts: an assignees list nested under a custom field, or one outside item, doesn't.

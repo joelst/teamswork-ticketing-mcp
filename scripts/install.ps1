@@ -386,8 +386,11 @@
         foreach ($variable in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
             if ($names -contains $variable.Key) { return [string] $variable.Value }   # -contains ignores case
         }
-        # [ordered] keys ignore case, like .NET configuration keys.
-        Get-First $Default $Secrets[$Name]
+        if ($Default) { return $Default }
+        # [ordered] keys ignore case, like .NET configuration keys. A key in the file with an empty value is set, and
+        # empty, as .NET keeps it; $null only when the file doesn't have the key.
+        if ($Secrets -and $Secrets.Contains($Name)) { return [string] $Secrets[$Name] }
+        return $null
     }
 
     # Whether a secrets file, as ConvertFrom-Json read it, has a nested object or array as a value. Checked per

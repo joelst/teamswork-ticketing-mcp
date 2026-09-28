@@ -341,6 +341,11 @@ secret_get() {
         sed -n 's/^[[:space:]]*"[^"]*"[[:space:]]*:[[:space:]]*"\(.*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p'
 }
 
+# Succeeds when the secrets file has the key, whatever its value: .NET keeps an empty one, so it is set, and empty.
+secret_has() {
+    [ -f "$SECRETS_PATH" ] && grep -qiE "^[[:space:]]*\"$1\"[[:space:]]*:" "$SECRETS_PATH"
+}
+
 # Prompts on the terminal, since stdin is the script itself under `curl | sh`. $2 is the current value, JSON-escaped;
 # prints the answer JSON-escaped.
 ask() {
@@ -494,7 +499,7 @@ find_person() {
     fi
     fp_url_set=""
     if fp_url=$(env_setting 'Ticketing:BaseUrl'); then fp_url_set='set'
-    elif fp_url=$(secret_get 'Ticketing:BaseUrl'); [ -n "$fp_url" ]; then fp_url_set='set'
+    elif secret_has 'Ticketing:BaseUrl'; then fp_url=$(secret_get 'Ticketing:BaseUrl'); fp_url_set='set'
     fi
     fp_base=$(vendor_endpoint "$fp_region" "$fp_url_set" "$fp_url")
     if [ -n "$fp_base" ] &&

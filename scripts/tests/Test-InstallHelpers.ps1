@@ -77,6 +77,8 @@ function Resolve-FromSettings($secrets) { Resolve-VendorEndpoint (Get-Setting 'T
 Clear-TicketingVariables
 Check 'end to end, the built-in URL in the file with a region is the regional endpoint' ((Resolve-FromSettings ([ordered]@{ 'Ticketing:BaseUrl' = $us; 'Ticketing:Region' = 'EU' })) -eq $eu)
 Check 'end to end, nothing set is US' ((Resolve-FromSettings ([ordered]@{})) -eq $us)
+Check 'an empty base URL in the file is set and empty, as .NET keeps it' ('' -eq (Get-Setting 'Ticketing:BaseUrl' ([ordered]@{ 'ticketing:baseurl' = '' })))
+Check 'end to end, an empty base URL in the file: no request' ($null -eq (Resolve-FromSettings ([ordered]@{ 'Ticketing:BaseUrl' = '' })))
 [Environment]::SetEnvironmentVariable('Ticketing__BaseUrl', '')
 if ([Environment]::GetEnvironmentVariables().Contains('Ticketing__BaseUrl')) {
     Check 'end to end, an empty base URL variable: no request' ($null -eq (Resolve-FromSettings ([ordered]@{})))
