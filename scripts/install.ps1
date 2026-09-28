@@ -400,6 +400,19 @@
         return $null
     }
 
+    # The secrets file's text as ConvertFrom-Json reads it, or $null when it is empty; throws unless it is one JSON
+    # object, as .NET refuses any other root. An array isn't unrolled into its items (PowerShell 7 would make a
+    # one-item array look like an object without -NoEnumerate; Windows PowerShell 5.1 never unrolls it and has no such
+    # switch), and a scalar would otherwise be copied in by its properties (a string's Length).
+    function ConvertFrom-SecretsJson([string] $Text) {
+        if (-not $Text) { return $null }
+        $parsed = if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('NoEnumerate')) { $Text | ConvertFrom-Json -NoEnumerate } else { $Text | ConvertFrom-Json }
+        if ($null -ne $parsed -and $parsed -isnot [System.Management.Automation.PSCustomObject]) {
+            throw 'it must hold one JSON object ({ "Ticketing:...": "..." }), not an array or a single value'
+        }
+        return $parsed
+    }
+
     # Whether a secrets file, as ConvertFrom-Json read it, has a nested object or array as a value. Checked per
     # property, since piping the values would flatten an array into its items, and against the real PSCustomObject
     # type: [pscustomobject] is [psobject], which PowerShell 7 also wraps plain strings in, so it matched every value.
@@ -482,8 +495,8 @@
         if (Test-Path $SecretsPath) {
             # As UTF-8 whether or not the file has a byte order mark: Windows PowerShell 5.1 would otherwise read one
             # without it (as pwsh 7 writes it) in the ANSI code page, garbling any non-ASCII name.
-            try { $existing = Get-Content -Raw -Encoding UTF8 $SecretsPath | ConvertFrom-Json }
-            catch { throw "$SecretsPath is not valid JSON ($($_.Exception.Message)). Fix or delete it, then run the installer again." }
+            try { $existing = ConvertFrom-SecretsJson (Get-Content -Raw -Encoding UTF8 $SecretsPath) }
+            catch { throw "$SecretsPath can't be read as settings ($($_.Exception.Message)). Fix or delete it, then run the installer again." }
             # A nested object ("Ticketing": { ... }) would sit beside the flat keys written below, and .NET refuses to
             # load a file where both forms name the same setting.
             if (Test-NestedSecrets $existing) {

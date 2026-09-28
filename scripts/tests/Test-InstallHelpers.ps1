@@ -4,7 +4,7 @@
 $ErrorActionPreference = 'Stop'
 $script = Join-Path $PSScriptRoot '..\install.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script), [ref]$null, [ref]$null)
-foreach ($name in 'Get-First', 'Get-Setting', 'Test-NestedSecrets', 'Resolve-VendorEndpoint', 'Get-LookupEndpoint', 'Find-Person') {
+foreach ($name in 'Get-First', 'Get-Setting', 'ConvertFrom-SecretsJson', 'Test-NestedSecrets', 'Resolve-VendorEndpoint', 'Get-LookupEndpoint', 'Find-Person') {
     $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     if (-not $definition) { throw "install.ps1 has no function $name" }
     . ([scriptblock]::Create($definition.Extent.Text))
@@ -14,6 +14,18 @@ $failures = 0
 function Check([string] $what, [bool] $ok) {
     if ($ok) { Write-Host "ok   $what" } else { Write-Host "FAIL $what"; $script:failures++ }
 }
+
+# ---- ConvertFrom-SecretsJson: one JSON object, as .NET requires --------------------------------------------------------
+function Test-Refused([string] $text) { try { $null = ConvertFrom-SecretsJson $text; $false } catch { $_.Exception.Message -like '*one JSON object*' } }
+Check 'a flat object is read' ((ConvertFrom-SecretsJson '{"Ticketing:ApiKey":"k"}').'Ticketing:ApiKey' -eq 'k')
+Check 'an empty object is read' ((ConvertFrom-SecretsJson '{}') -is [System.Management.Automation.PSCustomObject])
+Check 'an empty file is nothing' ($null -eq (ConvertFrom-SecretsJson ''))
+Check 'an array of objects is refused' (Test-Refused '[{"Ticketing:ApiKey":"k"},{"Ticketing:ApiKey":"j"}]')
+Check 'a one-item array is refused, not unrolled into its object' (Test-Refused '[{"Ticketing:ApiKey":"k"}]')
+Check 'an empty array is refused' (Test-Refused '[]')
+Check 'a string is refused' (Test-Refused '"abc"')
+Check 'a number is refused' (Test-Refused '0')
+Check 'false is refused' (Test-Refused 'false')
 
 # ---- Test-NestedSecrets ----------------------------------------------------------------------------------------------
 Check 'flat strings, a number and a boolean are flat' (-not (Test-NestedSecrets ('{"Ticketing:ApiKey":"k","Ticketing:ServiceAccount:Id":"i","Ticketing:MaxScanTickets":500,"Ticketing:Flag":true}' | ConvertFrom-Json)))
