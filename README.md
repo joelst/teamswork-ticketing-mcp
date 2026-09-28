@@ -270,6 +270,9 @@ dotnet run --project src/TeamsWork.Ticketing.Mcp -- --local    # run from source
    `infra/scripts/Set-TicketingApiKey.ps1` (or supply it once as the secret pipeline variable `ticketingApiKey`).
 4. The **Deploy** stage prints the MCP endpoint (`https://<app>.<region>.azurecontainerapps.io/mcp`).
 
+For a test instance without the pipeline, `infra/scripts/Deploy-TestInstance.ps1 -Location <region>` runs the same
+steps with your own Azure CLI sign-in, in its own resource group (`rg-taasmcp-test`), and smoke-tests the result.
+
 Estimated running cost: Container Apps consumption with scale-to-zero (mostly within the free grant), ACR Basic
 (~US$5/month), Key Vault and Log Analytics (cents). Under US$10/month at typical agent traffic.
 

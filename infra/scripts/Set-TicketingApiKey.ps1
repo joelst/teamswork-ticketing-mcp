@@ -32,7 +32,9 @@ else {
 # Pass the value via a temp file rather than the command line so it does not land in shell history / process lists.
 $tmp = New-TemporaryFile
 try {
-    Set-Content -Path $tmp -Value $plain -NoNewline -Encoding utf8
+    # Without a byte order mark: Windows PowerShell 5.1's Set-Content -Encoding utf8 writes one, which would become
+    # the first characters of the stored key.
+    [System.IO.File]::WriteAllText($tmp.FullName, $plain, [System.Text.UTF8Encoding]::new($false))
     $result = az keyvault secret set --vault-name $KeyVaultName --name $SecretName --file $tmp --content-type 'text/plain' --query 'id' -o tsv 2>&1
     if ($LASTEXITCODE -ne 0) { throw "az keyvault secret set failed: $result" }
     Write-Host "Stored secret '$SecretName' in vault '$KeyVaultName'."

@@ -24,6 +24,7 @@ The skills:
 ## Before you start
 
 - A deployed endpoint (see [Deploy](../README.md#deploy)), such as `https://<app>.<region>.azurecontainerapps.io/mcp`.
+  For a test instance deployed with your own sign-in, run `./infra/scripts/Deploy-TestInstance.ps1 -Location <region>`.
 - The server app registration from [setup-entra.md](setup-entra.md), and its client ID.
 - Users or a group assigned to the server's enterprise app. It requires assignment, so an unassigned user's sign-in
   is refused.
