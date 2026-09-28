@@ -87,7 +87,10 @@ function Update-Application {
         }
         finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
     }
-    $preAuthorized = if ($Patch.api) { $Patch.api['preAuthorizedApplications'] } else { $null }
+    # Assigned directly, not from an if expression, which would unroll a one-item array into its item and send an
+    # object where Graph wants a list.
+    $preAuthorized = $null
+    if ($Patch.api) { $preAuthorized = $Patch.api['preAuthorizedApplications'] }
     if ($preAuthorized) {
         $Patch.api.Remove('preAuthorizedApplications')
         & $send $Patch
