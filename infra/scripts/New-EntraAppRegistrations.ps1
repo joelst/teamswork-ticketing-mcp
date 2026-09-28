@@ -73,6 +73,29 @@ function Ensure-ServicePrincipal {
     return $sp
 }
 
+# PATCHes an application. Graph refuses to pre-authorize a client for a scope that the same request creates ("a
+# Permission Id that cannot be found in the AppPermissions sets"), so a patch with api.preAuthorizedApplications is
+# sent twice: first without them, which creates the scopes, then in full.
+function Update-Application {
+    param([string] $ObjectId, [hashtable] $Patch)
+    $send = {
+        param($body)
+        $tmp = New-TemporaryFile
+        try {
+            ($body | ConvertTo-Json -Depth 10) | Set-Content -Path $tmp -Encoding utf8
+            Invoke-Az @('rest', '--method', 'PATCH', '--uri', "https://graph.microsoft.com/v1.0/applications/$ObjectId", '--headers', 'Content-Type=application/json', '--body', "@$tmp") | Out-Null
+        }
+        finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+    $preAuthorized = if ($Patch.api) { $Patch.api['preAuthorizedApplications'] } else { $null }
+    if ($preAuthorized) {
+        $Patch.api.Remove('preAuthorizedApplications')
+        & $send $Patch
+        $Patch.api['preAuthorizedApplications'] = $preAuthorized
+    }
+    & $send $Patch
+}
+
 function New-StableGuid {
     # Deterministic GUID from a string so re-runs keep the same scope/role IDs.
     param([string] $Seed)
@@ -134,12 +157,7 @@ $serverPatch = @{
 }
 
 if ($PSCmdlet.ShouldProcess($ServerAppName, 'Configure identifier URI, scope, app role, optional claims')) {
-    $tmp = New-TemporaryFile
-    try {
-        ($serverPatch | ConvertTo-Json -Depth 10) | Set-Content -Path $tmp -Encoding utf8
-        Invoke-Az @('rest', '--method', 'PATCH', '--uri', "https://graph.microsoft.com/v1.0/applications/$serverObjectId", '--headers', 'Content-Type=application/json', '--body', "@$tmp") | Out-Null
-    }
-    finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    Update-Application -ObjectId $serverObjectId -Patch $serverPatch
     Write-Host "Configured $ServerAppName ($identifierUri, scope $ScopeName, role $AppRoleName)."
 }
 
@@ -186,12 +204,7 @@ if (-not $SkipConnectorApp) {
     }
 
     if ($PSCmdlet.ShouldProcess($ConnectorAppName, 'Configure OBO scope, pre-authorized Azure API Connections, permission to server')) {
-        $tmp = New-TemporaryFile
-        try {
-            ($connectorPatch | ConvertTo-Json -Depth 10) | Set-Content -Path $tmp -Encoding utf8
-            Invoke-Az @('rest', '--method', 'PATCH', '--uri', "https://graph.microsoft.com/v1.0/applications/$($connector.id)", '--headers', 'Content-Type=application/json', '--body', "@$tmp") | Out-Null
-        }
-        finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+        Update-Application -ObjectId $connector.id -Patch $connectorPatch
         Write-Host "Configured $ConnectorAppName."
     }
 
