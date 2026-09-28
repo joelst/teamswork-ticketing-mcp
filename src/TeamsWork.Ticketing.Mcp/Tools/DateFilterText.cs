@@ -13,14 +13,17 @@ internal static class DateFilterText
         " Both ends of a range use one offset: without timezoneOffset, the server zone's on the earlier day, so across a " +
         "daylight-saving change the later end is an hour off.";
 
+    // The API's "before" is at or before its cut, which for these is the day's local midnight.
+    private const string AtOrBefore = " The API cuts at or before that local midnight, so a time of exactly midnight is included too.";
+
     private const string Mixed =
         " On its own it ignores timezoneOffset; alongside a created or updated filter, a due date set from another time zone " +
         "can come out a day off. A time of day is refused.";
 
     public const string CreatedAfter = "Only tickets created on or after this day (YYYY-MM-DD, your local day at timezoneOffset)." + WholeDays;
-    public const string CreatedBefore = "Only tickets created before this day starts (YYYY-MM-DD, your local day at timezoneOffset). For one day, give it as createdAfter and the next day here." + OneOffset + WholeDays;
+    public const string CreatedBefore = "Only tickets created before this day starts (YYYY-MM-DD, your local day at timezoneOffset)." + AtOrBefore + " For one day, give it as createdAfter and the next day here." + OneOffset + WholeDays;
     public const string LastUpdateAfter = "Only tickets last updated on or after this day (YYYY-MM-DD, your local day at timezoneOffset)." + WholeDays;
-    public const string LastUpdateBefore = "Only tickets last updated before this day starts (YYYY-MM-DD, your local day at timezoneOffset)." + OneOffset + WholeDays;
+    public const string LastUpdateBefore = "Only tickets last updated before this day starts (YYYY-MM-DD, your local day at timezoneOffset)." + AtOrBefore + OneOffset + WholeDays;
     public const string ExpectedDateAfter = "Only tickets due on or after this date (YYYY-MM-DD, a calendar date in the server's time zone)." + Mixed;
     public const string ExpectedDateBefore = "Only tickets due before this date (YYYY-MM-DD, a calendar date in the server's time zone; the date itself isn't included)." + Mixed;
 }

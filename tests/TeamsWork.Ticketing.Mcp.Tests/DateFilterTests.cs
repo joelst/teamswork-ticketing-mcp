@@ -95,6 +95,9 @@ public sealed class DateFilterTests
         Assert.Contains("daylight-saving change the later end is an hour off", DateFilterText.LastUpdateBefore, StringComparison.Ordinal);
         Assert.Contains("alongside a created or updated filter", DateFilterText.ExpectedDateAfter, StringComparison.Ordinal);
         Assert.Contains("alongside a created or updated filter", DateFilterText.ExpectedDateBefore, StringComparison.Ordinal);
+        // And "before" for created and updated days cuts at or before local midnight, not strictly before it.
+        Assert.Contains("a time of exactly midnight is included too", DateFilterText.CreatedBefore, StringComparison.Ordinal);
+        Assert.Contains("a time of exactly midnight is included too", DateFilterText.LastUpdateBefore, StringComparison.Ordinal);
     }
 
     [Fact]

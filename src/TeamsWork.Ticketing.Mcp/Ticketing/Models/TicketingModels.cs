@@ -264,8 +264,9 @@ public sealed record TicketListQuery
     public string? Select { get; init; }
 
     // Date filters are whole days: the API ignores one with a time of day and returns every ticket, so they are dates
-    // here and TicketDateFilters formats them. "After" includes the named day and "before" excludes it. Created and
-    // updated days are the caller's local days; an expected date is a calendar date. See TicketDateFilters.
+    // here and TicketDateFilters formats them. "After" includes the named day and "before" stops at its start; the API
+    // cuts at or before, so a created or updated time of exactly local midnight is in both. Created and updated days are
+    // the caller's local days; an expected date is a calendar date. See TicketDateFilters.
     public DateOnly? CreatedAfter { get; init; }
     public DateOnly? CreatedBefore { get; init; }
     public DateOnly? ExpectedDateAfter { get; init; }
