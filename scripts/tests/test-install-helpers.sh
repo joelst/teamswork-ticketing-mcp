@@ -20,11 +20,13 @@ SECRETS_PATH="$tmp/secrets.json"; : >"$SECRETS_PATH"
 REGION=""
 unset Ticketing__BaseUrl 2>/dev/null || true
 
-# A made-up instance in the live shape: a namesake pair sharing an email (no match), and an escaped quote in a name.
-# Outside the assignee list, which alone counts: an SLA escalation contact with Pat's email but another ID (which
-# mustn't make Pat look ambiguous), and a people-picker default for someone not on the list.
+# A made-up instance in the live shape: a namesake pair sharing an email (no match), an escaped quote in a name, a
+# name with brackets and braces ahead of Pat (which mustn't end the list or split a person), and Pat listed twice
+# (one match, whatever the case of the ID). Outside the assignee list, which alone counts: a string value reading
+# "assignees" before the real key, an SLA escalation contact with Pat's email but another ID (which mustn't make Pat
+# look ambiguous), and a people-picker default for someone not on the list.
 cat >"$tmp/instance.json" <<'EOF'
-{"item":{"id":"i","customFieldsLeft":[{"id":"f","title":"Followers","defaultValue":[{"id":"44444444-4444-4444-4444-444444444444","name":"Lee Outside","email":"lee@contoso.com"}]}],"assignees":{"type":"teamsOwner","peoples":[{"id":"11111111-1111-1111-1111-111111111111","name":"Pat \"PJ\" Lee","email":"Pat.Lee@contoso.com"},{"id":"22222222-2222-2222-2222-222222222222","name":"Sam Roe","email":"sam@contoso.com"},{"id":"33333333-3333-3333-3333-333333333333","name":"Sam Roe","email":"SAM@contoso.com"}]},"sla":{"frt":{"escalation":{"enabled":false,"escalationAssignee":{"id":"99999999-9999-9999-9999-999999999999","name":"Pat Lee (old)","email":"pat.lee@contoso.com"}}}}}}
+{"item":{"id":"i","customFieldsLeft":[{"id":"f","title":"assignees","defaultValue":[{"id":"44444444-4444-4444-4444-444444444444","name":"Lee Outside","email":"lee@contoso.com"}]}],"assignees":{"type":"teamsOwner","peoples":[{"id":"55555555-5555-5555-5555-555555555555","name":"Bracket [Team] {Lead}","email":"brackets@contoso.com"},{"id":"1111aaaa-1111-1111-1111-111111111111","name":"Pat \"PJ\" Lee","email":"Pat.Lee@contoso.com"},{"id":"22222222-2222-2222-2222-222222222222","name":"Sam Roe","email":"sam@contoso.com"},{"id":"33333333-3333-3333-3333-333333333333","name":"Sam Roe","email":"SAM@contoso.com"},{"email":"pat.lee@contoso.com","id":"1111AAAA-1111-1111-1111-111111111111","name":"Pat \"PJ\" Lee"}]},"sla":{"frt":{"escalation":{"enabled":false,"escalationAssignee":{"id":"99999999-9999-9999-9999-999999999999","name":"Pat Lee (old)","email":"pat.lee@contoso.com"}}}}}}
 EOF
 
 # Stubs, defined after the functions they replace would be looked up at call time.
@@ -32,12 +34,14 @@ have() { return 1; }  # no Azure CLI
 curl() { cat >"$tmp/curl-config"; [ -f "$tmp/fail" ] && return 22; cat "$tmp/instance.json"; }
 
 out=$(find_person 'pat.lee@CONTOSO.com' 'abc123')
-check 'an email is matched in the assignee list, case aside' "$(printf '%s\n' "$out" | sed -n 1p)" '11111111-1111-1111-1111-111111111111'
+check 'an email is matched in the assignee list, case aside' "$(printf '%s\n' "$out" | sed -n 1p)" '1111aaaa-1111-1111-1111-111111111111'
 check 'its name comes back JSON-escaped' "$(printf '%s\n' "$out" | sed -n 2p)" 'Pat \"PJ\" Lee'
 check 'and where it came from' "$(printf '%s\n' "$out" | sed -n 3p)" "the help desk's assignee list"
 check 'the key goes on stdin to the US endpoint' "$(cat "$tmp/curl-config")" 'url = "https://teamswork.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
 
-check 'a contact outside the assignee list with the same email is ignored' "$(find_person 'pat.lee@contoso.com' 'abc123' | sed -n 1p)" '11111111-1111-1111-1111-111111111111'
+check 'a contact outside the assignee list with the same email is ignored' "$(find_person 'pat.lee@contoso.com' 'abc123' | sed -n 1p)" '1111aaaa-1111-1111-1111-111111111111'
+check 'brackets and braces in a name are text, not structure' "$(find_person 'brackets@contoso.com' 'abc123' | sed -n 2p)" 'Bracket [Team] {Lead}'
+check 'so the people after that name are still read' "$(people_with_email 'sam@contoso.com' <"$tmp/instance.json" | wc -l | tr -d ' ')" '2'
 check 'someone only outside the assignee list is no match' "$(find_person 'lee@contoso.com' 'abc123')" ''
 check 'two people with one email is no match' "$(find_person 'sam@contoso.com' 'abc123')" ''
 check 'nobody with the email is no match' "$(find_person 'nobody@contoso.com' 'abc123')" ''

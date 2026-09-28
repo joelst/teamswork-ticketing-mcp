@@ -415,7 +415,10 @@
             try {
                 $instance = Invoke-RestMethod -UseBasicParsing -TimeoutSec 20 -Uri "$base/instance?key=$([Uri]::EscapeDataString($ApiKey))&timezone=0"
                 $people = @($instance.item.assignees.peoples | Where-Object { $_.id -and $_.email -and $_.email.Trim() -ieq $Email })
-                if ($people.Count -eq 1) { return [pscustomobject]@{ Id = $people[0].id; Name = $people[0].name; Source = "the help desk's assignee list" } }
+                # One person listed twice is still one match (install.sh counts the same way); two IDs are ambiguous.
+                if (@($people | ForEach-Object { $_.id.ToLowerInvariant() } | Sort-Object -Unique).Count -eq 1) {
+                    return [pscustomobject]@{ Id = $people[0].id; Name = $people[0].name; Source = "the help desk's assignee list" }
+                }
             }
             catch { Write-Host "    couldn't read the help desk's assignee list" }
         }

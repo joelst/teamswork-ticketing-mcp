@@ -50,12 +50,14 @@ function Invoke-RestMethod { param([string] $Uri, [switch] $UseBasicParsing, [in
 function Get-Command { $null }
 
 $script:answer = ('{"item":{"assignees":{"peoples":[' +
-    '{"id":"11111111-1111-1111-1111-111111111111","name":"Pat Lee","email":"Pat.Lee@contoso.com"},' +
+    '{"id":"1111aaaa-1111-1111-1111-111111111111","name":"Pat Lee","email":"Pat.Lee@contoso.com"},' +
     '{"id":"22222222-2222-2222-2222-222222222222","name":"Sam Roe","email":"sam@contoso.com"},' +
-    '{"id":"33333333-3333-3333-3333-333333333333","name":"Sam Roe (2)","email":"SAM@contoso.com"}]}}}') | ConvertFrom-Json
+    '{"id":"33333333-3333-3333-3333-333333333333","name":"Sam Roe (2)","email":"SAM@contoso.com"},' +
+    '{"id":"1111AAAA-1111-1111-1111-111111111111","name":"Pat Lee","email":"pat.lee@contoso.com"}]}}}') | ConvertFrom-Json
+# Pat is listed twice, the second time with the ID in upper case (install.sh counts the same way): one person, so still one match.
 
 $pat = Find-Person 'pat.lee@contoso.com' 'k' 'EU' ''
-Check 'an email is matched in the assignee list, case aside' ($pat.Id -eq '11111111-1111-1111-1111-111111111111' -and $pat.Name -eq 'Pat Lee')
+Check 'an email is matched in the assignee list, case aside' ($pat.Id -eq '1111aaaa-1111-1111-1111-111111111111' -and $pat.Name -eq 'Pat Lee')
 Check 'the regional endpoint is asked' ($script:requests[-1] -like 'https://ticketing-apim-eu.azure-api.net/ticketing/v1/instance?key=k&timezone=0')
 Check 'no region means US' ((Find-Person 'pat.lee@contoso.com' 'k' '' '') -and $script:requests[-1] -like 'https://teamswork.azure-api.net/ticketing/v1/*')
 Check 'two people with one email is no match' ($null -eq (Find-Person 'sam@contoso.com' 'k' 'US' ''))
@@ -68,7 +70,7 @@ Check 'no key gets no request' ($null -eq (Find-Person 'pat.lee@contoso.com' '' 
 
 $script:answer = { throw 'Failed: https://teamswork.azure-api.net/ticketing/v1/instance?key=super-secret-key&timezone=0' }
 $output = Find-Person 'pat.lee@contoso.com' 'super-secret-key' 'US' '' 6>&1 | Out-String
-Check 'a failed request is no match' ($output -notmatch '11111111')
+Check 'a failed request is no match' ($output -notmatch '1111aaaa')
 Check "a failed request doesn't print the key or the error" ($output -notmatch 'super-secret-key' -and $output -match "couldn't read the help desk's assignee list")
 
 if ($failures) { Write-Host "$failures failed"; exit 1 }

@@ -357,24 +357,49 @@ ask() {
 # Reads the instance JSON on stdin and prints "id<TAB>name" (still JSON-escaped) for each person in its assignee list
 # whose email is $1, compared in lower case. Only item.assignees.peoples counts, as in install.ps1: people elsewhere in
 # the response (an SLA escalation contact, a people-picker default) aren't the help desk's list, and one of them with
-# the same email would make the real match look ambiguous. The list's person objects hold no nested braces or
-# brackets, so it runs to the first "]" and splits into people at "{".
+# the same email would make the real match look ambiguous.
+# Braces and brackets inside strings (a display name such as "A [B]") must not count as structure, so the text is
+# first walked once, honouring quotes and escapes, and those four characters inside strings are swapped for control
+# characters, which valid JSON never has raw in a string. The list's person objects then hold no nested braces or
+# brackets, so the list runs to its first "]" and splits into people at "{"; values get their characters back.
 people_with_email() {
     tr -d '\n' | awk -v want="$1" '
+        function shield(s,   out, c, i, n, quoted, escaped) {
+            n = length(s); out = ""; quoted = 0; escaped = 0
+            for (i = 1; i <= n; i++) {
+                c = substr(s, i, 1)
+                if (quoted) {
+                    if (escaped) escaped = 0
+                    else if (c == "\\") escaped = 1
+                    else if (c == "\"") quoted = 0
+                    else if (c == "{") c = "\001"
+                    else if (c == "}") c = "\002"
+                    else if (c == "[") c = "\003"
+                    else if (c == "]") c = "\004"
+                } else if (c == "\"") quoted = 1
+                out = out c
+            }
+            return out
+        }
+        function unshield(s) {
+            gsub("\001", "{", s); gsub("\002", "}", s); gsub("\003", "[", s); gsub("\004", "]", s)
+            return s
+        }
         function field(s, k,   re, m) {
             re = "\"" k "\"[ \t]*:[ \t]*\"([^\"\\\\]|\\\\.)*\""
             if (!match(s, re)) return ""
             m = substr(s, RSTART, RLENGTH)
             sub("^\"" k "\"[ \t]*:[ \t]*\"", "", m)
             sub("\"$", "", m)
-            return m
+            return unshield(m)
         }
         {
-            s = $0
-            if (!(i = index(s, "\"assignees\""))) exit
-            s = substr(s, i)
-            if (!(i = index(s, "\"peoples\""))) exit
-            s = substr(s, i)
+            s = shield($0)
+            # Keys only: a string value that happens to read "assignees" is followed by "," or "}", not ":".
+            if (!match(s, /"assignees"[ \t]*:/)) exit
+            s = substr(s, RSTART)
+            if (!match(s, /"peoples"[ \t]*:/)) exit
+            s = substr(s, RSTART)
             if (!(i = index(s, "["))) exit
             s = substr(s, i + 1)
             if ((i = index(s, "]"))) s = substr(s, 1, i - 1)
@@ -424,7 +449,8 @@ find_person() {
         printf '%s' "$fp_key" | grep -qE '^[A-Za-z0-9._~-]+$'; then
         if fp_json=$(printf 'url = "%s/instance?key=%s&timezone=0"\n' "$fp_base" "$fp_key" | curl -fsS --max-time 20 -K - 2>/dev/null); then
             fp_people=$(printf '%s' "$fp_json" | people_with_email "$fp_want")
-            if [ -n "$fp_people" ] && [ "$(printf '%s\n' "$fp_people" | cut -f1 | sort -u | wc -l | tr -d ' ')" = 1 ]; then
+            # One person listed twice is still one match (install.ps1 counts the same way); two IDs are ambiguous.
+            if [ -n "$fp_people" ] && [ "$(printf '%s\n' "$fp_people" | cut -f1 | tr '[:upper:]' '[:lower:]' | sort -u | wc -l | tr -d ' ')" = 1 ]; then
                 printf '%s\n' "$fp_people" | head -n1 | cut -f1
                 printf '%s\n' "$fp_people" | head -n1 | cut -f2
                 echo "the help desk's assignee list"
