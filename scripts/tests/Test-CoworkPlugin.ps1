@@ -71,6 +71,18 @@ try {
     Test-Caught 'an OAuth connector without a referenceId is caught' 'referenceId'
 
     New-Copy
+    Set-Manifest { param($m) $m.version = '0.1.0' }
+    Test-Caught 'a version starting with 0 is caught' 'must be like 1.0.0'
+
+    New-Copy
+    Set-Manifest { param($m) $m.agentConnectors[0].toolSource.remoteMcpServer.PSObject.Properties.Remove('mcpToolDescription') }
+    Test-Caught 'a connector without the tool description the schema requires is caught' 'mcpToolDescription'
+
+    New-Copy
+    Remove-Item (Join-Path $tmp 'cowork/tools/teamswork-ticketing-tools.json')
+    Test-Caught 'a tool description file missing from cowork/tools is caught' 'tool description'
+
+    New-Copy
     Set-Content -Path (Join-Path $tmp 'skills/ticket-triage/.hidden.md') -Value 'x'
     Test-Caught 'a hidden companion file is caught' 'refuses'
 
@@ -79,6 +91,16 @@ try {
     Test-Caught 'more than 20 skills is caught' 'ASKILL-M002'
 }
 finally { if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp } }
+
+# ---- The tool description matches the server's tools --------------------------------------------------------------
+# Cowork reads the tools from tools/list, so a stale file does no harm there, but it should list what the hosted
+# endpoint offers: every tool in the source except upload_ticket_files, which is stdio-only. Regenerate it with
+# scripts/Update-CoworkToolDescription.ps1.
+$sourceTools = @(Get-ChildItem (Join-Path $PSScriptRoot '../../src/TeamsWork.Ticketing.Mcp/Tools') -Filter *.cs |
+    Select-String -Pattern '\[McpServerTool\(Name = "([a-z_]+)"' | ForEach-Object { $_.Matches[0].Groups[1].Value } |
+    Where-Object { $_ -ne 'upload_ticket_files' } | Sort-Object)
+$describedTools = @((Get-Content -Raw -Encoding UTF8 (Join-Path $plugin 'cowork/tools/teamswork-ticketing-tools.json') | ConvertFrom-Json).tools.name | Sort-Object)
+Check "the tool description lists the hosted tools ($($sourceTools.Count))" (($sourceTools -join ',') -eq ($describedTools -join ','))
 
 # ---- Expand-ManifestTemplate ---------------------------------------------------------------------------------------
 $expanded = Expand-ManifestTemplate '{"a":"{{X}}","b":"{{Y}}"}' @{ X = 'https://example.test/mcp'; Y = 'Quote " and \ back' }
@@ -100,6 +122,7 @@ try {
         $names = @($zip.Entries | ForEach-Object FullName)
         Check 'the package has manifest.json and both icons at its root' ((@('manifest.json', 'color.png', 'outline.png') | Where-Object { $_ -notin $names }).Count -eq 0)
         Check 'each skill is under skills/ with forward slashes' ('skills/ticket-triage/SKILL.md' -in $names -and -not ($names -match '\\'))
+        Check 'the tool description the manifest points at is in the package' ('tools/teamswork-ticketing-tools.json' -in $names)
         $reader = [IO.StreamReader]::new(($zip.Entries | Where-Object FullName -eq 'manifest.json').Open())
         try { $manifestText = $reader.ReadToEnd() } finally { $reader.Dispose() }
     }

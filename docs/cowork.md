@@ -10,6 +10,7 @@ Foundry use, and every write is attributed to the Cowork user signed in through 
 | Cowork manifest template and icons | `plugin/cowork/` |
 | Claude Code plugin manifest (skills only) | `plugin/.claude-plugin/plugin.json` |
 | Package builder and checks | `scripts/Build-CoworkPackage.ps1`, `scripts/tests/Test-CoworkPlugin.ps1` |
+| Tool description (a copy of `tools/list`) | `plugin/cowork/tools/`, refreshed by `scripts/Update-CoworkToolDescription.ps1` |
 
 The skills:
 
@@ -36,13 +37,15 @@ option, and Entra doesn't support dynamic client registration.
 In the Entra admin center, go to **App registrations** → **New registration**, and name it `taas-mcp-cowork-client`
 with single-tenant accounts. Then:
 
-- **Authentication → Add a platform**, with the redirect URI
-  `https://teams.microsoft.com/api/platform/v1.0/oAuthRedirect`. There are two choices:
-  - **Single-page application** (a public client, no secret). PKCE secures the code exchange, so there's no secret
-    to store or rotate. Entra limits a single-page application's refresh tokens to 24 hours, so expect to sign in
-    again about once a day.
-  - **Web** (a confidential client). Create a client secret under **Certificates & secrets**, and enter it only in
-    the developer portal in step 2. Never put it in a file or in this repository.
+- **Authentication → Add a platform → Web**, with the redirect URI
+  `https://teams.microsoft.com/api/platform/v1.0/oAuthRedirect`. Then create a client secret under **Certificates &
+  secrets**. Enter it only in the developer portal in step 2; never put it in a file or in this repository. Note its
+  expiry date, because sign-ins stop working when it expires.
+
+  Microsoft's guide also describes a public client with no secret: a **Single-page application** platform, with PKCE
+  securing the code exchange. That hasn't been tried with Entra here. Entra may refuse a single-page application's
+  code when Teams exchanges it server-side rather than from a browser, and it limits such an app's refresh tokens to
+  24 hours. Use Web unless you've confirmed the public client works.
 - **API permissions**: add the server app's delegated `access_as_user` permission, and `offline_access`. Then
   **Grant admin consent**. Consent isn't checked when the auth config is created, so without it every sign-in fails
   later with *Need admin approval*.
@@ -58,7 +61,7 @@ registration** → **Register client**:
 | Restrict usage by org | **My organization only** |
 | Restrict usage by app | **Any Teams app**. A registration bound to one app ID makes every tool call return 404. |
 | Client ID | The client ID of `taas-mcp-cowork-client` |
-| Client secret | Only for a Web client |
+| Client secret | The secret from step 1 |
 | Authorization endpoint | `https://login.microsoftonline.com/<tenantId>/oauth2/v2.0/authorize` |
 | Token endpoint | `https://login.microsoftonline.com/<tenantId>/oauth2/v2.0/token` |
 | Refresh endpoint | `https://login.microsoftonline.com/<tenantId>/oauth2/v2.0/token` |
@@ -88,6 +91,16 @@ The script checks the skills and manifest against Microsoft's upload rules first
 It then writes `artifacts/cowork/teamswork-ticketing-cowork.zip`. `./scripts/Build-CoworkPackage.ps1 -CheckOnly`
 runs just the checks; CI runs them with `scripts/tests/Test-CoworkPlugin.ps1`.
 
+Before uploading, check the package with the upload's own rules:
+`atk validate --package-file ./artifacts/cowork/teamswork-ticketing-cowork.zip`. It reports one warning, which you can
+ignore for your own organization: the short name contains "Teams", from the vendor's product name TeamsWork, and
+Store listings shouldn't use Microsoft product names.
+
+The package also carries `tools/teamswork-ticketing-tools.json`, a copy of the endpoint's `tools/list`. The v1.28
+schema requires it, though Cowork reads the tools from the endpoint itself. After a change to the server's tools,
+refresh it with `./scripts/Update-CoworkToolDescription.ps1`; the tests fail when its tool names fall out of step with
+the source.
+
 The icons in `plugin/cowork/` are placeholders. Replace them before publishing: `color.png` is 192×192, and
 `outline.png` is a 32×32 white outline on a transparent background.
 
@@ -105,7 +118,8 @@ Skills** → **Plugins**, and try:
 - "Triage today's new tickets"
 - "Add a private note to ticket 1234 saying the vendor has been called"
 
-The first tool call asks you to sign in. Changes are recorded as you: `whoami` shows the account.
+The first tool call asks you to sign in. Changes are recorded as you: `whoami` shows the account. The server accepts
+any client with a token for its `access_as_user` scope, so the new client needs no server setting.
 
 ## 5. Publish to the organization
 

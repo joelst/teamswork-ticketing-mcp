@@ -75,6 +75,8 @@ function Test-CoworkPluginSource([string] $PluginRoot) {
     }
     if ($manifest.manifestVersion -ne '1.28') { $problems.Add("manifestVersion must be 1.28, not '$($manifest.manifestVersion)'") }
     if (-not ($manifest.id -as [guid])) { $problems.Add('manifest id must be a GUID') }
+    # Agents Toolkit's validation (the upload's rules) refuses a version starting with 0, such as 0.1.0.
+    if ([string] $manifest.version -notmatch '^[1-9]\d*(\.\d+){1,2}$') { $problems.Add("manifest version '$($manifest.version)' must be like 1.0.0 and not start with 0") }
     foreach ($icon in $manifest.icons.color, $manifest.icons.outline) {
         if (-not (Test-Path (Join-Path $PluginRoot "cowork/$icon"))) { $problems.Add("icon '$icon' is missing from cowork/") }
     }
@@ -124,6 +126,12 @@ function Test-CoworkPluginSource([string] $PluginRoot) {
         $server = $connector.toolSource.remoteMcpServer
         if (-not $server) { $problems.Add("connector '$($connector.id)' has no toolSource.remoteMcpServer"); continue }
         if (-not $server.mcpServerUrl) { $problems.Add("connector '$($connector.id)' has no mcpServerUrl") }
+        # The v1.28 schema requires the tool-description file, though Cowork itself reads the tools from tools/list.
+        $toolFile = [string] $server.mcpToolDescription.file
+        if (-not $toolFile) { $problems.Add("connector '$($connector.id)' has no mcpToolDescription.file, which the v1.28 schema requires") }
+        elseif ($toolFile -notmatch '^(\./)?tools/[^/\\]+\.json$' -or -not (Test-Path (Join-Path $PluginRoot ('cowork/' + ($toolFile -replace '^\./', ''))) -PathType Leaf)) {
+            $problems.Add("connector '$($connector.id)' tool description '$toolFile' must be a file under cowork/tools/")
+        }
         $auth = $server.authorization
         if ($auth -and $auth.type -ne 'None' -and -not $auth.referenceId) { $problems.Add("connector '$($connector.id)' needs an authorization referenceId") }
         if ($auth -and $auth.type -eq 'None' -and $auth.referenceId) { $problems.Add("connector '$($connector.id)' has a referenceId with type None") }
@@ -188,6 +196,9 @@ try {
     try { $writer.Write($manifestText) } finally { $writer.Dispose() }
     foreach ($icon in 'color.png', 'outline.png') {
         [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, (Join-Path $pluginRoot "cowork/$icon"), $icon)
+    }
+    foreach ($file in Get-ChildItem (Join-Path $pluginRoot 'cowork/tools') -File) {
+        [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, "tools/$($file.Name)")
     }
     $skillsRoot = (Resolve-Path (Join-Path $pluginRoot 'skills')).Path
     foreach ($file in Get-ChildItem $skillsRoot -Recurse -File) {

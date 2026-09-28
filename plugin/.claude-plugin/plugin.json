@@ -1,7 +1,7 @@
 {
   "name": "teamswork-ticketing",
   "description": "Skills for working with TeamsWork Ticketing help desk tickets: triage, your queue, and updates. Uses the teamswork-ticketing MCP server that scripts/install.ps1 or install.sh registers.",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "author": {
     "name": "Joel Stidley"
   }

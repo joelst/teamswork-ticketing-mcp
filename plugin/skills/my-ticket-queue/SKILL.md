@@ -8,7 +8,7 @@ description: |
 license: MIT
 metadata:
   author: TeamsWork Ticketing MCP
-  version: "0.1.0"
+  version: "1.0.0"
 ---
 
 # My ticket queue
@@ -57,8 +57,9 @@ From the TeamsWork Ticketing connector: `whoami`, `list_my_tickets`, `list_sla_r
 Then one line on the rest, for example: "4 more Low or Medium tickets, none at risk; oldest is #0998 from 12 days
 ago."
 
-For a standup summary, give three short lines instead of the table: done since yesterday (resolved in the last day,
-from `list_my_tickets` with `includeResolved: true`), in progress, and blocked.
+For a standup summary, give three short lines instead of the table: done, in progress, and blocked. For "done",
+call `list_my_tickets` with `includeResolved: true` and take the resolved or closed tickets whose `lastUpdatedOn` is
+in the last day. The tool can't filter by resolution date, so say it's based on the last update.
 
 ## Rules
 
