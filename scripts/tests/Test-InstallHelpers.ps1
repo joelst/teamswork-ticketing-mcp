@@ -4,7 +4,7 @@
 $ErrorActionPreference = 'Stop'
 $script = Join-Path $PSScriptRoot '..\install.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script), [ref]$null, [ref]$null)
-foreach ($name in 'Get-First', 'Test-NestedSecrets', 'Find-Person') {
+foreach ($name in 'Get-First', 'Get-Setting', 'Test-NestedSecrets', 'Find-Person') {
     $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     if (-not $definition) { throw "install.ps1 has no function $name" }
     . ([scriptblock]::Create($definition.Extent.Text))
@@ -22,6 +22,25 @@ Check 'an array is found' (Test-NestedSecrets ('{"Ticketing:Domains":["a.com","b
 Check 'a one-item array is found' (Test-NestedSecrets ('{"Ticketing:Domains":["a.com"]}' | ConvertFrom-Json))
 Check 'an empty file is flat' (-not (Test-NestedSecrets ('{}' | ConvertFrom-Json)))
 Check 'nothing is flat' (-not (Test-NestedSecrets $null))
+
+# ---- Get-Setting: as the server's .NET configuration reads it --------------------------------------------------------
+# Environment variable names are case-sensitive on Linux and macOS, so each spelling is its own variable there.
+$file = [ordered]@{ 'ticketing:baseurl' = 'https://from-file.example/v1'; 'Ticketing:Region' = 'AUS' }
+function Clear-TicketingVariables { foreach ($n in 'Ticketing:BaseUrl', 'Ticketing__BaseUrl', 'TICKETING__BASEURL', 'ticketing__baseurl', 'Ticketing__Region') { [Environment]::SetEnvironmentVariable($n, $null) } }
+Clear-TicketingVariables
+Check 'the secrets file is read, whatever the case of its keys' ((Get-Setting 'Ticketing:BaseUrl' $file) -eq 'https://from-file.example/v1')
+Check 'a value about to be written wins over the file' ((Get-Setting 'Ticketing:Region' $file 'EU') -eq 'EU')
+foreach ($spelling in 'Ticketing:BaseUrl', 'Ticketing__BaseUrl', 'TICKETING__BASEURL', 'ticketing__baseurl') {
+    Clear-TicketingVariables
+    [Environment]::SetEnvironmentVariable($spelling, 'https://from-env.example/v1')
+    Check "an environment variable spelled $spelling wins over the file" ((Get-Setting 'Ticketing:BaseUrl' $file) -eq 'https://from-env.example/v1')
+}
+Clear-TicketingVariables
+[Environment]::SetEnvironmentVariable('Ticketing__Region', 'US')
+Check 'a region in the environment wins over -Region and the file, as at runtime' ((Get-Setting 'Ticketing:Region' $file 'EU') -eq 'US')
+Clear-TicketingVariables
+Check 'nothing set anywhere is nothing' ($null -eq (Get-Setting 'Ticketing:BaseUrl' ([ordered]@{})))
+Clear-TicketingVariables
 
 # ---- Find-Person -----------------------------------------------------------------------------------------------------
 # Stubs, found before the real commands: the network, and no Azure CLI.

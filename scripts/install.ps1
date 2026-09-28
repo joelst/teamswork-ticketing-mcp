@@ -375,6 +375,19 @@
         finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
     }
 
+    # A setting as the server's .NET configuration will see it: an environment variable wins over the secrets file (or
+    # $Default, a value about to be written to it), and one may use either separator (Ticketing__BaseUrl or
+    # Ticketing:BaseUrl) in any case. The account lookup decides with these where the API key may go, so it must read
+    # them exactly as the server does.
+    function Get-Setting([string] $Name, $Secrets, [string] $Default) {
+        $names = @($Name, $Name.Replace(':', '__'))
+        foreach ($variable in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
+            if ($names -contains $variable.Key -and $variable.Value) { return [string] $variable.Value }   # -contains ignores case
+        }
+        # [ordered] keys ignore case, like .NET configuration keys.
+        Get-First $Default $Secrets[$Name]
+    }
+
     # Whether a secrets file, as ConvertFrom-Json read it, has a nested object or array as a value. Checked per
     # property, since piping the values would flatten an array into its items, and against the real PSCustomObject
     # type: [pscustomobject] is [psobject], which PowerShell 7 also wraps plain strings in, so it matched every value.
@@ -470,7 +483,7 @@
             $nameDefault = $secrets['Ticketing:ServiceAccount:Name']
         }
         else {
-            $found = Find-Person $email $secrets['Ticketing:ApiKey'] (Get-First $Region $secrets['Ticketing:Region']) (Get-First $secrets['Ticketing:BaseUrl'] $env:Ticketing__BaseUrl)
+            $found = Find-Person $email $secrets['Ticketing:ApiKey'] (Get-Setting 'Ticketing:Region' $secrets $Region) (Get-Setting 'Ticketing:BaseUrl' $secrets)
             if (-not $found -and $signedIn.id -and $signedIn.email -and $signedIn.email.Trim() -ieq $email) {
                 $found = [pscustomobject]@{ Id = $signedIn.id; Name = $signedIn.name; Source = 'your Azure CLI sign-in' }
             }

@@ -354,10 +354,13 @@ ask() {
     done
 }
 
-# Reads the instance JSON on stdin and prints "id<TAB>name" (still JSON-escaped) for each person object whose email
-# is $1, compared in lower case. People objects hold no nested braces, so splitting at "{" puts each on a line.
+# Reads the instance JSON on stdin and prints "id<TAB>name" (still JSON-escaped) for each person in its assignee list
+# whose email is $1, compared in lower case. Only item.assignees.peoples counts, as in install.ps1: people elsewhere in
+# the response (an SLA escalation contact, a people-picker default) aren't the help desk's list, and one of them with
+# the same email would make the real match look ambiguous. The list's person objects hold no nested braces or
+# brackets, so it runs to the first "]" and splits into people at "{".
 people_with_email() {
-    tr '{' '\n' | awk -v want="$1" '
+    tr -d '\n' | awk -v want="$1" '
         function field(s, k,   re, m) {
             re = "\"" k "\"[ \t]*:[ \t]*\"([^\"\\\\]|\\\\.)*\""
             if (!match(s, re)) return ""
@@ -366,7 +369,34 @@ people_with_email() {
             sub("\"$", "", m)
             return m
         }
-        { if (tolower(field($0, "email")) == want) { i = field($0, "id"); if (i != "") printf "%s\t%s\n", i, field($0, "name") } }'
+        {
+            s = $0
+            if (!(i = index(s, "\"assignees\""))) exit
+            s = substr(s, i)
+            if (!(i = index(s, "\"peoples\""))) exit
+            s = substr(s, i)
+            if (!(i = index(s, "["))) exit
+            s = substr(s, i + 1)
+            if ((i = index(s, "]"))) s = substr(s, 1, i - 1)
+            n = split(s, people, "{")
+            for (p = 2; p <= n; p++)
+                if (tolower(field(people[p], "email")) == want) {
+                    id = field(people[p], "id")
+                    if (id != "") printf "%s\t%s\n", id, field(people[p], "name")
+                }
+        }'
+}
+
+# Prints a setting as the server's .NET configuration will see it from the environment: either separator
+# (Ticketing__BaseUrl or Ticketing:BaseUrl) in any case. Nothing when it isn't set there. An environment variable wins
+# over the secrets file, and the account lookup decides with these where the API key may go, so it must read them as
+# the server does. A shell drops names it can't hold, such as one with a colon, from what it passes to `env`, so on
+# Linux the environment this script started with is read too; macOS has no such view, and no shell there can set one.
+env_setting() {
+    es_want=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    { env; if [ -r "/proc/$$/environ" ]; then tr '\0' '\n' <"/proc/$$/environ"; fi; } |
+        awk -v a="$es_want" -v b="$(printf '%s' "$es_want" | sed 's/:/__/g')" '
+            { k = $0; sub(/=.*/, "", k); k = tolower(k); if (k == a || k == b) { v = $0; sub(/^[^=]*=/, "", v); if (v != "") { print v; exit } } }'
 }
 
 # Prints the Entra object ID and display name (JSON-escaped) and where they came from, one per line, for the email
@@ -377,15 +407,20 @@ people_with_email() {
 find_person() {
     fp_email="$1"; fp_key="$2"
     fp_want=$(printf '%s' "$fp_email" | tr '[:upper:]' '[:lower:]')
-    fp_region=$REGION
-    [ -n "$fp_region" ] || fp_region=$(secret_get 'Ticketing:Region' | tr '[:lower:]' '[:upper:]')
+    # The region and base URL the server will use: the environment first, then --region, then the secrets file.
+    fp_region=$(env_setting 'Ticketing:Region')
+    [ -n "$fp_region" ] || fp_region=$REGION
+    [ -n "$fp_region" ] || fp_region=$(secret_get 'Ticketing:Region')
+    fp_region=$(printf '%s' "$fp_region" | tr '[:lower:]' '[:upper:]')
+    fp_custom=$(env_setting 'Ticketing:BaseUrl')
+    [ -n "$fp_custom" ] || fp_custom=$(secret_get 'Ticketing:BaseUrl')
     case "$fp_region" in
         ''|US) fp_base='https://teamswork.azure-api.net/ticketing/v1' ;;
         EU) fp_base='https://ticketing-apim-eu.azure-api.net/ticketing/v1' ;;
         AUS) fp_base='https://ticketing-apim-aus.azure-api.net/ticketing/v1' ;;
         *) fp_base='' ;;
     esac
-    if [ -n "$fp_base" ] && [ -z "$(secret_get 'Ticketing:BaseUrl')" ] && [ -z "${Ticketing__BaseUrl:-}" ] &&
+    if [ -n "$fp_base" ] && [ -z "$fp_custom" ] &&
         printf '%s' "$fp_key" | grep -qE '^[A-Za-z0-9._~-]+$'; then
         if fp_json=$(printf 'url = "%s/instance?key=%s&timezone=0"\n' "$fp_base" "$fp_key" | curl -fsS --max-time 20 -K - 2>/dev/null); then
             fp_people=$(printf '%s' "$fp_json" | people_with_email "$fp_want")

@@ -6,7 +6,7 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 installer="$here/../install.sh"
-for fn in json_escape secret_get people_with_email find_person; do
+for fn in json_escape secret_get people_with_email env_setting find_person; do
     body=$(sed -n "/^$fn() {/,/^}/p" "$installer")
     [ -n "$body" ] || { echo "install.sh has no function $fn"; exit 1; }
     eval "$body"
@@ -20,10 +20,11 @@ SECRETS_PATH="$tmp/secrets.json"; : >"$SECRETS_PATH"
 REGION=""
 unset Ticketing__BaseUrl 2>/dev/null || true
 
-# A made-up instance in the live shape: the same person as an assignee and as the SLA escalation contact (one match,
-# by ID), a namesake pair sharing an email (no match), and an escaped quote in a name.
+# A made-up instance in the live shape: a namesake pair sharing an email (no match), and an escaped quote in a name.
+# Outside the assignee list, which alone counts: an SLA escalation contact with Pat's email but another ID (which
+# mustn't make Pat look ambiguous), and a people-picker default for someone not on the list.
 cat >"$tmp/instance.json" <<'EOF'
-{"item":{"id":"i","assignees":{"type":"teamsOwner","peoples":[{"id":"11111111-1111-1111-1111-111111111111","name":"Pat \"PJ\" Lee","email":"Pat.Lee@contoso.com"},{"id":"22222222-2222-2222-2222-222222222222","name":"Sam Roe","email":"sam@contoso.com"},{"id":"33333333-3333-3333-3333-333333333333","name":"Sam Roe","email":"SAM@contoso.com"}]},"sla":{"frt":{"escalation":{"enabled":false,"escalationAssignee":{"id":"11111111-1111-1111-1111-111111111111","name":"Pat \"PJ\" Lee","email":"pat.lee@contoso.com"}}}}}}
+{"item":{"id":"i","customFieldsLeft":[{"id":"f","title":"Followers","defaultValue":[{"id":"44444444-4444-4444-4444-444444444444","name":"Lee Outside","email":"lee@contoso.com"}]}],"assignees":{"type":"teamsOwner","peoples":[{"id":"11111111-1111-1111-1111-111111111111","name":"Pat \"PJ\" Lee","email":"Pat.Lee@contoso.com"},{"id":"22222222-2222-2222-2222-222222222222","name":"Sam Roe","email":"sam@contoso.com"},{"id":"33333333-3333-3333-3333-333333333333","name":"Sam Roe","email":"SAM@contoso.com"}]},"sla":{"frt":{"escalation":{"enabled":false,"escalationAssignee":{"id":"99999999-9999-9999-9999-999999999999","name":"Pat Lee (old)","email":"pat.lee@contoso.com"}}}}}}
 EOF
 
 # Stubs, defined after the functions they replace would be looked up at call time.
@@ -36,6 +37,8 @@ check 'its name comes back JSON-escaped' "$(printf '%s\n' "$out" | sed -n 2p)" '
 check 'and where it came from' "$(printf '%s\n' "$out" | sed -n 3p)" "the help desk's assignee list"
 check 'the key goes on stdin to the US endpoint' "$(cat "$tmp/curl-config")" 'url = "https://teamswork.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
 
+check 'a contact outside the assignee list with the same email is ignored' "$(find_person 'pat.lee@contoso.com' 'abc123' | sed -n 1p)" '11111111-1111-1111-1111-111111111111'
+check 'someone only outside the assignee list is no match' "$(find_person 'lee@contoso.com' 'abc123')" ''
 check 'two people with one email is no match' "$(find_person 'sam@contoso.com' 'abc123')" ''
 check 'nobody with the email is no match' "$(find_person 'nobody@contoso.com' 'abc123')" ''
 
@@ -48,6 +51,25 @@ REGION=""
 Ticketing__BaseUrl='https://elsewhere.example/v1'; export Ticketing__BaseUrl; rm -f "$tmp/curl-config"
 check 'a custom base URL gets no request, so the key stays put' "$(find_person 'pat.lee@contoso.com' 'abc123')$([ -f "$tmp/curl-config" ] && echo requested)" ''
 unset Ticketing__BaseUrl
+# .NET reads environment variables in any case and with either separator, so the lookup must too. A name with a colon
+# can't be set from sh, so env_setting is run in a child given it.
+TICKETING__BASEURL='https://elsewhere.example/v1'; export TICKETING__BASEURL; rm -f "$tmp/curl-config"
+check 'so does one in upper case' "$(find_person 'pat.lee@contoso.com' 'abc123')$([ -f "$tmp/curl-config" ] && echo requested)" ''
+unset TICKETING__BASEURL
+env_setting_fn=$(sed -n '/^env_setting() {/,/^}/p' "$installer")
+if [ -r "/proc/$$/environ" ]; then
+    check 'a colon-separated name is read too' "$(env 'Ticketing:BaseUrl=https://elsewhere.example/v1' sh -c "$env_setting_fn
+env_setting Ticketing:BaseUrl")" 'https://elsewhere.example/v1'
+else
+    echo 'skip a colon-separated name (no /proc here, and no shell can set one)'
+fi
+check 'and a lower-case one' "$(env 'ticketing__baseurl=https://elsewhere.example/v1' sh -c "$env_setting_fn
+env_setting Ticketing:BaseUrl")" 'https://elsewhere.example/v1'
+check 'an empty variable counts as unset' "$(env 'Ticketing__BaseUrl=' sh -c "$env_setting_fn
+env_setting Ticketing:BaseUrl")" ''
+Ticketing__Region=EU; export Ticketing__Region; find_person 'pat.lee@contoso.com' 'abc123' >/dev/null
+check 'a region set in the environment picks the endpoint, as it does for the server' "$(cat "$tmp/curl-config")" 'url = "https://ticketing-apim-eu.azure-api.net/ticketing/v1/instance?key=abc123&timezone=0"'
+unset Ticketing__Region
 printf '{\n  "Ticketing:BaseUrl": "https://elsewhere.example/v1"\n}\n' >"$SECRETS_PATH"; rm -f "$tmp/curl-config"
 check 'so does one in the secrets file' "$(find_person 'pat.lee@contoso.com' 'abc123')$([ -f "$tmp/curl-config" ] && echo requested)" ''
 : >"$SECRETS_PATH"
