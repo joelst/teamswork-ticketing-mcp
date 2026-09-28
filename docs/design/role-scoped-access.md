@@ -3,6 +3,62 @@
 Status: proposed. Scope: the hosted HTTP server in Entra mode, one Ticketing instance. stdio and `--local` keep
 today's behaviour (one service account, full access).
 
+## Status and next steps
+
+Updated 2026-09-28.
+
+**Done**
+- Milestone 0 (spikes): see [Milestone 0 findings](#milestone-0-findings).
+- Prerequisite fixes the spikes found. Date filters had never filtered: they now take whole days and send the offset the
+  API expects (`TicketDateFilters`). Scans read newest created first and say where to continue. The stdio smoke checks
+  wait for the reply instead of a fixed time.
+
+**Small follow-ups, independent of the milestones**
+
+| # | Item | How | Why |
+| --- | --- | --- | --- |
+| 1 | Reinstall the local MCP server | Run the installer again | The installed copy predates these fixes; its `update_ticket` reported an error for an update that was applied |
+| 2 | Decide on test ticket #2034's due date (2026-10-15) | Keep it as a live regression fixture, or clear it | It's the only ticket with an expected date, so the expected-date live checks depend on it |
+| 3 | Confirm that assignment moves `lastUpdatedOn` | On #2034: assign, then compare `lastUpdatedOn` with the new activity | The index's incremental sync assumes it; only comments and status changes were observed |
+| 4 | Find out what `cc` on a comment means | Ask the vendor, or cc someone on a test comment in the app and see whether they can open the ticket | Until known, `cc` grants no visibility |
+| 5 | Report the API's deviations to the vendor | One issue listing each with the evidence above | Date filters ignore a time of day; list filters apply `timezone` opposite to the spec; lists key custom fields by title; the default order isn't by date; due dates are stored at the setter's midnight. A vendor fix would change the rules in `TicketDateFilters`, so its tests pin today's behaviour |
+| 6 | Delete the merged `feat/more-tools` and `fix/date-filters` branches | After this lands on `main` | Both are merged; their work is on `main` |
+
+**Milestone 1, concretely** (roles and the tool layer; ships behind `Access:Mode = Open`, so nothing changes until it's
+switched on)
+
+1. **Settings**
+   - `Configuration/AccessOptions.cs`: `Access:Mode` (`Open` or `RoleScoped`, validated like `Auth:Mode`; startup
+     refuses `RoleScoped` with stdio or `--local`).
+   - `Ticketing:ApiKeyIsReadOnly` on `TicketingOptions`.
+   - README configuration rows, and `accessMode` / `apiKeyIsReadOnly` parameters in `app.bicep` and `app.bicepparam`.
+2. **The caller's role**
+   - `Auth/AccessContext.cs` (scoped): resolved once per request from the acting user.
+     - Delegated token: staff when the `oid` is on the cached instance's assignee list (compared as object IDs, or by
+       `upn` for entries whose ID is an email); anyone else is a requester.
+     - App-only token: `Ticketing.ReadWrite` is a read-write agent, the new `Ticketing.Read` a read-only one.
+     - An unreadable instance makes a delegated caller a requester, never staff.
+   - `Open` mode resolves everyone to today's full access.
+3. **Policies on the tools**
+   - Authorization requirements `Staff`, `Writer`, `AnyCaller`, with async handlers that read `AccessContext`.
+   - `[Authorize(Policy = ...)]` on every tool method, per the table in [Tools per role](#tools-per-role).
+   - A read-only key denies `Writer` to everyone.
+4. **App registration**: `infra/scripts/New-EntraAppRegistrations.ps1` adds the `Ticketing.Read` app role beside
+   `Ticketing.ReadWrite`, and `docs/setup-entra.md` says when to use each.
+5. **Tests**
+   - One table-driven integration test over `McpServerFactory`: for each role's token, `tools/list` returns exactly
+     that role's tools, and calling any other tool is refused.
+   - `Open` mode lists every tool for every caller, as today.
+   - Role resolution unit tests: an `oid` on or off the list, an email-ID entry matched by `upn`, an unreadable
+     instance, each app role, and the read-only key.
+6. **Exit criteria**
+   - The full suite is green with `Open` as the default.
+   - Deployed with `RoleScoped` to a test instance, a requester's client lists only requester tools, and a staff
+     member's lists all of them.
+
+Milestone 2 (single-ticket checks) follows the same pattern for the row layer. Milestones 3 to 5 are as described
+below; the index's incremental sync uses `TicketDateFilters` with `timezone` 0, so its days are UTC days.
+
 ## Why
 
 The Ticketing API authenticates with one instance API key, which can read and change every ticket. The API knows
@@ -206,21 +262,23 @@ Checked on 2026-09-27 against the live instance (2,034 tickets) with read-only r
 | How are custom fields keyed in lists? | By field **title** (`"Followers": []`), not by the ID the spec describes | The index finds `isSeeTicket` fields by title, and by ID where present |
 | What identifies a person? | An Entra object ID, or the **email address** on tickets that arrived by email (requestor and creator). An empty assignee is `{"id":""}`. | Matching by `oid` or by `upn` for email IDs (see Tools per role) |
 | Does `lastUpdatedOn` move? | Yes for public and private comments (within 1.5 s) and status changes (written about 0.8 s before the activity). Assignment wasn't observed directly. | Incremental sync on `lastUpdatedOn` holds; the 2-minute overlap covers the skew |
-| Do date filters work? | **Only as a plain date.** `YYYY-MM-DD` filters; any time of day (the spec's own `YYYY-MM-DDTHH:mm:ss`, with or without `Z`) is silently ignored and every ticket comes back. "After" includes the named day; "before" excludes it. | Incremental sync asks by date and trims by timestamp. Also a bug in today's tools (below). |
-| Which way does `timezone` shift date filters? | Opposite to the spec ("7 means GMT+7"): day D starts at `D 00:00Z + timezone hours` (checked at -12, 0, and +14). | The index sends `timezone=0`. Today's tools shift day boundaries by twice the offset (below). |
+| Do date filters work? | **Only as a plain date.** `YYYY-MM-DD` filters; any time of day (the spec's own `YYYY-MM-DDTHH:mm:ss`, with or without `Z`) is silently ignored and every ticket comes back. "After" includes the named day; "before" stops at its start, cutting at or before the boundary, so a time of exactly midnight is in both. | Incremental sync asks by date and trims by timestamp. Fixed in today's tools (below). |
+| Is the default list order by date? | No: 200 rows came back in neither created order. `orderBy=createdDateTime&order=DESC` sorts them. | Scans ask for that order, so offset pages don't shift and a scan that stops early can say where to continue; the index's full build will too |
+| Which way does `timezone` shift date filters? | Opposite to the spec ("7 means GMT+7"): day D starts at `D 00:00Z + timezone hours` (checked at -12 to +14, "after" at or after, "before" at or before). Other endpoints follow the spec: instance SLA hours are shown at UTC + offset, and writes store an expected date at midnight in the offset sent. | The index sends `timezone=0`. `TicketDateFilters` holds the list rules. |
+| How are expected dates stored? | As midnight in the offset of whoever set them (00:00Z when set at 0, 05:00Z at -5), so the setter's zone matters when filtering | Filters match them as calendar days in the instance's zone, boundary at noon of the day before |
 | Are private activities flagged? | Yes, `isPrivate: true`, and a comment can be sent with it | Requesters get activities without them |
 | What do attachments return? | Signed blob URLs, valid for about an hour | Attachment tools need the ticket check; a private activity's attachments are dropped with it |
 | Anything else on activities? | `action` (`created`, `started`, `assigned`, `commented`, `closed`, ...) and a `cc` list | `cc` doesn't grant visibility until its meaning is known |
 | `assignees.type` values | Only `teamsOwner` on this instance | Staff is "on the assignee list" whatever the type |
 | Per-tool authorization in the SDK | `[Authorize]` on tools is supported, and the SDK filters list results by it (`FilterAuthorizedItemsAsync`), with policies from ASP.NET Core's policy provider | Tool layer as planned; M1 proves list and call with tests |
 
-**Bugs in today's tools found by these checks** (to fix before M1):
-- `list_tickets` (and the tools built on it) accept `YYYY-MM-DDTHH:mm:ss` for the six date filters and pass it on,
-  so the API ignores the filter and returns everything, unmarked. They should accept dates only.
-- The date filters are sent with the caller's offset, which the API applies in the opposite direction, so for US
-  Central a day starts 10 hours early. Sending the negated offset on requests that carry date filters would give the
-  caller's local day, if the offset affects nothing else in those requests (timestamps in responses were UTC either
-  way).
+**Bugs in today's tools found by these checks**, now fixed (`TicketDateFilters`):
+- Every date filter was sent with a time of day (a plain date was expanded to `T00:00:00`), so the API ignored it and
+  returned every ticket, unmarked. Date filters now take plain dates only, and a time of day is refused.
+- The filters were sent with the caller's offset, which the API applies in the opposite direction, so for US Central
+  a day started 10 hours early. Created and updated filters now send the offset negated (taken on the filtered day,
+  for daylight saving); expected dates are matched as calendar days in the instance's zone. Checked live: 60 of 60
+  expected-date cases, and 18 of 20 when mixed with created filters for a due date set at UTC (documented).
 
 ## Risks and open questions
 

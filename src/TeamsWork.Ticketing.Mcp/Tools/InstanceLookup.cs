@@ -489,10 +489,10 @@ internal sealed partial class InstanceLookup
 
             case "date":
                 // The API fails silently on datetimes in date fields, as it does for expectedDate.
-                return value.ValueKind == JsonValueKind.String &&
-                       DateOnly.TryParseExact(value.GetString()!.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly date)
+                string dateMessage = $"{label} takes a date in YYYY-MM-DD form (no time), for example 2026-04-01.";
+                return value.ValueKind == JsonValueKind.String && ToolValidation.OptionalDate(value.GetString(), dateMessage) is DateOnly date
                     ? JsonSerializer.SerializeToElement(date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
-                    : throw new McpException($"{label} takes a date in YYYY-MM-DD form (no time), for example 2026-04-01.");
+                    : throw new McpException(dateMessage);
 
             case "toggle":
                 return value.ValueKind is JsonValueKind.True or JsonValueKind.False

@@ -166,7 +166,12 @@ jobs:
           cd "stage/$STAGE"
           if [ -n "${{ matrix.exe }}" ]; then CMD="./${{ matrix.exe }}"; else CMD="dotnet TeamsWork.Ticketing.Mcp.dll"; fi
           INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
-          RESPONSE=$( (printf '%s\n' "$INIT"; sleep 8) | $CMD --stdio 2>/dev/null | head -n1 )
+          # stdin stays open until the reply arrives (up to 60 s), then closes so the server exits: a fixed wait races a
+          # slow start. The reply goes to a file, read once the server has exited.
+          REPLY="$RUNNER_TEMP/reply-smoke"; : > "$REPLY"
+          ( printf '%s\n' "$INIT"; i=0; while [ ! -s "$REPLY" ] && [ "$i" -lt 120 ]; do sleep 0.5; i=$((i + 1)); done ) \
+            | $CMD --stdio 2>/dev/null > "$REPLY"
+          RESPONSE=$(head -n1 "$REPLY")
           echo "$RESPONSE"
           echo "$RESPONSE" | grep -q "\"version\":\"$VERSION\""
 
