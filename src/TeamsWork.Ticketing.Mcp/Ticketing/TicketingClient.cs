@@ -58,6 +58,9 @@ public sealed class TicketingClient
         _caller = caller;
     }
 
+    /// <summary>The offsets this client sends, for tools that describe days in the caller's local time.</summary>
+    internal TimeZoneOffsetResolver TimeZones => _timeZones;
+
     // ---- Tickets ----------------------------------------------------------------------------------------------
 
     public Task<ListResponse<Ticket>> ListTicketsAsync(TicketListQuery q, CancellationToken cancellationToken)

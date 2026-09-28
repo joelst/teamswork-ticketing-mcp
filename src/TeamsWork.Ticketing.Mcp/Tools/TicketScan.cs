@@ -1,3 +1,4 @@
+using System.Globalization;
 using TeamsWork.Ticketing.Mcp.Ticketing;
 using TeamsWork.Ticketing.Mcp.Ticketing.Models;
 
@@ -13,7 +14,11 @@ internal static class TicketScan
     /// <summary>The API's largest page.</summary>
     public const int MaxApiPageSize = 1000;
 
-    public sealed record Result<T>(List<T> Matches, int Scanned, int? Total, bool Truncated);
+    /// <summary>
+    /// What a scan found. <paramref name="Oldest"/> and <paramref name="Newest"/> are the creation times of the oldest
+    /// and newest tickets checked, for telling the agent where to continue when the scan stopped early.
+    /// </summary>
+    public sealed record Result<T>(List<T> Matches, int Scanned, int? Total, bool Truncated, DateTimeOffset? Oldest = null, DateTimeOffset? Newest = null);
 
     /// <summary>
     /// Reads tickets and keeps what <paramref name="pick"/> returns for each (null skips the ticket). Only the picked
@@ -28,6 +33,20 @@ internal static class TicketScan
         CancellationToken cancellationToken)
         where T : class
     {
+        // Newest created first, which the API does only when asked: its default order isn't by date. The hint for a
+        // scan that stops early depends on it, and a fixed order also keeps offset pages from shifting under the scan.
+        if (query.OrderBy is null)
+        {
+            query = query with { OrderBy = "createdDateTime", Order = "DESC" };
+        }
+
+        // Each ticket's creation time is kept for that hint, so a narrowed 'select' asks for it too.
+        if (query.Select is string select && !select.Split(',').Any(f => string.Equals(f.Trim(), "createdOn", StringComparison.Ordinal)))
+        {
+            query = query with { Select = select + ",createdOn" };
+        }
+
+        DateTimeOffset? oldest = null, newest = null;
         var matches = new List<T>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int scanned = 0;
@@ -69,6 +88,12 @@ internal static class TicketScan
                 else
                 {
                     scanned++;
+                    if (DateTimeOffset.TryParse(t.CreatedOn, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset created))
+                    {
+                        oldest = oldest is DateTimeOffset o && o <= created ? o : created;
+                        newest = newest is DateTimeOffset n && n >= created ? n : created;
+                    }
+
                     if (pick(t) is T picked)
                     {
                         matches.Add(picked);
@@ -113,15 +138,53 @@ internal static class TicketScan
 
         // Incomplete if more was expected, or if fewer tickets were proven seen than the API said there are.
         int seenInAll = repeated ? scanned : scanned + withoutId;
-        return new Result<T>(matches, scanned, total, Truncated: more || (total is int expected && seenInAll < expected));
+        return new Result<T>(matches, scanned, total, Truncated: more || (total is int expected && seenInAll < expected), oldest, newest);
     }
 
-    /// <summary>The hint shown when a scan stopped before reading every ticket.</summary>
-    public static string? TruncationHint<T>(Result<T> result) =>
-        result.Truncated
-            ? $"Only {result.Scanned} of {(result.Total is int t ? t.ToString(System.Globalization.CultureInfo.InvariantCulture) : "the")} tickets were checked: the " +
-              "scan stops at Ticketing:MaxScanTickets, or when the API stops returning new tickets. It reads newest first, so " +
-              "the rest are older: call again with createdBefore set to the day after the oldest day already seen (so none of " +
-              "that day is skipped), or narrow it with the priority filter."
-            : null;
-}
+    /// <summary>
+    /// The hint shown when a scan stopped before reading every ticket, saying exactly how to reach the rest. The scan
+    /// reads newest created first, so the rest were created no later than the oldest ticket checked: calling again with
+    /// createdBefore set to the day after that one's (in the caller's local days, which the filter uses) continues from
+    /// there, reading that day again so none of it is skipped. That makes progress only while the tickets checked span
+    /// more than one day and the suggestion is earlier than any createdBefore already given; otherwise it says so.
+    /// </summary>
+    public static string? TruncationHint<T>(Result<T> result, TicketListQuery query, TimeZoneOffsetResolver zones)
+    {
+        if (!result.Truncated)
+        {
+            return null;
+        }
+
+        string checkedText =
+            $"Only {result.Scanned} of {(result.Total is int t ? t.ToString(CultureInfo.InvariantCulture) : "the")} tickets were checked: the " +
+            "scan stops at Ticketing:MaxScanTickets, or when the API stops returning new tickets.";
+        if (result.Oldest is not DateTimeOffset oldest || result.Newest is not DateTimeOffset newest)
+        {
+            return checkedText + " Narrow it with the priority or date filters to see the rest.";
+        }
+
+        DateOnly oldestDay = LocalDay(oldest, query.TimezoneOffset, zones);
+        DateOnly newestDay = LocalDay(newest, query.TimezoneOffset, zones);
+        if (oldestDay < newestDay && oldestDay < DateOnly.MaxValue)
+        {
+            DateOnly next = oldestDay.AddDays(1);
+            if (query.CreatedBefore is not DateOnly given || next < given)
+            {
+                return checkedText +
+                    $" They were read newest first; the oldest checked was created on {Day(oldestDay)} (your local day). To continue, " +
+                    $"call again with createdBefore '{Day(next)}' and the same other filters: that day is read again, so none of it is skipped.";
+            }
+        }
+
+        return checkedText +
+            $" Every ticket checked was created on {Day(oldestDay)} (your local day), so a date filter can't reach the rest: " +
+            "narrow it with the priority filter or a search instead.";
+    }
+
+    private static DateOnly LocalDay(DateTimeOffset time, int? timezoneOffset, TimeZoneOffsetResolver zones)
+    {
+        int offset = zones.ResolveOn(timezoneOffset, DateOnly.FromDateTime(time.UtcDateTime));
+        return DateOnly.FromDateTime(time.ToOffset(TimeSpan.FromHours(offset)).DateTime);
+    }
+
+    private static string Day(DateOnly day) => day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);}
