@@ -1,23 +1,28 @@
 # Entra ID setup
 
-The remote MCP endpoint validates Microsoft Entra ID access tokens. Two app registrations are involved:
+The remote MCP endpoint validates Microsoft Entra ID access tokens. These app registrations are involved:
 
 | App | Purpose | Created by |
 | --- | --- | --- |
 | **taas-mcp-server** | Represents the MCP server (the *resource*). Tokens must be issued for `api://<clientId>`. Exposes the delegated scope `access_as_user` and the application role `Ticketing.ReadWrite`. | `infra/scripts/New-EntraAppRegistrations.ps1` |
-| **taas-mcp-copilot-connector** | The *client* Copilot Studio uses (custom connector with OAuth 2.0 / on-behalf-of). Also reusable as the "custom OAuth" client for Foundry identity passthrough. | same script |
+| **taas-mcp-copilot-connector** | The *client* Copilot Studio uses (custom connector with OAuth 2.0 / on-behalf-of). Also reusable as the "custom OAuth" client for Foundry identity passthrough. Only needed for Copilot Studio or Foundry. | same script, unless `-SkipConnectorApp` |
+| **taas-mcp-cowork-client** | The *client* Microsoft 365 Copilot Cowork signs users in through. Only needed for Cowork. | `infra/scripts/Complete-CoworkSetup.ps1` (see [cowork.md](cowork.md)) |
 
 ## 1. Run the script
 
-Requires Azure CLI 2.60+ and an account with the Application Administrator (or Global Administrator) role.
+Requires Azure CLI 2.60+ and an account with the Application Administrator (or Global Administrator) role. Without
+it, creating the first app fails with *Directory permission is needed for the current user to register the
+application* (*Insufficient privileges to complete the operation*).
 
 ```powershell
 az login --tenant <tenantId>
 ./infra/scripts/New-EntraAppRegistrations.ps1 -TenantId <tenantId>
 ```
 
-The script is idempotent and prints a summary (no secrets). Keep the **Server app (client) ID**: it is the
-`entraClientId` pipeline variable and the `Entra:ClientId` setting.
+Add `-SkipConnectorApp` if you don't use Copilot Studio or Foundry. The script is idempotent: run it again after
+a failure and it carries on from the apps that already exist. It prints a summary (no secrets). Keep the **Server app
+(client) ID**: it is the `entraClientId` pipeline variable and the `Entra:ClientId` setting;
+`Deploy-TestInstance.ps1` finds it by the app's name.
 
 What it configures on the server app:
 

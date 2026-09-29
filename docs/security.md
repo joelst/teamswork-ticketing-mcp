@@ -44,8 +44,20 @@
   identified without architecture-specific system calls.
 
 - **Public ingress**: the endpoint is reachable from the internet but only Entra-authenticated, assigned callers can
-  use it. For a stricter posture, add Container Apps IP restrictions (Foundry/Power Platform egress ranges) or move
-  the app to an internal environment on a VNet and use Foundry's private MCP support.
+  use it. Any client app a user or admin consents to for `access_as_user` can get such a token; the server doesn't
+  restrict which client apps it accepts. Network restrictions are harder than they look:
+  - Cowork and Copilot Studio call from Microsoft's cloud, not your users' networks. Cowork runs on Power Platform
+    infrastructure, whose addresses the `PowerPlatformInfra` service tag lists; Microsoft doesn't separately
+    document the addresses Cowork's connector calls come from, so test before relying on it.
+  - Container Apps IP restrictions take address ranges only, not service tags. `PowerPlatformInfra` holds about 1,500
+    IPv4 ranges (around 420 in the US regions alone), and they change weekly, so a copied list needs a scheduled
+    refresh and breaks quietly without one.
+  - Where a network control is required, put the app in a Container Apps environment on a VNet, behind a network
+    security group, which can use the service tag and stays current. Or use Foundry's private MCP support.
+- **Cowork OAuth client secret**: `taas-mcp-cowork-client` (see [cowork.md](cowork.md)) has a client secret, held
+  only in the Teams developer portal's OAuth registration, which puts it in Microsoft's token store. It's never in
+  Azure or this repository. When it expires, Cowork sign-ins stop. `Complete-CoworkSetup.ps1` warns 30 days ahead,
+  and `-CreateSecret` makes a new one on the clipboard for pasting into the registration.
 - **Forwarded headers**: the app honours `X-Forwarded-For` and `X-Forwarded-Proto` from the Container Apps ingress
   (the only network path to the container), but not `X-Forwarded-Host`, which any client could set to choose the
   resource URL in the protected-resource metadata. Setting `Entra:PublicBaseUrl` pins that URL entirely. If you ever

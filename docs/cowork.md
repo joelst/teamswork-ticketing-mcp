@@ -23,22 +23,31 @@ The skills:
 
 ## Before you start
 
-- A deployed endpoint (see [Deploy](../README.md#deploy)), such as `https://<app>.<region>.azurecontainerapps.io/mcp`.
-  For a test instance deployed with your own sign-in, run `./infra/scripts/Deploy-TestInstance.ps1 -Location <region>`.
-- The server app registration from [setup-entra.md](setup-entra.md), and its client ID.
-- Users or a group assigned to the server's enterprise app. It requires assignment, so an unassigned user's sign-in
-  is refused.
-- The Microsoft 365 Agents Toolkit CLI 1.1.12 or later, for installing it for yourself:
-  `npm install -g @microsoft/m365agentstoolkit-cli`.
+In this order:
+
+1. **The server's app registration**, from `./infra/scripts/New-EntraAppRegistrations.ps1 -TenantId <tenantId>
+   -SkipConnectorApp`. Leave out `-SkipConnectorApp` if you also use Copilot Studio. See
+   [setup-entra.md](setup-entra.md). Your account needs the Application Administrator role; without it the script
+   stops with *Insufficient privileges to complete the operation*.
+2. **A deployed endpoint**, such as `https://<app>.<region>.azurecontainerapps.io/mcp`. See
+   [Deploy](../README.md#deploy). For a test instance deployed with your own sign-in, run
+   `./infra/scripts/Deploy-TestInstance.ps1 -Location <region>`. It finds the app registration from step 1 by name, so
+   run that first.
+3. **The people who may use it**, assigned to the server's enterprise app, which requires assignment: an unassigned
+   user's sign-in is refused. `Complete-CoworkSetup.ps1 -AssignUser <UPN>` or `-AssignGroup <group>` does this.
+   Assigning a group needs Entra ID P1 or P2.
+4. **Node.js**, for the Microsoft 365 Agents Toolkit CLI (`atk`), which validates and installs the package. The setup
+   helper runs it through `npx` if it isn't installed; to install it yourself:
+   `npm install -g @microsoft/m365agentstoolkit-cli` (1.1.12 or later).
 
 ## The quick route
 
 `infra/scripts/Complete-CoworkSetup.ps1` does steps 1, 3 and 4 below, as well as assigning users. It prints step 2's
-values ready to paste. Run it in two passes, signed in with `az login` as an Application Administrator:
+values ready to paste; step 2 is the one part done by hand, since the developer portal has no documented API for it. Run it in two passes, signed in with `az login` as an Application Administrator:
 
 ```powershell
 # Pass 1: the Entra client, consent, users, and a secret copied to the clipboard (never printed)
-./infra/scripts/Complete-CoworkSetup.ps1 -ResourceGroup rg-taasmcp-test -AssignGroup 'Help desk agents' -CreateSecret -OpenPortal
+./infra/scripts/Complete-CoworkSetup.ps1 -ResourceGroup rg-taasmcp-test -AssignUser <your UPN> -CreateSecret -OpenPortal
 
 # Create the developer portal registration from the printed values, then pass 2: build, validate and install
 ./infra/scripts/Complete-CoworkSetup.ps1 -ResourceGroup rg-taasmcp-test -OAuthReferenceId '<OAuth client registration ID>' `
@@ -46,9 +55,14 @@ values ready to paste. Run it in two passes, signed in with `az login` as an App
     -PrivacyUrl 'https://<your site>/privacy' -TermsUrl 'https://<your site>/terms' -Install
 ```
 
+Pass 1 checks that the endpoint refuses a request without a token (401), and fills the endpoint in as the developer
+portal's Base URL. Without a deployment it still does the Entra steps and warns that the endpoint is unknown; run it
+again with `-ResourceGroup` once the app is deployed, before filling in the portal. The secret stays on the clipboard
+only until you copy something else, so add `-CreateSecret` on the run just before you fill in the portal.
+
 It's safe to run again: it finds what exists and updates it. `-WhatIf` shows the Entra changes without making them.
-Without `-CreateSecret`, create the secret yourself as in step 1. The steps below describe what it does, for doing
-them by hand.
+Without `-CreateSecret`, create the secret yourself as in step 1. Then do step 5 (connect and turn it on). The steps
+below describe what the script does, for doing them by hand.
 
 ## 1. Register an OAuth client in Entra
 
@@ -132,23 +146,46 @@ atk auth login
 atk install --file-path ./artifacts/cowork/teamswork-ticketing-cowork.zip --scope Personal
 ```
 
-Keep the `TitleId` and `AppId` it prints, for updating or removing it later. Then open **Cowork** → **Sources &
-Skills** → **Plugins** → **TeamsWork Ticketing**, connect the connector (this is where you sign in), and **turn it
-on**. It stays off after installing and connecting, and while it's off Cowork has none of its tools: the skills load,
-but answer that the ticketing connection isn't available. Then start a new conversation and try:
+Keep the `TitleId` and `AppId` it prints, for updating or removing it later.
 
+## 5. Connect it and turn it on
+
+Open **Cowork** → **Sources & Skills** → **Plugins** → **TeamsWork Ticketing**. Connect its connector, which is
+where you sign in with your work account, and then **turn it on**. It stays off after installing and connecting,
+and while it's off Cowork has none of its tools: the skills load, but answer that the ticketing connection isn't
+available. Plugins load when a conversation starts, so start a new one and try:
+
+- "Who am I in the ticketing system?"
 - "What's on my plate?"
 - "Triage today's new tickets"
 - "Add a private note to ticket 1234 saying the vendor has been called"
 
-The first tool call asks you to sign in. Changes are recorded as you: `whoami` shows the account. The server accepts
-any client with a token for its `access_as_user` scope, so the new client needs no server setting.
+Changes are recorded as you: `whoami` shows the account. The server accepts any client with a token for its
+`access_as_user` scope, so the new client needs no server setting.
 
-## 5. Publish to the organization
+## 6. Publish to the organization
 
 Go to Microsoft 365 admin center → **Manage apps** → **Upload custom app** → **...** → **Add agent**, and upload the
 same `.zip`. For an update, raise `version` in `plugin/cowork/manifest.json`, rebuild, and upload again. Keep `id`
 unchanged: it identifies the plugin across versions.
+
+## Troubleshooting
+
+| What you see | Likely cause |
+| --- | --- |
+| The skill answers that the ticketing connection isn't available | The connector is installed but off, or not connected: see step 5, then start a new conversation. |
+| Sign-in fails with *Need admin approval* | Admin consent for `taas-mcp-cowork-client` is missing. Run `Complete-CoworkSetup.ps1` again, or grant it in Entra admin center → App registrations → `taas-mcp-cowork-client` → API permissions. |
+| Sign-in is refused for one person | They aren't assigned to the server's enterprise app: `Complete-CoworkSetup.ps1 -AssignUser <UPN>`. |
+| Every tool call returns 404 | The developer portal registration is restricted to one app ID; set **Restrict usage by app** to **Any Teams app**. |
+| Tools are missing, or sign-in never completes | The portal registration's Base URL doesn't match the endpoint exactly (including `/mcp`), or the client secret has expired. |
+| Sign-ins stop working after months | The client secret expired. `Complete-CoworkSetup.ps1` warns 30 days ahead; run it with `-CreateSecret` and paste the new secret into the portal registration. |
+
+To see whether Cowork reaches the server at all, look at the container app's request count by status code in the
+Azure portal (the container app → **Metrics** → **Requests**, split by status code category). A 2xx at the moment
+of a Cowork question means Cowork called the server with a valid token; a 4xx means it was refused; nothing means it
+never called. The server doesn't log requests by default. For a short test you can set
+`Logging__LogLevel__Microsoft.AspNetCore.Hosting.Diagnostics=Information` on a test app to log each request, and
+remove it afterwards: the platform's health check every 10 seconds is logged too.
 
 ## Using the skills in Claude Code
 
@@ -167,6 +204,8 @@ already registers the server.
 - **Confirmation prompts:** every tool declares MCP safety annotations. Cowork's confirmation prompts for
   non-Microsoft servers are still rolling out, which is why the skills themselves ask before each change.
 - **Mobile:** custom plugins don't run in Cowork on mobile.
+- **Network:** Cowork calls the endpoint from Microsoft's cloud, not from your users' networks, so office IP
+  addresses don't help restrict it. See [security.md](security.md#residual-risks-and-options) for what does.
 
 References: [Build plugins for Copilot Cowork](https://learn.microsoft.com/en-us/microsoft-365/copilot/cowork/cowork-plugin-development),
 [Register MCP servers as agent connectors](https://learn.microsoft.com/en-us/microsoftteams/platform/m365-apps/agent-connectors),
