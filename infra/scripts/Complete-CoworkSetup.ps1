@@ -310,7 +310,9 @@ if ($Install) {
     if ($PSCmdlet.ShouldProcess($zip, 'Install for you (atk install --scope Personal)')) {
         & $atk[0] @($atk | Select-Object -Skip 1) install --file-path $zip --scope Personal --interactive false
         if ($LASTEXITCODE -ne 0) { throw "atk install failed. If you aren't signed in, run: $($atk -join ' ') auth login" }
-        Write-Host 'Installed. Keep the TitleId and AppId above for updating or removing it. Then open Cowork > Sources & Skills > Plugins.'
+        Write-Host 'Installed. Keep the TitleId and AppId above for updating or removing it.'
+        Write-Host 'Then open Cowork > Sources & Skills > Plugins > TeamsWork Ticketing, connect it (you sign in there), and'
+        Write-Host 'turn it on: it stays off after installing, and until then Cowork has none of its tools. Start a new conversation.'
     }
 }
 else {

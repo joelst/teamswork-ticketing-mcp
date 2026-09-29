@@ -133,7 +133,9 @@ atk install --file-path ./artifacts/cowork/teamswork-ticketing-cowork.zip --scop
 ```
 
 Keep the `TitleId` and `AppId` it prints, for updating or removing it later. Then open **Cowork** → **Sources &
-Skills** → **Plugins**, and try:
+Skills** → **Plugins** → **TeamsWork Ticketing**, connect the connector (this is where you sign in), and **turn it
+on**. It stays off after installing and connecting, and while it's off Cowork has none of its tools: the skills load,
+but answer that the ticketing connection isn't available. Then start a new conversation and try:
 
 - "What's on my plate?"
 - "Triage today's new tickets"
