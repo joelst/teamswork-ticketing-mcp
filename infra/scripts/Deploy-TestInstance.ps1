@@ -97,7 +97,7 @@ if (-not (Get-Command dotnet -ErrorAction SilentlyContinue) -and -not $SkipImage
 
 # ------------------------------------------------------------------------------------------------------------------
 Step 'Resource providers'
-foreach ($provider in 'Microsoft.App', 'Microsoft.ContainerRegistry', 'Microsoft.KeyVault', 'Microsoft.OperationalInsights', 'Microsoft.ManagedIdentity') {
+foreach ($provider in 'Microsoft.App', 'Microsoft.ContainerRegistry', 'Microsoft.Insights', 'Microsoft.KeyVault', 'Microsoft.OperationalInsights', 'Microsoft.ManagedIdentity') {
     $state = Invoke-Az @('provider', 'show', '-n', $provider, '--query', 'registrationState', '-o', 'tsv')
     if ($state -eq 'Registered') { continue }
     if ($PSCmdlet.ShouldProcess($provider, 'Register resource provider')) {
@@ -180,6 +180,7 @@ $app = Invoke-Az @('deployment', 'group', 'create', '-g', $ResourceGroup, '-n', 
     "identityId=$($core.identityId.value)",
     "registryLoginServer=$loginServer",
     "apiKeySecretUri=$($core.apiKeySecretUri.value)",
+    "applicationInsightsConnectionString=$($core.applicationInsightsConnectionString.value)",
     "entraTenantId=$tenantId", "entraClientId=$EntraClientId",
     "ticketingBaseUrl=$($ticketingBaseUrls[$TicketingRegion])",
     "defaultTimeZoneId=$DefaultTimeZoneId",

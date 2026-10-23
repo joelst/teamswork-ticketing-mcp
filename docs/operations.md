@@ -4,8 +4,9 @@
 
 HTTP deployments create a workspace-based Application Insights resource in the Log Analytics workspace. The server
 exports metrics when `ApplicationInsights:ConnectionString` is set; the pipeline supplies the connection string
-created by `infra/core.bicep`. No ticket content, caller identity, ticket ID, API key, or raw URL is used as a metric
-dimension. Only HTTP method, route category, upstream operation, and status are tagged, keeping cardinality bounded.
+created by `infra/core.bicep`, as does `infra/scripts/Deploy-TestInstance.ps1`. No ticket content, caller identity,
+ticket ID, API key, or raw URL is used as a metric dimension. Only HTTP method, route category, upstream operation,
+and status are tagged, keeping cardinality bounded.
 Unrecognized incoming HTTP methods are recorded as `_OTHER`; transport failures use a bounded `error.type` value
 instead of masquerading as an HTTP status code.
 
