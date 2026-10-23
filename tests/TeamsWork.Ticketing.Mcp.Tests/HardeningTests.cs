@@ -1,6 +1,9 @@
+using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using System.Net;
 using System.Text;
 using ModelContextProtocol;
+using TeamsWork.Ticketing.Mcp.Observability;
 using TeamsWork.Ticketing.Mcp.Ticketing;
 using TeamsWork.Ticketing.Mcp.Ticketing.Models;
 using TeamsWork.Ticketing.Mcp.Tools;
@@ -130,18 +133,47 @@ public sealed class HardeningTests
     [Fact]
     public async Task A_response_body_that_never_finishes_times_out()
     {
-        var handler = new FakeHttpHandler().Enqueue(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        ConcurrentQueue<string> failures = StartFailureMetricsListener(out MeterListener listener);
+        using (listener)
         {
-            Content = new StreamContent(new StalledStream()),
-        });
-        TicketingClient client = TestFactory.Client(handler, TestFactory.Options(o => o.RequestTimeoutSeconds = 1));
+            var handler = new FakeHttpHandler().Enqueue(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new StalledStream()),
+            });
+            TicketingClient client = TestFactory.Client(handler, TestFactory.Options(o => o.RequestTimeoutSeconds = 1));
 
-        Task call = client.ListTicketsAsync(new TicketListQuery(), Ct);
-        Task finished = await Task.WhenAny(call, Task.Delay(TimeSpan.FromSeconds(15), Ct));
+            Task call = client.ListTicketsAsync(new TicketListQuery(), Ct);
+            Task finished = await Task.WhenAny(call, Task.Delay(TimeSpan.FromSeconds(15), Ct));
 
-        Assert.Same(call, finished);
-        TicketingApiException ex = await Assert.ThrowsAsync<TicketingApiException>(() => call);
-        Assert.Contains("did not respond", ex.Message, StringComparison.Ordinal);
+            Assert.Same(call, finished);
+            TicketingApiException ex = await Assert.ThrowsAsync<TicketingApiException>(() => call);
+            Assert.Contains("did not respond", ex.Message, StringComparison.Ordinal);
+            Assert.Contains(failures, measurement =>
+                measurement.Contains("error.type=timeout", StringComparison.Ordinal) &&
+                measurement.Contains("http.response.status_code=200", StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
+    public async Task A_dropped_response_body_is_classified_as_network_error()
+    {
+        ConcurrentQueue<string> failures = StartFailureMetricsListener(out MeterListener listener);
+        using (listener)
+        {
+            var handler = new FakeHttpHandler().Enqueue(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new DroppedStream()),
+            });
+            TicketingClient client = TestFactory.Client(handler);
+
+            TicketingApiException ex = await Assert.ThrowsAsync<TicketingApiException>(() =>
+                client.ListTicketsAsync(new TicketListQuery(), Ct));
+
+            Assert.Contains("connection to the Ticketing API dropped", ex.Message, StringComparison.Ordinal);
+            Assert.Contains(failures, measurement =>
+                measurement.Contains("error.type=network_error", StringComparison.Ordinal) &&
+                measurement.Contains("http.response.status_code=200", StringComparison.Ordinal));
+        }
     }
 
     // ---- HTML supplied by the agent ---------------------------------------------------------------------------
@@ -253,6 +285,28 @@ public sealed class HardeningTests
 
     private static string PaddedJson(int padding) => "{\"items\":[],\"pad\":\"" + new string('x', padding) + "\"}";
 
+    private static ConcurrentQueue<string> StartFailureMetricsListener(out MeterListener listener)
+    {
+        var measurements = new ConcurrentQueue<string>();
+        listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (instrument.Meter.Name == ServiceMetrics.MeterName)
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, _, tags, _) =>
+        {
+            if (instrument.Name == "ticketing.upstream.failures")
+            {
+                measurements.Enqueue(string.Join(",", tags.ToArray().Select(tag => $"{tag.Key}={tag.Value}")));
+            }
+        });
+        listener.Start();
+        return measurements;
+    }
+
     /// <summary>A readable stream that reports no length, so the client can't rely on Content-Length.</summary>
     private sealed class UnknownLengthStream(byte[] data) : MemoryStream(data)
     {
@@ -278,5 +332,23 @@ public sealed class HardeningTests
             await Task.Delay(Timeout.Infinite, cancellationToken);
             return 0;
         }
+    }
+
+    /// <summary>A body that fails with a connection error after the response headers arrive.</summary>
+    private sealed class DroppedStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            ValueTask.FromException<int>(new IOException("Simulated upstream connection drop."));
     }
 }

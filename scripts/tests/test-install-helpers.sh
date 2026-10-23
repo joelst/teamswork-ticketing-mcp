@@ -6,7 +6,7 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 installer="$here/../install.sh"
-for fn in json_escape secrets_text secrets_file_editable secret_get secret_has people_with_email env_setting vendor_endpoint find_person; do
+for fn in json_escape secrets_text secrets_file_editable secret_get secret_has people_with_email env_setting vendor_endpoint find_person registration register_client unregister_client; do
     body=$(sed -n "/^$fn() {/,/^}/p" "$installer")
     [ -n "$body" ] || { echo "install.sh has no function $fn"; exit 1; }
     eval "$body"
@@ -16,6 +16,53 @@ failures=0
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$3], got [$2]"; failures=$((failures + 1)); fi; }
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+SERVER_NAME=teamswork-ticketing
+EXE_PATH="$tmp/Program With Space/TeamsWork.Ticketing.Mcp"
+registration_text=""
+client_problem() { :; }
+warn() { echo "WARNING: $*" >&2; }
+mock_cli() {
+    printf '%s\n' "$@" >"$tmp/last-call"
+    case "$1 $2" in
+        'mcp get')
+            [ -n "$registration_text" ] && printf '%s\n' "$registration_text" || return 1
+            ;;
+        'mcp remove') registration_text="" ;;
+        'mcp add')
+            if [ "${FAIL_ADD:-0}" -eq 1 ]; then echo 'mock registration failure'; return 1; fi
+            registration_text=$EXE_PATH
+            echo 'mock registration success'
+            ;;
+    esac
+}
+claude() { mock_cli "$@"; }
+codex() { mock_cli "$@"; }
+copilot() { mock_cli "$@"; }
+code() {
+    printf '%s\n' "$@" >"$tmp/last-call"
+    if [ "${FAIL_ADD:-0}" -eq 1 ]; then echo 'Rejected MCP server'; else echo 'Added MCP servers'; fi
+}
+XDG_CONFIG_HOME="$tmp/config"; export XDG_CONFIG_HOME
+registration_text=$EXE_PATH
+register_client claude >/dev/null
+check 'an existing Claude registration is preserved on upgrade' "$(sed -n '2p' "$tmp/last-call")" 'get'
+registration_text='/old/path/TeamsWork.Ticketing.Mcp'
+register_client codex >/dev/null
+check 'a stale Codex registration is replaced with stdio arguments' "$(cat "$tmp/last-call")" "$(printf '%s\n' mcp add teamswork-ticketing -- "$EXE_PATH" --stdio)"
+registration_text=""
+FAIL_ADD=1
+if register_client copilot >/dev/null 2>&1; then copilot_result=success; else copilot_result=failure; fi
+check 'a failed Copilot registration returns failure' "$copilot_result" 'failure'
+unset FAIL_ADD
+register_client vscode >/dev/null
+expected_json=$(printf '{"name":"teamswork-ticketing","type":"stdio","command":"%s","args":["--stdio"]}' "$(json_escape "$EXE_PATH")")
+check 'VS Code receives a JSON stdio registration' "$(sed -n '2p' "$tmp/last-call")" "$expected_json"
+mkdir -p "$XDG_CONFIG_HOME/Code/User"
+printf '{"servers":{"%s":{"command":"%s"}}}\n' "$SERVER_NAME" "$EXE_PATH" >"$XDG_CONFIG_HOME/Code/User/mcp.json"
+last_call=$(cat "$tmp/last-call")
+register_client vscode >/dev/null
+check 'an existing VS Code registration is preserved on upgrade' "$(cat "$XDG_CONFIG_HOME/Code/User/mcp.json")" "$(printf '{"servers":{"%s":{"command":"%s"}}}\n' "$SERVER_NAME" "$EXE_PATH")"
+check 'the existing VS Code entry does not call the CLI again' "$(cat "$tmp/last-call")" "$last_call"
 SECRETS_PATH="$tmp/secrets.json"; : >"$SECRETS_PATH"
 REGION=""
 unset Ticketing__BaseUrl 2>/dev/null || true

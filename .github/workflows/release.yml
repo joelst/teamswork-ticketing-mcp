@@ -175,6 +175,69 @@ jobs:
           echo "$RESPONSE"
           echo "$RESPONSE" | grep -q "\"version\":\"$VERSION\""
 
+      # Optional Developer ID signing and notarization. When enabled, all Apple credentials must be present in the
+      # release environment; otherwise the macOS build remains unsigned as before.
+      - name: Sign and notarize macOS executable
+        if: runner.os == 'macOS' && vars.MACOS_SIGNING_ENABLED == 'true'
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [ -z "${!name}" ]; then echo "::error::Missing required macOS signing secret: $name"; exit 1; fi
+          done
+
+          KEYCHAIN="$RUNNER_TEMP/taas-signing.keychain-db"
+          CERTIFICATE="$RUNNER_TEMP/taas-signing.p12"
+          SUBMISSION="$RUNNER_TEMP/$STAGE.zip"
+          NOTARIZATION="$RUNNER_TEMP/notarization.json"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 24)
+          trap 'security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true; rm -f "$CERTIFICATE" "$SUBMISSION" "$NOTARIZATION"' EXIT
+
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 -D > "$CERTIFICATE"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERTIFICATE" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN"
+
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | awk -F '"' '/Developer ID Application:/{print $2; exit}')
+          if [ -z "$IDENTITY" ]; then echo "::error::The signing certificate is not a Developer ID Application certificate."; exit 1; fi
+          BINARY="stage/$STAGE/TeamsWork.Ticketing.Mcp"
+          codesign --force --options runtime --entitlements scripts/macos-entitlements.plist --timestamp --sign "$IDENTITY" "$BINARY"
+          codesign --verify --strict "$BINARY"
+
+          ditto -c -k --keepParent "stage/$STAGE" "$SUBMISSION"
+          xcrun notarytool submit "$SUBMISSION" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait --output-format json > "$NOTARIZATION"
+          cat "$NOTARIZATION"
+          if ! /usr/bin/plutil -extract status raw -o - "$NOTARIZATION" | grep -qx 'Accepted'; then
+            echo "::error::Apple notarization did not return status Accepted."
+            exit 1
+          fi
+
+      - name: Smoke-test signed macOS executable
+        if: runner.os == 'macOS' && vars.MACOS_SIGNING_ENABLED == 'true'
+        env:
+          Ticketing__ApiKey: ci-dummy-key
+          Ticketing__ServiceAccount__Id: 00000000-0000-0000-0000-0000000000c1
+          Ticketing__ServiceAccount__Name: CI
+          Ticketing__ServiceAccount__Email: ci@example.test
+        run: |
+          set -euo pipefail
+          INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci-signed-macos","version":"1"}}}'
+          REPLY="$RUNNER_TEMP/reply-signed-smoke"; : > "$REPLY"
+          ( printf '%s\n' "$INIT"; i=0; while [ ! -s "$REPLY" ] && [ "$i" -lt 120 ]; do sleep 0.5; i=$((i + 1)); done ) \
+            | ./stage/$STAGE/TeamsWork.Ticketing.Mcp --stdio 2>/dev/null > "$REPLY"
+          RESPONSE=$(head -n1 "$REPLY")
+          echo "$RESPONSE"
+          echo "$RESPONSE" | grep -q "\"version\":\"$VERSION\""
+
       - name: Archive
         run: |
           mkdir -p dist
@@ -250,10 +313,10 @@ jobs:
 
           ## First run
 
-          The Windows executable and the portable build's `TeamsWork.Ticketing.Mcp.dll` are Authenticode-signed. The Linux and macOS executables are not signed.
+          The Windows executable and the portable build's `TeamsWork.Ticketing.Mcp.dll` are Authenticode-signed. Linux builds are unsigned. macOS builds are Developer ID signed and notarized when the release environment's optional Apple credentials are configured; otherwise they are unsigned.
 
           - **Windows:** SmartScreen may still warn about a newly released file until it builds reputation. Choose **More info**, then **Run anyway**, or unblock the file with `Unblock-File .\TeamsWork.Ticketing.Mcp.exe`. The portable zip is an alternative; it runs through Microsoft's signed `dotnet` host.
-          - **macOS:** remove the quarantine flag with `xattr -d com.apple.quarantine ./TeamsWork.Ticketing.Mcp`.
+          - **macOS:** for an unsigned build, remove the quarantine flag only if Gatekeeper blocks it: `xattr -d com.apple.quarantine ./TeamsWork.Ticketing.Mcp`.
           - **Linux/macOS:** the tarball keeps the execute bit; if it is lost, run `chmod +x TeamsWork.Ticketing.Mcp`.
 
           ## Configure

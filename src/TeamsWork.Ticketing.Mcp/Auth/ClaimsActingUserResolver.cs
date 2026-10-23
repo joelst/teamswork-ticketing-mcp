@@ -42,6 +42,13 @@ public static class ClaimsActingUserResolver
         ClaimTypes.Role,
     ];
 
+    private static readonly string[] ClientApplicationIdClaims =
+    [
+        "azp",
+        "appid",
+        "http://schemas.microsoft.com/identity/claims/appid",
+    ];
+
     /// <summary>True when the token was issued for a signed-in user (delegated permissions).</summary>
     public static bool IsDelegatedToken(ClaimsPrincipal principal) =>
         FindFirst(principal, ScopeClaims) is not null;
@@ -66,6 +73,13 @@ public static class ClaimsActingUserResolver
     public static bool HasAppRole(ClaimsPrincipal principal, string role) =>
         principal.FindAll(c => RoleClaims.Contains(c.Type, StringComparer.Ordinal))
             .Any(c => string.Equals(c.Value, role, StringComparison.Ordinal));
+
+    /// <summary>Gets the calling client application ID from Entra v1 or v2 token claims.</summary>
+    public static string? ClientApplicationId(ClaimsPrincipal principal)
+    {
+        string? value = FindFirst(principal, ClientApplicationIdClaims);
+        return Guid.TryParseExact(value, "D", out Guid id) && id != Guid.Empty ? id.ToString("D") : null;
+    }
 
     /// <summary>
     /// Resolves the acting user. Delegated tokens yield the signed-in user; app-only tokens yield the configured

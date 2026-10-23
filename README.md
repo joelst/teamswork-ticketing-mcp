@@ -79,15 +79,17 @@ tests/                           xunit v3 tests incl. an in-process HTTP + Entra
 infra/core.bicep                 Log Analytics, identity, ACR, Key Vault, Container Apps environment
 infra/app.bicep                  The container app (scale-to-zero)
 infra/scripts/                   Entra app registration + Key Vault secret helpers (PowerShell)
-scripts/                         Install scripts for local MCP clients (install.ps1, install.sh)
+scripts/                         Install scripts for local MCP clients (install.ps1, install.sh), Cowork package builder
+plugin/                          Skills and the Copilot Cowork plugin manifest (see docs/cowork.md)
 pipelines/azure-pipelines.yml    Azure DevOps: build, test, audit, deploy
 docs/                            Setup guides: Entra, Copilot Studio, Foundry, stdio, security
 ```
 
-The server was built against TeamsWork Ticketing API v1.1.0. It uses the US endpoint
+The server was built against TeamsWork Ticketing API v1.1.0. See the vendor's [official API reference](https://www.teamswork.app/products/microsoft-teams-ticketing/ticketingapi) for the current OpenAPI JSON download and regional endpoints. The download URL can change; don't pin it in automation. The server uses the US endpoint
 (`https://teamswork.azure-api.net/ticketing/v1`) unless `Ticketing:Region` is set to `EU` or `AUS`. The
-vendor's OpenAPI document is not redistributed here; obtain it from TeamsWork. If you keep a local copy in
-`docs/openapi/`, it is git-ignored.
+OpenAPI document is not redistributed here. Save a fresh copy as `docs/openapi/ticketing.json` (git-ignored) and check
+that the endpoints used by this server still exist with
+`./scripts/Test-TicketingOpenApi.ps1 -OpenApiPath docs/openapi/ticketing.json`.
 
 ## Install for Claude Code, Codex, or GitHub Copilot
 
@@ -116,8 +118,10 @@ each client.
 Pre-built binaries are on the [Releases](https://github.com/joelst/teamswork-ticketing-mcp/releases) page:
 single-file executables for Windows x64, Linux x64, and macOS Apple silicon that need no .NET install, plus a
 portable build that runs anywhere .NET 10 is installed (`dotnet TeamsWork.Ticketing.Mcp.dll --stdio`). The
-Windows executable and the portable build's own DLL are code-signed; the Linux and macOS executables are not, and
-the release notes explain the first-run prompts. The install script above does the following steps for you. To do
+Windows executable and the portable build's own DLL are code-signed. Linux builds are unsigned. macOS releases are
+signed and notarized only when the release environment's optional Apple Developer credentials are configured; see
+[release signing](docs/operations.md#macos-release-signing). The install script above does the following steps for
+you. To do
 them by hand, extract the archive, then follow [Configure without the .NET SDK](#configure-without-the-net-sdk) and
 [Connect an MCP client](#4-connect-an-mcp-client).
 
@@ -249,7 +253,8 @@ to stdout, which is the MCP channel.
 
 Visual Studio, config-file formats, and troubleshooting are in [docs/stdio.md](docs/stdio.md). For the Entra-protected remote deployment see
 [docs/setup-entra.md](docs/setup-entra.md), [docs/copilot-studio.md](docs/copilot-studio.md),
-[docs/foundry.md](docs/foundry.md), and [docs/security.md](docs/security.md).
+[docs/foundry.md](docs/foundry.md), [docs/cowork.md](docs/cowork.md) (Copilot Cowork plugin), and
+[docs/security.md](docs/security.md).
 
 ## Build and test
 
@@ -268,8 +273,15 @@ dotnet run --project src/TeamsWork.Ticketing.Mcp -- --local    # run from source
    `infra/scripts/Set-TicketingApiKey.ps1` (or supply it once as the secret pipeline variable `ticketingApiKey`).
 4. The **Deploy** stage prints the MCP endpoint (`https://<app>.<region>.azurecontainerapps.io/mcp`).
 
-Estimated running cost: Container Apps consumption with scale-to-zero (mostly within the free grant), ACR Basic
-(~US$5/month), Key Vault and Log Analytics (cents). Under US$10/month at typical agent traffic.
+For a test instance without the pipeline, `infra/scripts/Deploy-TestInstance.ps1 -Location <region>` runs the same
+steps with your own Azure CLI sign-in, in its own resource group (`rg-taasmcp-test`), and smoke-tests the result. Run
+`New-EntraAppRegistrations.ps1` first; the deploy script finds the server's app registration by name. To use the
+endpoint from Microsoft 365 Copilot Cowork, see [docs/cowork.md](docs/cowork.md).
+
+The pipeline creates a workspace-based Application Insights resource in the Log Analytics workspace and exports
+low-cardinality application metrics. Configure `acceptedClientApplicationIds` and `blockedClientApplicationIds` in
+the production variable group to restrict which Entra client apps can call the MCP endpoint. See
+[operations](docs/operations.md) for dashboards and [Entra setup](docs/setup-entra.md) for the access policy.
 
 ## Configuration
 
@@ -289,6 +301,9 @@ Estimated running cost: Container Apps consumption with scale-to-zero (mostly wi
 | `Auth:Mode` / `--local` | CLI / env (dev only) | `Local` = unauthenticated loopback HTTP on `Local:Port` (default 5188). Unset means `Entra`; any other value stops startup |
 | `Entra:TenantId`, `Entra:ClientId` | env | Server app registration (Entra HTTP mode) |
 | `Entra:PublicBaseUrl` | env | Optional custom domain for protected-resource metadata |
+| `Entra:AcceptedClientApplicationIds` | env; hosted: `acceptedClientApplicationIds` in app.bicep (pipeline variable with the same name) | Comma-separated caller app IDs; empty allows any app |
+| `Entra:BlockedClientApplicationIds` | env; hosted: `blockedClientApplicationIds` in app.bicep (pipeline variable with the same name) | Comma-separated caller app IDs always denied; takes precedence over the accepted list |
+| `ApplicationInsights:ConnectionString` | env; hosted: created by core.bicep | Application Insights export for application metrics; empty disables export |
 | `Mcp:RequestsPerMinutePerCaller` | env | Requests one caller (token tenant and object ID) may make per minute, default 60; `0` turns it off (Entra mode) |
 | `Mcp:MaxRequestBodyBytes` | env | Largest request body accepted, default 1 MiB |
 | `Ticketing:MaxResponseBytes` | env | Largest upstream response read, default 8 MiB |

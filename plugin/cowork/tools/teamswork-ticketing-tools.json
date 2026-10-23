@@ -1,0 +1,1320 @@
+{
+  "tools": [
+    {
+      "name": "list_activity_attachments",
+      "title": "List activity attachments",
+      "description": "List the attachments belonging to one attachment activity. IMPORTANT: 'activityId' must be the activityId returned by add_ticket_link_attachments (an attachment activity). IDs from list_ticket_activities for comments or status changes are not valid here. To see everything attached to a ticket, use list_ticket_attachments instead.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "activityId": {
+            "description": "ID of an attachment activity (from add_ticket_link_attachments).",
+            "type": "string"
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "activityId"
+        ]
+      },
+      "annotations": {
+        "title": "List activity attachments",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "get_ticket_context",
+      "title": "Get ticket with history",
+      "description": "Get everything needed to understand a ticket in one call: its full details, its most recent activity (comments, status and field changes), and its attachments. Use it before summarising, triaging, or replying to a ticket.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ticketId": {
+            "description": "Ticket UUID.",
+            "type": "string"
+          },
+          "activityLimit": {
+            "description": "Number of recent activities to include (default 10, max 50).",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          },
+          "includeHtml": {
+            "description": "Also return description_HTML and comment_HTML.",
+            "type": "boolean",
+            "default": false
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "ticketId"
+        ]
+      },
+      "annotations": {
+        "title": "Get ticket with history",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "list_sla_risk",
+      "title": "List SLA risks",
+      "description": "List unresolved tickets that have breached or been escalated for their first-response (FRT) or resolution (RT) SLA, newest first, with the isFrtBreached, isRtBreached, isFrtEscalated, and isRtEscalated flags. If the instance has SLA tracking turned off, says so instead of listing nothing.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "description": "any (default): breached or escalated; breached: breached only; escalated: escalated only.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "priority": {
+            "description": "Only this priority: Low, Medium, Important, or Urgent.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "createdAfter": {
+            "description": "Only tickets created on or after this day (YYYY-MM-DD, your local day at timezoneOffset). The API filters by whole days, so a time of day is refused; returned times are UTC.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "createdBefore": {
+            "description": "Only tickets created before this day starts (YYYY-MM-DD, your local day at timezoneOffset). The API cuts at or before that local midnight, so a time of exactly midnight is included too. For one day, give it as createdAfter and the next day here. Both ends of a range use one offset: without timezoneOffset, the server zone's on the earlier day, so across a daylight-saving change the later end is an hour off. The API filters by whole days, so a time of day is refused; returned times are UTC.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "limit": {
+            "description": "Maximum tickets to return (default 20, max 100).",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "annotations": {
+        "title": "List SLA risks",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "update_ticket",
+      "title": "Update ticket",
+      "description": "Update fields on an existing ticket. Only the fields you pass are changed; everything else is left as is. To change the workflow state use update_ticket_status instead. 'expectedDate' must be a plain YYYY-MM-DD date.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ticketId": {
+            "description": "Ticket UUID.",
+            "type": "string"
+          },
+          "title": {
+            "description": "New title.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "description": {
+            "description": "New plain-text description.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "descriptionHtml": {
+            "description": "New HTML description (formatting, lists, tables, links). Ignored when 'description' is also supplied. Script, forms, images, and inline styles are removed; use add_ticket_link_attachments for screenshots.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "requestor": {
+            "description": "New requestor. An email or name alone is looked up in the assignee list; for anyone else pass id, name, and email.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "description": "Microsoft Entra object ID of the person. Only needed, with name and email, for someone outside the get_instance assignee list. For email-to-ticket requestors, use the email address in all three fields.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "name": {
+                "description": "Display name. On its own, it is looked up in the assignee list (a unique partial match is enough).",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "email": {
+                "description": "Email address. On its own, it is looked up in the assignee list.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "default": null
+          },
+          "assignee": {
+            "description": "New assignee: an email or name from the get_instance assignee list is enough.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "description": "Microsoft Entra object ID of the person. Only needed, with name and email, for someone outside the get_instance assignee list. For email-to-ticket requestors, use the email address in all three fields.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "name": {
+                "description": "Display name. On its own, it is looked up in the assignee list (a unique partial match is enough).",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "email": {
+                "description": "Email address. On its own, it is looked up in the assignee list.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "default": null
+          },
+          "priority": {
+            "description": "New priority: Low, Medium, Important, or Urgent.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "expectedDate": {
+            "description": "New expected date in YYYY-MM-DD form only.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "tags": {
+            "description": "Replacement tag list (category by ID or name).",
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "tagCategoryId": {
+                  "description": "ID or name of the tag category (from list_tag_categories).",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "text": {
+                  "description": "Tag text as defined in the category (case doesn't matter).",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "tagCategoryId",
+                "text"
+              ]
+            },
+            "default": null
+          },
+          "customFields": {
+            "description": "Custom field values to set, keyed by custom field ID or title from get_instance. Values are checked against the field definitions.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "default": null
+          },
+          "includeHtml": {
+            "description": "Return description_HTML in the updated ticket.",
+            "type": "boolean",
+            "default": false
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "ticketId"
+        ]
+      },
+      "annotations": {
+        "title": "Update ticket",
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "list_ticket_attachments",
+      "title": "List ticket attachments",
+      "description": "List the files and links attached to a ticket, with captions and download URLs.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ticketId": {
+            "description": "Ticket UUID.",
+            "type": "string"
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "ticketId"
+        ]
+      },
+      "annotations": {
+        "title": "List ticket attachments",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "list_my_tickets",
+      "title": "List my tickets",
+      "description": "List tickets assigned to or requested by the caller (see whoami), newest first, unresolved only by default. Answers 'what's on my plate' in one call; the API has no assignee filter, so list_tickets can't. Returns ticket summaries.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "description": "assignee (default): tickets assigned to me; requestor: tickets I raised; either: both.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "includeResolved": {
+            "description": "true to include resolved and closed tickets.",
+            "type": "boolean",
+            "default": false
+          },
+          "priority": {
+            "description": "Only this priority: Low, Medium, Important, or Urgent.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "createdAfter": {
+            "description": "Only tickets created on or after this day (YYYY-MM-DD, your local day at timezoneOffset). The API filters by whole days, so a time of day is refused; returned times are UTC.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "createdBefore": {
+            "description": "Only tickets created before this day starts (YYYY-MM-DD, your local day at timezoneOffset). The API cuts at or before that local midnight, so a time of exactly midnight is included too. For one day, give it as createdAfter and the next day here. Both ends of a range use one offset: without timezoneOffset, the server zone's on the earlier day, so across a daylight-saving change the later end is an hour off. The API filters by whole days, so a time of day is refused; returned times are UTC.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "limit": {
+            "description": "Maximum tickets to return (default 20, max 100).",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "annotations": {
+        "title": "List my tickets",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "list_tickets",
+      "title": "List tickets",
+      "description": "Search and list tickets, newest first by default. Supports full-text search, filters (status, priority, resolved, tags, date ranges), sorting, field selection, and paging. Returns a page of tickets plus totalCount and, when more pages exist, a continuationToken to pass back in. Prefer 'select' to keep responses small when you only need a few fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "search": {
+            "description": "Full-text search across ticket content.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "title": {
+            "description": "Filter by exact ticket title.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "status": {
+            "description": "Legacy resolved-state filter: Open, Reopened, or In Progress return unresolved tickets; Resolved or Closed return resolved tickets. Use statusId for an exact workflow state.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "statusId": {
+            "description": "Exact workflow state to match. Default workflows use Open, Reopened, In Progress, Resolved, Closed; custom workflows use the state IDs from get_instance.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "isResolved": {
+            "description": "true = only resolved tickets, false = only unresolved tickets.",
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "default": null
+          },
+          "priority": {
+            "description": "Filter by priority: Low, Medium, Important, or Urgent.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "tags": {
+            "description": "Comma-separated tag filter in the form tagCategoryId_tagText (IDs from list_tag_categories).",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "orderBy": {
+            "description": "Sort field: status, ticketId, title, requestorName, requestorEmail, assigneeName, assigneeEmail, expectedDate, priority, createdDateTime, or lastInteraction.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "order": {
+            "description": "Sort direction: ASC or DESC (default DESC).",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "select": {
+            "description": "Comma-separated fields to return, for example 'id,ticketId,title,status,priority,assignee,createdOn'. Allowed: id, ticketId, title, description, status, requestor, customFields, priority, assignee, expectedDate, resolution, firstResponseOn, firstResolutionOn, lastResolutionOn, createdOn, tags, lastUpdatedOn, isFrtEscalated, isRtEscalated, createdBy, lastUpdatedBy, lastResolutionComment.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "createdAfter": {
+            "description": "Only tickets created on or after this day (YYYY-MM-DD, your local day at timezoneOffset). The API filters by whole days, so a time of day is refused; returned times are UTC.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "createdBefore": {
+            "description": "Only tickets created before this day starts (YYYY-MM-DD, your local day at timezoneOffset). The API cuts at or before that local midnight, so a time of exactly midnight is included too. For one day, give it as createdAfter and the next day here. Both ends of a range use one offset: without timezoneOffset, the server zone's on the earlier day, so across a daylight-saving change the later end is an hour off. The API filters by whole days, so a time of day is refused; returned times are UTC.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "expectedDateAfter": {
+            "description": "Only tickets due on or after this date (YYYY-MM-DD, a calendar date in the server's time zone). On its own it ignores timezoneOffset; alongside a created or updated filter, a due date set from another time zone can come out a day off. A time of day is refused.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "expectedDateBefore": {
+            "description": "Only tickets due before this date (YYYY-MM-DD, a calendar date in the server's time zone; the date itself isn't included). On its own it ignores timezoneOffset; alongside a created or updated filter, a due date set from another time zone can come out a day off. A time of day is refused.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "lastUpdateAfter": {
+            "description": "Only tickets last updated on or after this day (YYYY-MM-DD, your local day at timezoneOffset). The API filters by whole days, so a time of day is refused; returned times are UTC.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "lastUpdateBefore": {
+            "description": "Only tickets last updated before this day starts (YYYY-MM-DD, your local day at timezoneOffset). The API cuts at or before that local midnight, so a time of exactly midnight is included too. Both ends of a range use one offset: without timezoneOffset, the server zone's on the earlier day, so across a daylight-saving change the later end is an hour off. The API filters by whole days, so a time of day is refused; returned times are UTC.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "limit": {
+            "description": "Page size (default 20, max 100).",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          },
+          "offset": {
+            "description": "Zero-based starting position for offset paging (default 0). Ignored when continuationToken is supplied.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          },
+          "continuationToken": {
+            "description": "Token from a previous list_tickets response to fetch the next page.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "includeHtml": {
+            "description": "Also return description_HTML (sanitised HTML) alongside the plain-text description.",
+            "type": "boolean",
+            "default": false
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours, e.g. -5 for US Central Daylight Time. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "annotations": {
+        "title": "List tickets",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "list_ticket_activities",
+      "title": "List ticket activities",
+      "description": "Get the activity history of a ticket (comments, status changes, field changes, attachment events), newest first. Use 'limit' to keep the response small and the returned continuationToken to page further back.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ticketId": {
+            "description": "Ticket UUID.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of activities to return (default 25, max 100).",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          },
+          "continuationToken": {
+            "description": "Token from a previous list_ticket_activities response to fetch the next page.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "includeHtml": {
+            "description": "Also return comment_HTML (sanitised HTML) alongside the plain-text comment.",
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "ticketId"
+        ]
+      },
+      "annotations": {
+        "title": "List ticket activities",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "find_similar_tickets",
+      "title": "Find similar tickets",
+      "description": "Find existing tickets whose titles resemble a proposed title, to avoid filing a duplicate. Call it before create_ticket and, if a match looks like the same problem, comment on that ticket instead. Searches unresolved tickets by default; results are ranked by how many of the title's keywords they share (score 0 to 1).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "description": "Proposed ticket title, or a short description of the problem.",
+            "type": "string"
+          },
+          "includeResolved": {
+            "description": "true to include resolved and closed tickets.",
+            "type": "boolean",
+            "default": false
+          },
+          "limit": {
+            "description": "Maximum matches to return (default 5, max 20).",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "title"
+        ]
+      },
+      "annotations": {
+        "title": "Find similar tickets",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "find_ticket_by_number",
+      "title": "Find ticket by number",
+      "description": "Get a ticket by its human-readable number (the 'ticketNo' people quote, such as 1234), with the same full details as get_ticket. Use this whenever someone refers to a ticket by number; get_ticket and the other tools need the UUID this returns in 'id'.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ticketNo": {
+            "description": "Ticket number, such as 1234 (a leading # is fine).",
+            "type": "string"
+          },
+          "includeHtml": {
+            "description": "Also return description_HTML.",
+            "type": "boolean",
+            "default": false
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "ticketNo"
+        ]
+      },
+      "annotations": {
+        "title": "Find ticket by number",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "get_ticket",
+      "title": "Get ticket",
+      "description": "Get the full details of one ticket by its UUID (the 'id' field, not the human ticket number). Includes the workflow states and allowed next transitions for update_ticket_status.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ticketId": {
+            "description": "Ticket UUID.",
+            "type": "string"
+          },
+          "includeHtml": {
+            "description": "Also return description_HTML.",
+            "type": "boolean",
+            "default": false
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "ticketId"
+        ]
+      },
+      "annotations": {
+        "title": "Get ticket",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "get_instance",
+      "title": "Get ticketing instance settings",
+      "description": "Get the Ticketing instance configuration: custom field definitions (IDs, types, options, whether mandatory), the assignee list, workflow definitions with state IDs, and SLA settings. Pass 'section' to get only the part you need; the full response is large. Results are cached for a few minutes; pass refresh=true after changing the instance's settings (a refresh re-reads unless the settings were read in the last 30 seconds).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "section": {
+            "description": "Part to return: all (default), customFields (custom and optional fields), assignees, workflows, or sla.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "refresh": {
+            "description": "true to re-read the settings from the API, unless they were read in the last 30 seconds.",
+            "type": "boolean",
+            "default": false
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "annotations": {
+        "title": "Get ticketing instance settings",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "create_ticket",
+      "title": "Create ticket",
+      "description": "Create a new ticket. Only 'title' is required; the requestor defaults to the signed-in user. People can be given by email or name alone (looked up in the assignee list), tags by category name, and custom fields by title; get_instance and list_tag_categories list what exists. Call find_similar_tickets first to avoid filing a duplicate. 'expectedDate' must be a plain YYYY-MM-DD date. The ticket is recorded as created by the authenticated caller; the agent cannot choose a different actor.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "description": "Short ticket title.",
+            "type": "string"
+          },
+          "description": {
+            "description": "Plain-text description (line breaks preserved). Use descriptionHtml instead for formatted content.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "descriptionHtml": {
+            "description": "HTML description (formatting, lists, tables, links). Ignored when 'description' is also supplied. Script, forms, images, and inline styles are removed; use add_ticket_link_attachments for screenshots.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "requestor": {
+            "description": "Person raising the ticket. Defaults to the signed-in user. An email or name alone is looked up in the assignee list; for anyone else pass id, name, and email. To trigger the email-to-ticket flow, set id, name, and email all to the requestor's email address.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "description": "Microsoft Entra object ID of the person. Only needed, with name and email, for someone outside the get_instance assignee list. For email-to-ticket requestors, use the email address in all three fields.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "name": {
+                "description": "Display name. On its own, it is looked up in the assignee list (a unique partial match is enough).",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "email": {
+                "description": "Email address. On its own, it is looked up in the assignee list.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "default": null
+          },
+          "assignee": {
+            "description": "Person to assign the ticket to: an email or name from the get_instance assignee list is enough.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "description": "Microsoft Entra object ID of the person. Only needed, with name and email, for someone outside the get_instance assignee list. For email-to-ticket requestors, use the email address in all three fields.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "name": {
+                "description": "Display name. On its own, it is looked up in the assignee list (a unique partial match is enough).",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "email": {
+                "description": "Email address. On its own, it is looked up in the assignee list.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "default": null
+          },
+          "priority": {
+            "description": "Priority: Low, Medium, Important, or Urgent.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "expectedDate": {
+            "description": "Expected completion date in YYYY-MM-DD form only.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "tags": {
+            "description": "Tags to apply.",
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "tagCategoryId": {
+                  "description": "ID or name of the tag category (from list_tag_categories).",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "text": {
+                  "description": "Tag text as defined in the category (case doesn't matter).",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "tagCategoryId",
+                "text"
+              ]
+            },
+            "default": null
+          },
+          "customFields": {
+            "description": "Custom field values keyed by the custom field ID or title from get_instance. Value type depends on the field: string for text/date, boolean for toggle, array of option keys (or option texts) for list, array of {id,name,email} for people picker. Values are checked against the field definitions.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "default": null
+          },
+          "includeHtml": {
+            "description": "Return description_HTML in the created ticket.",
+            "type": "boolean",
+            "default": false
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "title"
+        ]
+      },
+      "annotations": {
+        "title": "Create ticket",
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "list_tag_categories",
+      "title": "List tag categories",
+      "description": "List all tag categories and the tags in each. Tag inputs on create_ticket/update_ticket accept a category's ID or name; the list_tickets 'tags' filter needs the ID (tagCategoryId_tagText).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "refresh": {
+            "description": "true to re-read the tags from the API, unless they were read in the last 30 seconds.",
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "annotations": {
+        "title": "List tag categories",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "whoami",
+      "title": "Who am I",
+      "description": "Show the account this server acts as: the signed-in user, or the configured service account for app-only callers and local (stdio) use. Ticket changes are attributed to it, and list_my_tickets matches tickets against it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "annotations": {
+        "title": "Who am I",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "add_ticket_comment",
+      "title": "Add comment",
+      "description": "Add a comment to a ticket as the signed-in user. Pass plain text in 'comment' or formatted content in 'commentHtml'. Set isPrivate=true for internal-only notes that the requestor should not see.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ticketId": {
+            "description": "Ticket UUID.",
+            "type": "string"
+          },
+          "comment": {
+            "description": "Plain-text comment. HTML characters are escaped.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "commentHtml": {
+            "description": "HTML comment (formatting, lists, tables, links). Ignored when 'comment' is also supplied. Script, forms, images, and inline styles are removed; use add_ticket_link_attachments for screenshots.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "isPrivate": {
+            "description": "true to make the comment visible only to internal agents.",
+            "type": "boolean",
+            "default": false
+          },
+          "includeHtml": {
+            "description": "Return comment_HTML in the created activity.",
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "ticketId"
+        ]
+      },
+      "annotations": {
+        "title": "Add comment",
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "update_ticket_status",
+      "title": "Change ticket status",
+      "description": "Move a ticket to another workflow state (for example resolve, close, or reopen it). The target must be one of the allowed next steps for the ticket's current state: check the 'workflow' and 'status' fields from get_ticket first. For default workflows use Open, Reopened, In Progress, Resolved, or Closed; for custom workflows use the target state's ID. When resolving, supply a resolution.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ticketId": {
+            "description": "Ticket UUID.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Target workflow state (label for default workflows, state ID for custom workflows).",
+            "type": "string"
+          },
+          "resolution": {
+            "description": "Resolution reason when moving to a resolved state: fixed, cannotResolve, or cancelled.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "comment": {
+            "description": "Optional note recorded with the status change (some transitions require one).",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "ticketId",
+          "status"
+        ]
+      },
+      "annotations": {
+        "title": "Change ticket status",
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "assign_ticket",
+      "title": "Assign ticket",
+      "description": "Assign a ticket to someone in the instance's assignee list, given their email or name (a unique partial name is enough). Shorthand for update_ticket with only an assignee.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ticketId": {
+            "description": "Ticket UUID.",
+            "type": "string"
+          },
+          "assignee": {
+            "description": "Email address or display name of the new assignee.",
+            "type": "string"
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "ticketId",
+          "assignee"
+        ]
+      },
+      "annotations": {
+        "title": "Assign ticket",
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "count_tickets",
+      "title": "Count tickets",
+      "description": "Count tickets grouped by status, priority, or assignee, for questions like 'how many urgent tickets are open' or 'who has the most open tickets'. Unresolved tickets only by default. Returns groups sorted by count, largest first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "groupBy": {
+            "description": "Group by: status (default), priority, or assignee.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "includeResolved": {
+            "description": "true to include resolved and closed tickets.",
+            "type": "boolean",
+            "default": false
+          },
+          "priority": {
+            "description": "Only this priority: Low, Medium, Important, or Urgent.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "search": {
+            "description": "Only tickets matching this full-text search.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "tags": {
+            "description": "Comma-separated tag filter in the form tagCategoryId_tagText (IDs from list_tag_categories).",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "createdAfter": {
+            "description": "Only tickets created on or after this day (YYYY-MM-DD, your local day at timezoneOffset). The API filters by whole days, so a time of day is refused; returned times are UTC.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "createdBefore": {
+            "description": "Only tickets created before this day starts (YYYY-MM-DD, your local day at timezoneOffset). The API cuts at or before that local midnight, so a time of exactly midnight is included too. For one day, give it as createdAfter and the next day here. Both ends of a range use one offset: without timezoneOffset, the server zone's on the earlier day, so across a daylight-saving change the later end is an hour off. The API filters by whole days, so a time of day is refused; returned times are UTC.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "annotations": {
+        "title": "Count tickets",
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "add_ticket_link_attachments",
+      "title": "Attach links",
+      "description": "Attach one or more hyperlinks (for example a SharePoint document or a web page) to a ticket, with an optional comment. File uploads are not supported through this tool. The response includes an activityId that list_activity_attachments accepts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ticketId": {
+            "description": "Ticket UUID.",
+            "type": "string"
+          },
+          "links": {
+            "description": "Links to attach (at least one).",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "description": "Absolute http(s) URL to attach.",
+                  "type": "string"
+                },
+                "caption": {
+                  "description": "Caption shown for the link.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "url",
+                "caption"
+              ]
+            }
+          },
+          "comment": {
+            "description": "Plain-text comment shown with the links.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "commentHtml": {
+            "description": "HTML comment (formatting, lists, tables, links). Ignored when 'comment' is also supplied. Script, forms, images, and inline styles are removed; use add_ticket_link_attachments for screenshots.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "isPrivate": {
+            "description": "true to make the attachment activity visible only to internal agents.",
+            "type": "boolean",
+            "default": false
+          },
+          "includeHtml": {
+            "description": "Return comment_HTML in the created activity.",
+            "type": "boolean",
+            "default": false
+          },
+          "timezoneOffset": {
+            "description": "Caller's UTC offset in whole hours. Defaults to the server's configured time zone.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "ticketId",
+          "links"
+        ]
+      },
+      "annotations": {
+        "title": "Attach links",
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      }
+    }
+  ]
+}

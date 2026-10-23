@@ -24,8 +24,9 @@ The install script is the quickest way to set up one machine. It:
    checks it against the release's `SHA256SUMS.txt`. The checksum file comes from the same release, so it only
    proves the download is intact. On Windows the script also requires a valid Authenticode signature made with this
    project's Artifact Signing identity (checked by the EKU its certificates carry, which stays the same as they are
-   reissued), so a file signed with some other trusted certificate is refused, and prints the signer. Linux and macOS
-   builds are unsigned, so there the checksum is the only check.
+   reissued), so a file signed with some other trusted certificate is refused, and prints the signer. Linux builds are
+   unsigned, so there the checksum is the only check. The macOS release can be Developer ID signed and notarized when
+   the release environment's Apple credentials are configured; otherwise it is unsigned.
 2. Puts the executable at a fixed per-user path, so client configurations keep working across upgrades:
    - Windows: `%LOCALAPPDATA%\Programs\teamswork-ticketing-mcp\TeamsWork.Ticketing.Mcp.exe`
    - macOS/Linux: `~/.local/share/teamswork-ticketing-mcp/TeamsWork.Ticketing.Mcp`
