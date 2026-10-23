@@ -1,7 +1,10 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
 using Azure.Identity;
+using Azure.Monitor.OpenTelemetry.Exporter;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -11,8 +14,11 @@ using ModelContextProtocol.AspNetCore;
 using ModelContextProtocol.AspNetCore.Authentication;
 using ModelContextProtocol.Authentication;
 using ModelContextProtocol.Protocol;
+using OpenTelemetry;
+using OpenTelemetry.Metrics;
 using TeamsWork.Ticketing.Mcp.Auth;
 using TeamsWork.Ticketing.Mcp.Configuration;
+using TeamsWork.Ticketing.Mcp.Observability;
 using TeamsWork.Ticketing.Mcp.Ticketing;
 using TeamsWork.Ticketing.Mcp.Tools;
 
@@ -67,6 +73,7 @@ static async Task RunStdioAsync(string[] args)
     UserSecretsConfiguration.Add(builder.Configuration, Assembly.GetExecutingAssembly());
     Program.UserSecretsLoaded = true;
     AddKeyVaultIfConfigured(builder.Configuration);
+    AddTelemetry(builder.Services, builder.Configuration);
     AddTicketingServices(builder.Services, builder.Configuration, requireServiceAccount: true);
     builder.Services.AddSingleton<IActingUserProvider, ServiceAccountActingUserProvider>();
 
@@ -148,8 +155,12 @@ static async Task RunHttpAsync(string[] args)
     }
 
     AddKeyVaultIfConfigured(builder.Configuration);
+    AddTelemetry(builder.Services, builder.Configuration);
     AddTicketingServices(builder.Services, builder.Configuration, requireServiceAccount: authMode == AuthMode.Local);
     builder.Services.AddHealthChecks();
+    // This service is stateless and stores no authentication cookies. Avoid creating an ephemeral key ring on disk
+    // inside the container, and the repeated warning that the keys won't survive a restart.
+    builder.Services.AddDataProtection().UseEphemeralDataProtectionProvider();
 
     // Kestrel's default body limit is about 30 MB; a tool call needs a few kilobytes. Read once every configuration
     // source (user secrets, Key Vault) has been added, like the other settings.
@@ -186,6 +197,30 @@ static async Task RunHttpAsync(string[] args)
     }
 
     WebApplication app = builder.Build();
+    app.Use(async (context, next) =>
+    {
+        long started = Stopwatch.GetTimestamp();
+        try
+        {
+            await next(context);
+            ServiceMetrics.RecordHttpRequest(
+                context.Request.Method,
+                ServiceMetrics.RouteFor(context.Request.Path),
+                context.Response.StatusCode,
+                errorType: null,
+                durationMs: Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        }
+        catch
+        {
+            ServiceMetrics.RecordHttpRequest(
+                context.Request.Method,
+                ServiceMetrics.RouteFor(context.Request.Path),
+                statusCode: null,
+                errorType: "exception",
+                durationMs: Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            throw;
+        }
+    });
     app.Use((ctx, next) => RequestLimits.RejectOversizedBodiesAsync(ctx, next, maxRequestBodyBytes));
     if (!string.IsNullOrWhiteSpace(app.Configuration[$"{TicketingOptions.SectionName}:{nameof(TicketingOptions.UploadRoot)}"]))
     {
@@ -303,6 +338,10 @@ static bool IsLocalOrigin(string origin, int port) =>
 static EntraOptions ConfigureEntraMode(WebApplicationBuilder builder)
 {
     EntraOptions entra = builder.Configuration.GetSection(EntraOptions.SectionName).Get<EntraOptions>() ?? new EntraOptions();
+    IReadOnlySet<string> acceptedClientIds = EntraOptions.ParseClientApplicationIds(
+        entra.AcceptedClientApplicationIds, nameof(EntraOptions.AcceptedClientApplicationIds));
+    IReadOnlySet<string> blockedClientIds = EntraOptions.ParseClientApplicationIds(
+        entra.BlockedClientApplicationIds, nameof(EntraOptions.BlockedClientApplicationIds));
     // A multi-tenant authority would make the issuer check accept tokens from any Entra tenant; only the audience
     // would then stand between this server and every other organization's users.
     if (entra.TenantId?.Trim().ToLowerInvariant() is "common" or "organizations" or "consumers")
@@ -382,8 +421,19 @@ static EntraOptions ConfigureEntraMode(WebApplicationBuilder builder)
         .AddPolicy("McpCaller", p => p
             .RequireAuthenticatedUser()
             .RequireAssertion(ctx =>
-                ClaimsActingUserResolver.HasScope(ctx.User, entra.RequiredScope) ||
-                ClaimsActingUserResolver.HasAppRole(ctx.User, entra.RequiredAppRole)));
+            {
+                bool hasPermission =
+                    ClaimsActingUserResolver.HasScope(ctx.User, entra.RequiredScope) ||
+                    ClaimsActingUserResolver.HasAppRole(ctx.User, entra.RequiredAppRole);
+                if (!hasPermission)
+                {
+                    return false;
+                }
+
+                string? clientId = ClaimsActingUserResolver.ClientApplicationId(ctx.User);
+                return (acceptedClientIds.Count == 0 || clientId is not null && acceptedClientIds.Contains(clientId)) &&
+                       (clientId is null ? blockedClientIds.Count == 0 : !blockedClientIds.Contains(clientId));
+            }));
 
     return entra;
 }
@@ -457,6 +507,19 @@ static void AddKeyVaultIfConfigured(IConfigurationManager configuration)
     }
 
     configuration.AddAzureKeyVault(uri, new DefaultAzureCredential());
+}
+
+static void AddTelemetry(IServiceCollection services, IConfiguration configuration)
+{
+    string? connectionString = configuration["ApplicationInsights:ConnectionString"];
+    if (!string.IsNullOrWhiteSpace(connectionString))
+    {
+        OpenTelemetry.Metrics.MeterProvider provider = OpenTelemetry.Sdk.CreateMeterProviderBuilder()
+            .AddMeter(ServiceMetrics.MeterName)
+            .AddAzureMonitorMetricExporter(options => options.ConnectionString = connectionString)
+            .Build();
+        services.AddSingleton(provider);
+    }
 }
 
 static void AddTicketingServices(IServiceCollection services, IConfiguration configuration, bool requireServiceAccount)

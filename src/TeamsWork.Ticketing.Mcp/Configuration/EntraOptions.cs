@@ -24,6 +24,15 @@ public sealed class EntraOptions
     public string RequiredAppRole { get; set; } = "Ticketing.ReadWrite";
 
     /// <summary>
+    /// Comma-separated client application IDs allowed to call this API. Empty allows any client; blocked IDs still
+    /// take precedence. Both <c>azp</c> (v2) and <c>appid</c> (v1) token claims are checked.
+    /// </summary>
+    public string? AcceptedClientApplicationIds { get; set; }
+
+    /// <summary>Comma-separated client application IDs always refused, even if they are also accepted.</summary>
+    public string? BlockedClientApplicationIds { get; set; }
+
+    /// <summary>
     /// Public base URL of this server (for example <c>https://taas-mcp.example.azurecontainerapps.io</c>). Used to
     /// build the OAuth protected resource metadata. When empty the value is derived from the incoming request.
     /// </summary>
@@ -38,4 +47,21 @@ public sealed class EntraOptions
     public string FullScope => $"{ApplicationIdUri}/{RequiredScope}";
 
     public string Authority => $"{Instance.TrimEnd('/')}/{TenantId}/v2.0";
+
+    public static IReadOnlySet<string> ParseClientApplicationIds(string? value, string settingName)
+    {
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string entry in (value ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!Guid.TryParseExact(entry, "D", out Guid id) || id == Guid.Empty)
+            {
+                throw new StartupConfigurationException(
+                    $"{SectionName}:{settingName} must contain comma-separated client application IDs in GUID format.");
+            }
+
+            ids.Add(id.ToString("D"));
+        }
+
+        return ids;
+    }
 }

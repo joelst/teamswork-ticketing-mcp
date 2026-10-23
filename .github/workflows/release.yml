@@ -175,6 +175,46 @@ jobs:
           echo "$RESPONSE"
           echo "$RESPONSE" | grep -q "\"version\":\"$VERSION\""
 
+      # Optional Developer ID signing and notarization. When enabled, all Apple credentials must be present in the
+      # release environment; otherwise the macOS build remains unsigned as before.
+      - name: Sign and notarize macOS executable
+        if: runner.os == 'macOS' && vars.MACOS_SIGNING_ENABLED == 'true'
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [ -z "${!name}" ]; then echo "::error::Missing required macOS signing secret: $name"; exit 1; fi
+          done
+
+          KEYCHAIN="$RUNNER_TEMP/taas-signing.keychain-db"
+          CERTIFICATE="$RUNNER_TEMP/taas-signing.p12"
+          SUBMISSION="$RUNNER_TEMP/$STAGE.zip"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 24)
+          trap 'security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true; rm -f "$CERTIFICATE" "$SUBMISSION"' EXIT
+
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 -D > "$CERTIFICATE"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERTIFICATE" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN"
+
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | awk -F '"' '/Developer ID Application:/{print $2; exit}')
+          if [ -z "$IDENTITY" ]; then echo "::error::The signing certificate is not a Developer ID Application certificate."; exit 1; fi
+          BINARY="stage/$STAGE/TeamsWork.Ticketing.Mcp"
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" "$BINARY"
+          codesign --verify --strict "$BINARY"
+
+          ditto -c -k --keepParent "stage/$STAGE" "$SUBMISSION"
+          xcrun notarytool submit "$SUBMISSION" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
+
       - name: Archive
         run: |
           mkdir -p dist

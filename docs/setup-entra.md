@@ -33,6 +33,21 @@ What it configures on the server app:
 - Azure CLI pre-authorized for the scope, so `az login` users can run the stdio transport without a consent prompt.
 - Service principal with **assignment required**, so only assigned users, groups, or identities can obtain tokens.
 
+## Restrict calling client applications
+
+Entra validates who issued the token and what API audience and permission it carries. By default, the server does not
+further restrict which client application obtained a delegated token. To allow only approved clients, configure the
+server's `Entra:AcceptedClientApplicationIds` as a comma-separated list of the clients' application (client) IDs.
+For hosted deployments, set the pipeline variable `acceptedClientApplicationIds`; for local HTTP deployments, set
+the environment variable `Entra__AcceptedClientApplicationIds`. Use the client IDs for the applications that actually
+request tokens (for example, the Cowork OAuth client and the Copilot Studio connector), not the server app ID.
+
+`Entra:BlockedClientApplicationIds` is an optional comma-separated denylist; it overrides the accepted list. Both
+settings accept GUIDs, are checked against the Entra v2 `azp` or v1 `appid` claim, and fail startup if any value is
+not a GUID. An empty accepted list allows all otherwise-authorized clients; an empty blocked list denies none. The
+hosted values are passed through `infra/app.bicep`. Configure and verify the allowlist before enforcing it, or
+legitimate integrations will receive HTTP 403.
+
 ## 2. Assign who may use the server
 
 Entra admin center → Enterprise applications → **taas-mcp-server** → Users and groups → add the users/groups who

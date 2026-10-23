@@ -7,6 +7,7 @@ using System.Text.Json.Serialization;
 using System.Threading.RateLimiting;
 using Microsoft.Extensions.Options;
 using TeamsWork.Ticketing.Mcp.Configuration;
+using TeamsWork.Ticketing.Mcp.Observability;
 using TeamsWork.Ticketing.Mcp.Ticketing.Models;
 
 namespace TeamsWork.Ticketing.Mcp.Ticketing;
@@ -369,19 +370,34 @@ public sealed class TicketingClient
         try
         {
             response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attemptTimeout.Token);
+            ServiceMetrics.RecordUpstreamRequest(
+                method,
+                MetricOperation(path),
+                (int)response.StatusCode,
+                errorType: null,
+                durationMs: ServiceMetrics.ElapsedMilliseconds(_timeProvider, started));
         }
         catch (HttpRequestException ex) when (attempt < MaxAttempts && (idempotent || IsPreSendFailure(ex)))
         {
+            ServiceMetrics.RecordUpstreamRequest(method, MetricOperation(path), statusCode: null, errorType: "network_error", durationMs: ServiceMetrics.ElapsedMilliseconds(_timeProvider, started));
+            ServiceMetrics.RecordUpstreamRetry(method, MetricOperation(path));
             _logger.LogWarning("Ticketing API {Method} /{Path} failed to connect (attempt {Attempt}); retrying. {Error}", method, path, attempt, ex.HttpRequestError);
             return (false, default, Backoff(attempt, null));
         }
         catch (HttpRequestException ex)
         {
+            ServiceMetrics.RecordUpstreamRequest(method, MetricOperation(path), statusCode: null, errorType: "network_error", durationMs: ServiceMetrics.ElapsedMilliseconds(_timeProvider, started));
             throw Failure(idempotent, mayHaveBeenProcessed: !IsPreSendFailure(ex), null, $"Could not reach the Ticketing API ({ex.HttpRequestError}).", ex);
         }
         catch (TaskCanceledException ex) when (!exchange.IsCancellationRequested)
         {
+            ServiceMetrics.RecordUpstreamRequest(method, MetricOperation(path), statusCode: null, errorType: "timeout", durationMs: ServiceMetrics.ElapsedMilliseconds(_timeProvider, started));
             throw Failure(idempotent, mayHaveBeenProcessed: true, null, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
+        }
+        catch (OperationCanceledException)
+        {
+            ServiceMetrics.RecordUpstreamRequest(method, MetricOperation(path), statusCode: null, errorType: "cancelled", durationMs: ServiceMetrics.ElapsedMilliseconds(_timeProvider, started));
+            throw;
         }
 
         using (response)
@@ -391,6 +407,7 @@ public sealed class TicketingClient
 
             if (IsRetryable(response.StatusCode, idempotent) && attempt < MaxAttempts)
             {
+                ServiceMetrics.RecordUpstreamRetry(method, MetricOperation(path));
                 _logger.LogWarning("Ticketing API {Method} /{Path} returned {Status} (attempt {Attempt}); retrying.", method, path, (int)response.StatusCode, attempt);
                 return (false, default, Backoff(attempt, response.Headers.RetryAfter));
             }
@@ -415,6 +432,8 @@ public sealed class TicketingClient
                 // An answer too large to read, after the request was received.
                 throw TicketingApiException.Unknown(response.StatusCode, ex.Message, ex);
             }
+
+            ServiceMetrics.RecordUpstreamResponseBytes(MetricOperation(path), payload.Length);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -450,6 +469,22 @@ public sealed class TicketingClient
 
             return (true, result, default);
         }
+    }
+
+    private static string MetricOperation(string path)
+    {
+        string[] segments = path.Split('/');
+        if (path.StartsWith("tickets/activity/", StringComparison.Ordinal))
+        {
+            return "activity.attachments";
+        }
+
+        if (segments.Length >= 3 && segments[0] == "tickets")
+        {
+            return $"tickets.{segments[2]}";
+        }
+
+        return segments[0];
     }
 
     /// <summary>

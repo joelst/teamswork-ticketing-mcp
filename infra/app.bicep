@@ -52,6 +52,15 @@ param serviceAccountEmail string = ''
 @description('Comma-separated email domains allowed for people outside the assignee list (requestors, people fields), e.g. contoso.com. Empty allows any domain.')
 param externalEmailDomains string = ''
 
+@description('Comma-separated Entra client application IDs permitted to call the MCP endpoint. Empty allows any client.')
+param acceptedClientApplicationIds string = ''
+
+@description('Comma-separated Entra client application IDs denied access, even if also accepted.')
+param blockedClientApplicationIds string = ''
+
+@description('Workspace-based Application Insights connection string for low-cardinality custom metrics. Empty disables export.')
+param applicationInsightsConnectionString string = ''
+
 @minValue(0)
 @maxValue(10)
 param minReplicas int = 0
@@ -83,6 +92,17 @@ var serviceAccountEnv = empty(serviceAccountId) ? [] : [
 var externalEmailDomainsEnv = empty(externalEmailDomains) ? [] : [
   { name: 'Ticketing__ExternalEmailDomains', value: externalEmailDomains }
 ]
+
+var clientApplicationIdsEnv = concat(
+  empty(acceptedClientApplicationIds) ? [] : [
+    { name: 'Entra__AcceptedClientApplicationIds', value: acceptedClientApplicationIds }
+  ],
+  empty(blockedClientApplicationIds) ? [] : [
+    { name: 'Entra__BlockedClientApplicationIds', value: blockedClientApplicationIds }
+  ],
+  empty(applicationInsightsConnectionString) ? [] : [
+    { name: 'ApplicationInsights__ConnectionString', value: applicationInsightsConnectionString }
+  ])
 
 resource app 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName
@@ -145,7 +165,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'Entra__TenantId', value: entraTenantId }
             { name: 'Entra__ClientId', value: entraClientId }
             { name: 'Entra__PublicBaseUrl', value: publicBaseUrl }
-          ], serviceAccountEnv, externalEmailDomainsEnv)
+          ], serviceAccountEnv, externalEmailDomainsEnv, clientApplicationIdsEnv)
           probes: [
             {
               type: 'Startup'

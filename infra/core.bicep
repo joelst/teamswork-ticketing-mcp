@@ -79,6 +79,17 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   }
 }
 
+resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
+  name: '${base}-appi'
+  location: location
+  kind: 'web'
+  tags: tags
+  properties: {
+    Application_Type: 'web'
+    WorkspaceResourceId: logAnalytics.id
+  }
+}
+
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: identityName
   location: location
@@ -175,6 +186,7 @@ resource containerAppsEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
 }
 
 output logAnalyticsWorkspaceId string = logAnalytics.id
+output applicationInsightsConnectionString string = applicationInsights.properties.ConnectionString
 output identityId string = identity.id
 output identityPrincipalId string = identity.properties.principalId
 output identityClientId string = identity.properties.clientId

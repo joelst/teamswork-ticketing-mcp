@@ -85,18 +85,20 @@ public sealed class McpServerFactory : WebApplicationFactory<Program>
         });
     }
 
-    public static string UserToken(string scope = "access_as_user") => CreateToken(new Dictionary<string, object>
+    public static string UserToken(string scope = "access_as_user", string clientId = "44444444-4444-4444-4444-444444444444") => CreateToken(new Dictionary<string, object>
     {
         ["scp"] = scope,
+        ["azp"] = clientId,
         ["oid"] = "user-oid-1",
         ["name"] = "Pat Example",
         ["preferred_username"] = "pat@example.test",
         ["tid"] = TenantId,
     });
 
-    public static string AppToken(string role = "Ticketing.ReadWrite") => CreateToken(new Dictionary<string, object>
+    public static string AppToken(string role = "Ticketing.ReadWrite", string clientId = "55555555-5555-5555-5555-555555555555") => CreateToken(new Dictionary<string, object>
     {
         ["roles"] = new[] { role },
+        ["appid"] = clientId,
         ["oid"] = "sp-oid-1",
         ["tid"] = TenantId,
     });
@@ -193,6 +195,66 @@ public sealed class AuthIntegrationTests : IClassFixture<McpServerFactory>
         using HttpResponseMessage r = await http.PostAsync("/mcp", JsonRpc("tools/list"), Ct);
 
         Assert.Equal(HttpStatusCode.Forbidden, r.StatusCode);
+    }
+
+    [Fact]
+    public async Task Accepted_client_id_allows_configured_client_and_refuses_others()
+    {
+        await using var factory = new McpServerFactory
+        {
+            Settings = { ["Entra:AcceptedClientApplicationIds"] = "44444444-4444-4444-4444-444444444444" },
+        };
+        using HttpClient http = factory.CreateClient();
+        http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer", McpServerFactory.UserToken(clientId: "44444444-4444-4444-4444-444444444444"));
+        using HttpResponseMessage accepted = await http.PostAsync("/mcp", JsonRpc("tools/list"), Ct);
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer", McpServerFactory.AppToken(clientId: "44444444-4444-4444-4444-444444444444"));
+        using HttpResponseMessage acceptedApp = await http.PostAsync("/mcp", JsonRpc("tools/list"), Ct);
+        Assert.Equal(HttpStatusCode.OK, acceptedApp.StatusCode);
+
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer", McpServerFactory.UserToken(clientId: "66666666-6666-6666-6666-666666666666"));
+        using HttpResponseMessage refused = await http.PostAsync("/mcp", JsonRpc("tools/list"), Ct);
+        Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
+    }
+
+    [Fact]
+    public async Task Blocked_client_id_overrides_accepted_client_id_for_v1_and_v2_tokens()
+    {
+        const string blocked = "55555555-5555-5555-5555-555555555555";
+        await using var factory = new McpServerFactory
+        {
+            Settings =
+            {
+                ["Entra:AcceptedClientApplicationIds"] = blocked,
+                ["Entra:BlockedClientApplicationIds"] = blocked,
+            },
+        };
+        using HttpClient http = factory.CreateClient();
+        foreach (string token in new[] { McpServerFactory.UserToken(clientId: blocked), McpServerFactory.AppToken(clientId: blocked) })
+        {
+            http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            using HttpResponseMessage refused = await http.PostAsync("/mcp", JsonRpc("tools/list"), Ct);
+            Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task Invalid_client_id_configuration_fails_startup_without_echoing_value()
+    {
+        const string invalid = "not-a-guid";
+        await using var factory = new McpServerFactory { Settings = { ["Entra:AcceptedClientApplicationIds"] = invalid } };
+
+        Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+
+        Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
+        Assert.Contains("Entra:AcceptedClientApplicationIds", report, StringComparison.Ordinal);
+        Assert.DoesNotContain(invalid, report, StringComparison.Ordinal);
     }
 
     [Fact]
