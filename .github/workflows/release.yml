@@ -194,8 +194,9 @@ jobs:
           KEYCHAIN="$RUNNER_TEMP/taas-signing.keychain-db"
           CERTIFICATE="$RUNNER_TEMP/taas-signing.p12"
           SUBMISSION="$RUNNER_TEMP/$STAGE.zip"
+          NOTARIZATION="$RUNNER_TEMP/notarization.json"
           KEYCHAIN_PASSWORD=$(openssl rand -hex 24)
-          trap 'security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true; rm -f "$CERTIFICATE" "$SUBMISSION"' EXIT
+          trap 'security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true; rm -f "$CERTIFICATE" "$SUBMISSION" "$NOTARIZATION"' EXIT
 
           printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 -D > "$CERTIFICATE"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
@@ -213,7 +214,12 @@ jobs:
 
           ditto -c -k --keepParent "stage/$STAGE" "$SUBMISSION"
           xcrun notarytool submit "$SUBMISSION" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait --output-format json > "$NOTARIZATION"
+          cat "$NOTARIZATION"
+          if ! /usr/bin/plutil -extract status raw -o - "$NOTARIZATION" | grep -qx 'Accepted'; then
+            echo "::error::Apple notarization did not return status Accepted."
+            exit 1
+          fi
 
       - name: Smoke-test signed macOS executable
         if: runner.os == 'macOS' && vars.MACOS_SIGNING_ENABLED == 'true'
