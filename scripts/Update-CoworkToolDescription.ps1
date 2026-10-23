@@ -24,11 +24,18 @@ $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.Re
 $psi.UseShellExecute = $false
 # Placeholders only: listing tools makes no API call, and the server needs these to start. Any Ticketing setting in
 # this shell's environment is removed so it can't add or hide a tool.
-foreach ($name in @($psi.Environment.Keys)) { if ($name -like 'Ticketing*') { [void]$psi.Environment.Remove($name) } }
+foreach ($name in @($psi.Environment.Keys)) {
+    if ($name -like 'Ticketing*' -or $name -like 'KeyVault*' -or $name -like 'ApplicationInsights*') {
+        [void]$psi.Environment.Remove($name)
+    }
+}
 $psi.Environment['Ticketing__ApiKey'] = 'placeholder-for-tools-list'
 $psi.Environment['Ticketing__ServiceAccount__Id'] = '00000000-0000-0000-0000-0000000000c1'
 $psi.Environment['Ticketing__ServiceAccount__Name'] = 'Tools List'
 $psi.Environment['Ticketing__ServiceAccount__Email'] = 'tools-list@example.test'
+$psi.Environment['Ticketing__UploadRoot'] = ''
+$psi.Environment['KeyVault__Uri'] = ''
+$psi.Environment['ApplicationInsights__ConnectionString'] = ''
 
 $process = [System.Diagnostics.Process]::Start($psi)
 try {

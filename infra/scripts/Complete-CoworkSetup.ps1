@@ -71,7 +71,7 @@ function Invoke-Az {
 function Invoke-GraphPatch([string] $Uri, $Body) {
     $tmp = New-TemporaryFile
     try {
-        ($Body | ConvertTo-Json -Depth 10) | Set-Content -Path $tmp -Encoding utf8
+        [IO.File]::WriteAllText($tmp.FullName, ($Body | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
         Invoke-Az @('rest', '--method', 'PATCH', '--uri', $Uri, '--headers', 'Content-Type=application/json', '--body', "@$tmp") | Out-Null
     }
     finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
@@ -80,7 +80,7 @@ function Invoke-GraphPatch([string] $Uri, $Body) {
 function Invoke-GraphPost([string] $Uri, $Body) {
     $tmp = New-TemporaryFile
     try {
-        ($Body | ConvertTo-Json -Depth 10) | Set-Content -Path $tmp -Encoding utf8
+        [IO.File]::WriteAllText($tmp.FullName, ($Body | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
         Invoke-Az @('rest', '--method', 'POST', '--uri', $Uri, '--headers', 'Content-Type=application/json', '--body', "@$tmp") | Out-Null
     }
     finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
@@ -215,10 +215,10 @@ foreach ($s in $secrets | Where-Object { $_.endDateTime }) {
     if ($days -lt 30) { Write-Warning "Secret '$($s.displayName)' on $ClientAppName expires in $days days ($($s.endDateTime))." }
 }
 if ($CreateSecret -and $client) {
-    # Tried before the secret exists: if the clipboard fails afterwards, the secret is made but can't be read.
-    try { Set-Clipboard -Value ' ' -ErrorAction Stop }
-    catch { throw "The clipboard isn't available here ($($_.Exception.Message)), and the secret is never printed. Create it in the Entra admin center instead." }
     if ($PSCmdlet.ShouldProcess($ClientAppName, "Add a client secret valid for $SecretMonths months")) {
+        # Tried before the secret exists: if the clipboard fails afterwards, the secret is made but can't be read.
+        try { Set-Clipboard -Value ' ' -ErrorAction Stop }
+        catch { throw "The clipboard isn't available here ($($_.Exception.Message)), and the secret is never printed. Create it in the Entra admin center instead." }
         $end = (Get-Date).AddMonths($SecretMonths).ToString('yyyy-MM-dd')
         # Its own call, not Invoke-Az: warnings on stderr mustn't mix into the value, and a failure's text isn't shown
         # in case it carries the secret.

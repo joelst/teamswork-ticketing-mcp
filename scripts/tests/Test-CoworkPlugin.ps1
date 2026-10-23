@@ -103,12 +103,21 @@ $describedTools = @((Get-Content -Raw -Encoding UTF8 (Join-Path $plugin 'cowork/
 Check "the tool description lists the hosted tools ($($sourceTools.Count))" (($sourceTools -join ',') -eq ($describedTools -join ','))
 
 # ---- Expand-ManifestTemplate ---------------------------------------------------------------------------------------
-$expanded = Expand-ManifestTemplate '{"a":"{{X}}","b":"{{Y}}"}' @{ X = 'https://example.test/mcp'; Y = 'Quote " and \ back' }
+$expanded = Expand-ManifestTemplate '{"a":"{{X}}","b":"{{Y}}","c":"{{Z}}"}' @{
+    X = 'https://example.test/mcp'
+    Y = 'Quote " and \ back'
+    Z = 'Contoso "Support"'
+}
 $parsed = $expanded | ConvertFrom-Json
 Check 'placeholders are filled in' ($parsed.a -eq 'https://example.test/mcp')
 Check 'a value is JSON-escaped, so quotes and backslashes survive' ($parsed.b -eq 'Quote " and \ back')
+Check 'a developer name ending with a quote remains valid JSON' ($parsed.c -eq 'Contoso "Support"')
 $threw = $false; try { Expand-ManifestTemplate '{"a":"{{UNKNOWN}}"}' @{} } catch { $threw = $true }
 Check 'an unknown placeholder is refused' $threw
+$threw = $false; try { Expand-ManifestTemplate '{"a":"{{lowercase1}}"}' @{} } catch { $threw = $true }
+Check 'a placeholder with an unsupported name is refused' $threw
+$threw = $false; try { Expand-ManifestTemplate '{"a":"{{BROKEN"}' @{} } catch { $threw = $true }
+Check 'a malformed placeholder is refused' $threw
 
 # ---- A built package -------------------------------------------------------------------------------------------------
 $out = Join-Path ([IO.Path]::GetTempPath()) "cowork-build-$([guid]::NewGuid().ToString('N'))"

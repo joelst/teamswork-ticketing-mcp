@@ -19,6 +19,7 @@ The custom metrics are:
 | `ticketing.upstream.requests` | Individual Ticketing API attempts, including retries |
 | `ticketing.upstream.duration` | Time to upstream response headers, in milliseconds |
 | `ticketing.upstream.retries` | Retries initiated after a connection failure or retryable response |
+| `ticketing.upstream.failures` | Failed upstream attempts, including transport errors, timeouts, error responses, and attempts that are retried |
 | `ticketing.upstream.response.size` | Read upstream response bytes |
 
 Example query in Application Insights Logs:
@@ -86,4 +87,6 @@ repository variable `MACOS_SIGNING_ENABLED=true` and configure these secrets in 
 `APPLE_CERTIFICATE_P12_BASE64`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, and
 `APPLE_APP_SPECIFIC_PASSWORD`. Use a Developer ID Application certificate exported as base64-encoded PKCS#12.
 When enabled, a missing value or an unsuitable certificate fails the macOS release job rather than silently
-publishing an unsigned build. When disabled, the release remains unsigned.
+publishing an unsigned build. When disabled, the release remains unsigned. The workflow signs the apphost with the
+.NET runtime entitlements in `scripts/macos-entitlements.plist`, notarizes the stage, and smoke-tests the signed
+executable before archiving it.

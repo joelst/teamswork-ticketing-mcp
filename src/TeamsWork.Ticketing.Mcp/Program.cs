@@ -142,7 +142,7 @@ static async Task RunHttpAsync(string[] args)
     // Whether the files are trusted depends on the mode, so the mode can't come from them: an appsettings.json left
     // beside the executable could otherwise switch it to unauthenticated local mode (or stop startup).
     AuthMode authMode;
-    using (ConfigurationRoot trusted =SettingsFiles.Without(builder.Configuration))
+    using (ConfigurationRoot trusted = SettingsFiles.Without(builder.Configuration))
     {
         authMode = AuthModeResolver.Resolve(trusted, args);
     }
@@ -514,11 +514,10 @@ static void AddTelemetry(IServiceCollection services, IConfiguration configurati
     string? connectionString = configuration["ApplicationInsights:ConnectionString"];
     if (!string.IsNullOrWhiteSpace(connectionString))
     {
-        OpenTelemetry.Metrics.MeterProvider provider = OpenTelemetry.Sdk.CreateMeterProviderBuilder()
-            .AddMeter(ServiceMetrics.MeterName)
-            .AddAzureMonitorMetricExporter(options => options.ConnectionString = connectionString)
-            .Build();
-        services.AddSingleton(provider);
+        services.AddOpenTelemetry()
+            .WithMetrics(metrics => metrics
+                .AddMeter(ServiceMetrics.MeterName)
+                .AddAzureMonitorMetricExporter(options => options.ConnectionString = connectionString));
     }
 }
 

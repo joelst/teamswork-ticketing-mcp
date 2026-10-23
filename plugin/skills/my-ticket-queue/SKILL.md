@@ -18,8 +18,8 @@ Gives the user a prioritised view of their own tickets. This skill only reads; f
 
 ## Tools this uses
 
-From the TeamsWork Ticketing connector: `whoami`, `list_my_tickets`, `list_sla_risk`, `get_ticket_context`, and
-`count_tickets` for team-wide questions.
+From the TeamsWork Ticketing connector: `whoami`, `list_my_tickets`, `list_sla_risk`, `get_ticket`,
+`get_ticket_context`, and `count_tickets` for team-wide questions.
 
 ## Workflow
 
@@ -33,10 +33,14 @@ From the TeamsWork Ticketing connector: `whoami`, `list_my_tickets`, `list_sla_r
    - If `truncated` is true, the server stopped reading early. Say so, and offer to continue with the
      `createdBefore` date its `hint` names.
 
-3. **Find the SLA risks.** Call `list_sla_risk` and keep the tickets that are also in the user's list.
+3. **Check SLA flags.** Call `list_sla_risk` to find likely risks, then match those results to the user's tickets.
    - `isFrtBreached` or `isRtBreached` means the first-response or resolution target has already passed.
    - `isFrtEscalated` or `isRtEscalated` means the ticket was escalated for it.
    - If the hint says SLA tracking is turned off, say that instead of reporting nothing at risk.
+   - This scan is instance-wide, newest first, and may be limited or truncated. Absence from its results does **not**
+     mean a user's ticket is safe. For every ticket not returned, call `get_ticket` and check its SLA flags directly.
+     Report `OK` only when all four flags are explicitly false; if the scan is truncated or the flags are missing or
+     unknown, report SLA status as **not verified** and say so.
 
 4. **Look closer only where it matters.** For the top few tickets (breached first, then Urgent and Important, then
    the oldest), call `get_ticket_context` to see the latest activity: is it waiting on the user, or on the requestor?

@@ -82,7 +82,7 @@ function Update-Application {
         param($body)
         $tmp = New-TemporaryFile
         try {
-            ($body | ConvertTo-Json -Depth 10) | Set-Content -Path $tmp -Encoding utf8
+            [IO.File]::WriteAllText($tmp.FullName, ($body | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
             Invoke-Az @('rest', '--method', 'PATCH', '--uri', "https://graph.microsoft.com/v1.0/applications/$ObjectId", '--headers', 'Content-Type=application/json', '--body', "@$tmp") | Out-Null
         }
         finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }

@@ -380,6 +380,7 @@ public sealed class TicketingClient
         catch (HttpRequestException ex) when (attempt < MaxAttempts && (idempotent || IsPreSendFailure(ex)))
         {
             ServiceMetrics.RecordUpstreamRequest(method, MetricOperation(path), statusCode: null, errorType: "network_error", durationMs: ServiceMetrics.ElapsedMilliseconds(_timeProvider, started));
+            ServiceMetrics.RecordUpstreamFailure(MetricOperation(path), statusCode: null, "network_error");
             ServiceMetrics.RecordUpstreamRetry(method, MetricOperation(path));
             _logger.LogWarning("Ticketing API {Method} /{Path} failed to connect (attempt {Attempt}); retrying. {Error}", method, path, attempt, ex.HttpRequestError);
             return (false, default, Backoff(attempt, null));
@@ -387,87 +388,111 @@ public sealed class TicketingClient
         catch (HttpRequestException ex)
         {
             ServiceMetrics.RecordUpstreamRequest(method, MetricOperation(path), statusCode: null, errorType: "network_error", durationMs: ServiceMetrics.ElapsedMilliseconds(_timeProvider, started));
+            ServiceMetrics.RecordUpstreamFailure(MetricOperation(path), statusCode: null, "network_error");
             throw Failure(idempotent, mayHaveBeenProcessed: !IsPreSendFailure(ex), null, $"Could not reach the Ticketing API ({ex.HttpRequestError}).", ex);
         }
         catch (TaskCanceledException ex) when (!exchange.IsCancellationRequested)
         {
             ServiceMetrics.RecordUpstreamRequest(method, MetricOperation(path), statusCode: null, errorType: "timeout", durationMs: ServiceMetrics.ElapsedMilliseconds(_timeProvider, started));
+            ServiceMetrics.RecordUpstreamFailure(MetricOperation(path), statusCode: null, "timeout");
             throw Failure(idempotent, mayHaveBeenProcessed: true, null, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
         }
         catch (OperationCanceledException)
         {
             ServiceMetrics.RecordUpstreamRequest(method, MetricOperation(path), statusCode: null, errorType: "cancelled", durationMs: ServiceMetrics.ElapsedMilliseconds(_timeProvider, started));
+            ServiceMetrics.RecordUpstreamFailure(MetricOperation(path), statusCode: null, "cancelled");
             throw;
         }
 
-        using (response)
+        try
         {
-            TimeSpan elapsed = _timeProvider.GetElapsedTime(started);
-            _logger.LogDebug("Ticketing API {Method} /{Path} -> {Status} in {ElapsedMs} ms", method, path, (int)response.StatusCode, (long)elapsed.TotalMilliseconds);
+            using (response)
+            {
+                TimeSpan elapsed = _timeProvider.GetElapsedTime(started);
+                _logger.LogDebug("Ticketing API {Method} /{Path} -> {Status} in {ElapsedMs} ms", method, path, (int)response.StatusCode, (long)elapsed.TotalMilliseconds);
 
-            if (IsRetryable(response.StatusCode, idempotent) && attempt < MaxAttempts)
-            {
-                ServiceMetrics.RecordUpstreamRetry(method, MetricOperation(path));
-                _logger.LogWarning("Ticketing API {Method} /{Path} returned {Status} (attempt {Attempt}); retrying.", method, path, (int)response.StatusCode, attempt);
-                return (false, default, Backoff(attempt, response.Headers.RetryAfter));
-            }
+                if (IsRetryable(response.StatusCode, idempotent) && attempt < MaxAttempts)
+                {
+                    ServiceMetrics.RecordUpstreamFailure(
+                        MetricOperation(path),
+                        (int)response.StatusCode,
+                        (int)response.StatusCode >= 500 ? "server_error" : "client_error");
+                    ServiceMetrics.RecordUpstreamRetry(method, MetricOperation(path));
+                    _logger.LogWarning("Ticketing API {Method} /{Path} returned {Status} (attempt {Attempt}); retrying.", method, path, (int)response.StatusCode, attempt);
+                    return (false, default, Backoff(attempt, response.Headers.RetryAfter));
+                }
 
-            ReadOnlyMemory<byte> payload;
-            try
-            {
-                payload = await ReadBodyAsync(response.Content, _options.MaxResponseBytes, attemptTimeout.Token);
-            }
-            catch (OperationCanceledException ex) when (!exchange.IsCancellationRequested)
-            {
-                // The headers arrived, so the API received the request.
-                throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
-            }
-            catch (Exception ex) when (ex is IOException or HttpRequestException)
-            {
-                // The connection dropped while the answer was arriving: the request was received, and may have been done.
-                throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The connection to the Ticketing API dropped while its answer was arriving.", ex);
-            }
-            catch (TicketingApiException ex) when (!idempotent && !ex.OutcomeUnknown)
-            {
-                // An answer too large to read, after the request was received.
-                throw TicketingApiException.Unknown(response.StatusCode, ex.Message, ex);
-            }
+                ReadOnlyMemory<byte> payload;
+                try
+                {
+                    payload = await ReadBodyAsync(response.Content, _options.MaxResponseBytes, attemptTimeout.Token);
+                }
+                catch (OperationCanceledException ex) when (!exchange.IsCancellationRequested)
+                {
+                    // The headers arrived, so the API received the request.
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
+                }
+                catch (OperationCanceledException) when (exchange.IsCancellationRequested)
+                {
+                    ServiceMetrics.RecordUpstreamFailure(MetricOperation(path), (int)response.StatusCode, "cancelled");
+                    throw;
+                }
+                catch (Exception ex) when (ex is IOException or HttpRequestException)
+                {
+                    // The connection dropped while the answer was arriving: the request was received, and may have been done.
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The connection to the Ticketing API dropped while its answer was arriving.", ex);
+                }
+                catch (TicketingApiException ex) when (!idempotent && !ex.OutcomeUnknown)
+                {
+                    // An answer too large to read, after the request was received.
+                    throw TicketingApiException.Unknown(response.StatusCode, ex.Message, ex);
+                }
 
-            ServiceMetrics.RecordUpstreamResponseBytes(MetricOperation(path), payload.Length);
+                ServiceMetrics.RecordUpstreamResponseBytes(MetricOperation(path), payload.Length);
 
-            if (!response.IsSuccessStatusCode)
-            {
-                // A 4xx means the API refused the request; a 5xx can come after it already acted.
-                throw Failure(idempotent, mayHaveBeenProcessed: (int)response.StatusCode >= 500, response.StatusCode, DescribeError(response.StatusCode, CleanApiMessage(ExtractMessage(payload.Span))), null);
-            }
+                if (!response.IsSuccessStatusCode)
+                {
+                    // A 4xx means the API refused the request; a 5xx can come after it already acted.
+                    throw Failure(idempotent, mayHaveBeenProcessed: (int)response.StatusCode >= 500, response.StatusCode, DescribeError(response.StatusCode, CleanApiMessage(ExtractMessage(payload.Span))), null);
+                }
 
-            // Some endpoints report failures with HTTP 200 and error=true. The request reached the endpoint, and nothing
-            // says an error reported this way means nothing was done, so for a request that isn't safe to repeat it is
-            // an unknown outcome (with the API's message), like every other failure after the request arrived. Checked before
-            // the typed read, so an error response whose other fields don't fit the model still reports the API's error.
-            if (ErrorFlag(payload.Span) is { Error.ValueKind: JsonValueKind.True } flagged)
-            {
-                string? apiMessage = CleanApiMessage(flagged.Message is { ValueKind: JsonValueKind.String } m ? m.GetString() : null);
-                throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, apiMessage ?? "The Ticketing API reported an error.", null);
-            }
+                // Some endpoints report failures with HTTP 200 and error=true. The request reached the endpoint, and nothing
+                // says an error reported this way means nothing was done, so for a request that isn't safe to repeat it is
+                // an unknown outcome (with the API's message), like every other failure after the request arrived. Checked before
+                // the typed read, so an error response whose other fields don't fit the model still reports the API's error.
+                if (ErrorFlag(payload.Span) is { Error.ValueKind: JsonValueKind.True } flagged)
+                {
+                    string? apiMessage = CleanApiMessage(flagged.Message is { ValueKind: JsonValueKind.String } m ? m.GetString() : null);
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, apiMessage ?? "The Ticketing API reported an error.", null);
+                }
 
-            T? result;
-            try
-            {
-                // Read straight from the UTF-8 bytes: no text copy of the response (twice its size) is ever made.
-                result = JsonSerializer.Deserialize<T>(payload.Span, JsonOptions);
-            }
-            catch (JsonException ex)
-            {
-                throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned a response that could not be parsed as JSON.", ex);
-            }
+                T? result;
+                try
+                {
+                    // Read straight from the UTF-8 bytes: no text copy of the response (twice its size) is ever made.
+                    result = JsonSerializer.Deserialize<T>(payload.Span, JsonOptions);
+                }
+                catch (JsonException ex)
+                {
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned a response that could not be parsed as JSON.", ex);
+                }
 
-            if (result is null)
-            {
-                throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned an empty response.", null);
-            }
+                if (result is null)
+                {
+                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned an empty response.", null);
+                }
 
-            return (true, result, default);
+                return (true, result, default);
+            }
+        }
+        catch (TicketingApiException ex)
+        {
+            string errorType = ex.OutcomeUnknown ? "outcome_unknown" :
+                ex.StatusCode is null ? "upstream_error" :
+                (int)ex.StatusCode >= 500 ? "server_error" :
+                (int)ex.StatusCode >= 400 ? "client_error" : "invalid_response";
+            ServiceMetrics.RecordUpstreamFailure(MetricOperation(path), ex.StatusCode is { } status ? (int)status : null, errorType);
+            throw;
         }
     }
 

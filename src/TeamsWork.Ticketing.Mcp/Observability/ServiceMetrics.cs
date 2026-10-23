@@ -13,6 +13,7 @@ internal static class ServiceMetrics
     private static readonly Counter<long> UpstreamRequests = Meter.CreateCounter<long>("ticketing.upstream.requests");
     private static readonly Histogram<double> UpstreamDuration = Meter.CreateHistogram<double>("ticketing.upstream.duration", "ms");
     private static readonly Counter<long> UpstreamRetries = Meter.CreateCounter<long>("ticketing.upstream.retries");
+    private static readonly Counter<long> UpstreamFailures = Meter.CreateCounter<long>("ticketing.upstream.failures");
     private static readonly Histogram<long> UpstreamResponseBytes = Meter.CreateHistogram<long>("ticketing.upstream.response.size", "By");
 
     public static void RecordHttpRequest(string method, string route, int? statusCode, string? errorType, double durationMs)
@@ -63,6 +64,17 @@ internal static class ServiceMetrics
             { "ticketing.operation", operation },
         };
         UpstreamRetries.Add(1, tags);
+    }
+
+    public static void RecordUpstreamFailure(string operation, int? statusCode, string errorType)
+    {
+        var tags = new TagList { { "ticketing.operation", operation }, { "error.type", errorType } };
+        if (statusCode is not null)
+        {
+            tags.Add("http.response.status_code", statusCode.Value);
+        }
+
+        UpstreamFailures.Add(1, tags);
     }
 
     public static void RecordUpstreamResponseBytes(string operation, long bytes) =>

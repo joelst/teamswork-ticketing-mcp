@@ -141,12 +141,18 @@ function Test-CoworkPluginSource([string] $PluginRoot) {
 
 # The manifest template with its {{PLACEHOLDERS}} replaced, JSON-escaped; throws if one is left or unknown.
 function Expand-ManifestTemplate([string] $Template, [hashtable] $Values) {
-    $text = [regex]::Replace($Template, '\{\{([A-Z_]+)\}\}', {
+    $unexpanded = [regex]::Replace($Template, '\{\{[^{}]+\}\}', '')
+    if ($unexpanded -match '\{\{|\}\}') { throw 'manifest.json contains a malformed placeholder.' }
+    $text = [regex]::Replace($Template, '\{\{([^{}]+)\}\}', {
             param($match)
             $key = $match.Groups[1].Value
             if (-not $Values.ContainsKey($key)) { throw "manifest.json has an unknown placeholder {{$key}}" }
             # The value lands inside a JSON string, so it's escaped as one (ConvertTo-Json adds the quotes).
-            (ConvertTo-Json ([string] $Values[$key]) -Compress).Trim('"')
+            $serialized = ConvertTo-Json ([string] $Values[$key]) -Compress
+            if ($serialized.Length -lt 2 -or $serialized[0] -ne '"' -or $serialized[$serialized.Length - 1] -ne '"') {
+                throw "manifest.json placeholder {{$key}} did not serialize as a JSON string."
+            }
+            $serialized.Substring(1, $serialized.Length - 2)
         })
     return $text
 }
