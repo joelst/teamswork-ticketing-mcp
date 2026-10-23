@@ -487,13 +487,35 @@ public sealed class TicketingClient
         }
         catch (TicketingApiException ex)
         {
-            string errorType = ex.OutcomeUnknown ? "outcome_unknown" :
-                ex.StatusCode is null ? "upstream_error" :
-                (int)ex.StatusCode >= 500 ? "server_error" :
-                (int)ex.StatusCode >= 400 ? "client_error" : "invalid_response";
+            string errorType = FailureErrorType(ex);
             ServiceMetrics.RecordUpstreamFailure(MetricOperation(path), ex.StatusCode is { } status ? (int)status : null, errorType);
             throw;
         }
+    }
+
+    private static string FailureErrorType(TicketingApiException exception)
+    {
+        if (exception.OutcomeUnknown)
+        {
+            return "outcome_unknown";
+        }
+
+        for (Exception? inner = exception.InnerException; inner is not null; inner = inner.InnerException)
+        {
+            if (inner is OperationCanceledException or TimeoutException)
+            {
+                return "timeout";
+            }
+
+            if (inner is HttpRequestException or IOException)
+            {
+                return "network_error";
+            }
+        }
+
+        return exception.StatusCode is null ? "upstream_error" :
+            (int)exception.StatusCode >= 500 ? "server_error" :
+            (int)exception.StatusCode >= 400 ? "client_error" : "invalid_response";
     }
 
     private static string MetricOperation(string path)
