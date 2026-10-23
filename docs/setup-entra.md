@@ -1,23 +1,28 @@
 # Entra ID setup
 
-The remote MCP endpoint validates Microsoft Entra ID access tokens. Two app registrations are involved:
+The remote MCP endpoint validates Microsoft Entra ID access tokens. These app registrations are involved:
 
 | App | Purpose | Created by |
 | --- | --- | --- |
 | **taas-mcp-server** | Represents the MCP server (the *resource*). Tokens must be issued for `api://<clientId>`. Exposes the delegated scope `access_as_user` and the application role `Ticketing.ReadWrite`. | `infra/scripts/New-EntraAppRegistrations.ps1` |
-| **taas-mcp-copilot-connector** | The *client* Copilot Studio uses (custom connector with OAuth 2.0 / on-behalf-of). Also reusable as the "custom OAuth" client for Foundry identity passthrough. | same script |
+| **taas-mcp-copilot-connector** | The *client* Copilot Studio uses (custom connector with OAuth 2.0 / on-behalf-of). Also reusable as the "custom OAuth" client for Foundry identity passthrough. Only needed for Copilot Studio or Foundry. | same script, unless `-SkipConnectorApp` |
+| **taas-mcp-cowork-client** | The *client* Microsoft 365 Copilot Cowork signs users in through. Only needed for Cowork. | `infra/scripts/Complete-CoworkSetup.ps1` (see [cowork.md](cowork.md)) |
 
 ## 1. Run the script
 
-Requires Azure CLI 2.60+ and an account with the Application Administrator (or Global Administrator) role.
+Requires Azure CLI 2.60+ and an account with the Application Administrator (or Global Administrator) role. Without
+it, creating the first app fails with *Directory permission is needed for the current user to register the
+application* (*Insufficient privileges to complete the operation*).
 
 ```powershell
 az login --tenant <tenantId>
 ./infra/scripts/New-EntraAppRegistrations.ps1 -TenantId <tenantId>
 ```
 
-The script is idempotent and prints a summary (no secrets). Keep the **Server app (client) ID**: it is the
-`entraClientId` pipeline variable and the `Entra:ClientId` setting.
+Add `-SkipConnectorApp` if you don't use Copilot Studio or Foundry. The script is idempotent: run it again after
+a failure and it carries on from the apps that already exist. It prints a summary (no secrets). Keep the **Server app
+(client) ID**: it is the `entraClientId` pipeline variable and the `Entra:ClientId` setting;
+`Deploy-TestInstance.ps1` finds it by the app's name.
 
 What it configures on the server app:
 
@@ -27,6 +32,21 @@ What it configures on the server app:
 - Optional claims `email` and `preferred_username` so writes can be attributed to the user.
 - Azure CLI pre-authorized for the scope, so `az login` users can run the stdio transport without a consent prompt.
 - Service principal with **assignment required**, so only assigned users, groups, or identities can obtain tokens.
+
+## Restrict calling client applications
+
+Entra validates who issued the token and what API audience and permission it carries. By default, the server does not
+further restrict which client application obtained a delegated token. To allow only approved clients, configure the
+server's `Entra:AcceptedClientApplicationIds` as a comma-separated list of the clients' application (client) IDs.
+For hosted deployments, set the pipeline variable `acceptedClientApplicationIds`; for local HTTP deployments, set
+the environment variable `Entra__AcceptedClientApplicationIds`. Use the client IDs for the applications that actually
+request tokens (for example, the Cowork OAuth client and the Copilot Studio connector), not the server app ID.
+
+`Entra:BlockedClientApplicationIds` is an optional comma-separated denylist; it overrides the accepted list. Both
+settings accept GUIDs, are checked against the Entra v2 `azp` or v1 `appid` claim, and fail startup if any value is
+not a GUID. An empty accepted list allows all otherwise-authorized clients; an empty blocked list denies none. The
+hosted values are passed through `infra/app.bicep`. Configure and verify the allowlist before enforcing it, or
+legitimate integrations will receive HTTP 403.
 
 ## 2. Assign who may use the server
 

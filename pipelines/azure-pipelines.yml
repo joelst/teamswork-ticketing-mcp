@@ -16,7 +16,9 @@
 #       entraTenantId, entraClientId (from infra/scripts/New-EntraAppRegistrations.ps1),
 #       serviceAccountId, serviceAccountName, serviceAccountEmail (optional, for app-only callers),
 #       publicBaseUrl (optional custom domain),
-#       externalEmailDomains (optional; comma-separated domains allowed for requestors outside the assignee list)
+#       externalEmailDomains (optional; comma-separated domains allowed for requestors outside the assignee list),
+#       acceptedClientApplicationIds (optional; comma-separated Entra client app IDs; empty allows all),
+#       blockedClientApplicationIds (optional; comma-separated Entra client app IDs always refused)
 #     An optional variable left out of the group is deployed as empty.
 #     Optional secret variable: ticketingApiKey (only if you want the pipeline to seed Key Vault; otherwise
 #     run infra/scripts/Set-TicketingApiKey.ps1 once).
@@ -154,6 +156,8 @@ stages:
                   echo "##vso[task.setvariable variable=${key};isOutput=true]${val}"
                   echo "${key}=${val}"
                 done
+                val=$(echo "$OUT" | jq -r '.applicationInsightsConnectionString.value')
+                echo "##vso[task.setvariable variable=applicationInsightsConnectionString;isOutput=true]${val}"
 
   # ---------------------------------------------------------------------------------------------------------------
   - stage: Image
@@ -215,6 +219,8 @@ stages:
         value: $[ stageDependencies.Core.CoreInfra.outputs['core.identityId'] ]
       - name: containerAppsEnvironmentName
         value: $[ stageDependencies.Core.CoreInfra.outputs['core.containerAppsEnvironmentName'] ]
+      - name: applicationInsightsConnectionString
+        value: $[ stageDependencies.Core.CoreInfra.outputs['core.applicationInsightsConnectionString'] ]
     jobs:
       - deployment: DeployApp
         displayName: app.bicep
@@ -236,6 +242,9 @@ stages:
                     OPT_SERVICE_ACCOUNT_NAME: $(serviceAccountName)
                     OPT_SERVICE_ACCOUNT_EMAIL: $(serviceAccountEmail)
                     OPT_EXTERNAL_EMAIL_DOMAINS: $(externalEmailDomains)
+                    OPT_ACCEPTED_CLIENT_APPLICATION_IDS: $(acceptedClientApplicationIds)
+                    OPT_BLOCKED_CLIENT_APPLICATION_IDS: $(blockedClientApplicationIds)
+                    APPINSIGHTS_CONNECTION_STRING: $(applicationInsightsConnectionString)
                   inputs:
                     azureSubscription: $(azureServiceConnection)
                     scriptType: bash
@@ -263,6 +272,9 @@ stages:
                           serviceAccountName="$(opt "$OPT_SERVICE_ACCOUNT_NAME")" \
                           serviceAccountEmail="$(opt "$OPT_SERVICE_ACCOUNT_EMAIL")" \
                           externalEmailDomains="$(opt "$OPT_EXTERNAL_EMAIL_DOMAINS")" \
+                          acceptedClientApplicationIds="$(opt "$OPT_ACCEPTED_CLIENT_APPLICATION_IDS")" \
+                          blockedClientApplicationIds="$(opt "$OPT_BLOCKED_CLIENT_APPLICATION_IDS")" \
+                          applicationInsightsConnectionString="$APPINSIGHTS_CONNECTION_STRING" \
                         --query properties.outputs -o json)
 
                       FQDN=$(echo "$OUT" | jq -r '.containerAppFqdn.value')
