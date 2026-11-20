@@ -240,6 +240,11 @@ function Resolve-CallerPath([string] $Path) { $ExecutionContext.SessionState.Pat
 
 if (-not $SettingsPath) { $SettingsPath = Join-Path $pluginRoot 'cowork/cowork.local.json' }
 $SettingsPath = Resolve-CallerPath $SettingsPath
+# A value left out is read from the settings file; one passed empty (an unset pipeline variable, say) is a mistake, not a
+# request for the saved value, which could build a package for another server. -AppId is the exception: empty has
+# always meant "not given" (Complete-CoworkSetup.ps1 passes it through), and its fallback is the saved ID.
+$blank = @(Get-CoworkSettingNames | Where-Object { $_ -ne 'AppId' -and $PSBoundParameters.ContainsKey($_) -and [string]::IsNullOrWhiteSpace((Get-Variable -Name $_ -ValueOnly)) })
+if ($blank) { throw "-$($blank -join ', -') was passed empty. Pass a value, or leave it out to use the one saved in the settings file." }
 $given = @{}
 foreach ($name in Get-CoworkSettingNames) { $given[$name] = (Get-Variable -Name $name -ValueOnly) }
 $values = Merge-CoworkSettings $given $SettingsPath

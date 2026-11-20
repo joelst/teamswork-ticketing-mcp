@@ -194,6 +194,9 @@ try {
     finally { $zip.Dispose() }
     Check 'a later build reads the saved values' ($rebuilt.id -eq $testAppId -and $rebuilt.agentConnectors[0].toolSource.remoteMcpServer.authorization.referenceId -eq 'test-auth-config-id')
     Check 'a value passed wins over the saved one' ($rebuilt.developer.name -eq 'Another Org')
+    $message = ''
+    try { & $script -McpServerUrl '' -OutputPath $out -SettingsPath $settings 6>&1 | Out-Null } catch { $message = $_.Exception.Message }
+    Check 'a value passed empty is refused, not taken from the settings file' ($message -match 'McpServerUrl was passed empty')
     Check 'a build without -SaveSettings leaves the saved values alone' ((Get-Content -Raw $settings | ConvertFrom-Json).DeveloperName -eq 'Example Org')
 
     # Relative paths are PowerShell's, so a build run after Set-Location saves and writes where its next build looks.
