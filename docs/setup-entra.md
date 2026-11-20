@@ -36,7 +36,10 @@ What it configures on the server app:
   not in production: anyone who phishes an assigned user's Azure CLI sign-in (a device-code prompt) or copies their CLI
   token cache can then call the server as that user without seeing a consent screen. The stdio transport doesn't
   need it; it uses the API key, not a token. Running the script without the switch removes an earlier
-  pre-authorization.
+  pre-authorization, but not consent a user or admin has already granted the Azure CLI for the scope, nor tokens
+  already issued (they last until they expire, about an hour). To close it fully, review the CLI's grants under
+  Enterprise applications → Microsoft Azure CLI → Permissions (admin and user consent) and revoke the ones for this
+  server.
 
 ## Restrict calling client applications
 
@@ -84,9 +87,11 @@ URL to the app registration under Authentication → Web.
 az account get-access-token --resource api://<serverClientId> --query accessToken -o tsv
 ```
 
-This works only on a registration made with `-PreAuthorizeAzureCli` (a test tenant); otherwise Entra refuses with
-*consent required* (AADSTS65001). If `Entra:AcceptedClientApplicationIds` is set, the server also refuses the token
-unless the Azure CLI's client ID, `04b07795-8ddb-461a-bbee-02f9e1bf7b46`, is in that list.
+The Azure CLI needs consent for the scope first. On a test tenant, a registration made with `-PreAuthorizeAzureCli`
+gives it without a prompt. Otherwise a user (where users may consent) or an admin grants it, for example by signing in
+with `az login --scope api://<serverClientId>/.default`; until then Entra refuses with *consent required*
+(AADSTS65001). If `Entra:AcceptedClientApplicationIds` is set, the server also refuses the token unless the Azure CLI's
+client ID, `04b07795-8ddb-461a-bbee-02f9e1bf7b46`, is in that list.
 
 Decode it (for example at jwt.ms) and check `aud` = `<serverClientId>` (v2 tokens use the GUID), `scp` contains
 `access_as_user`, and `oid`, `name`, `preferred_username` are present.

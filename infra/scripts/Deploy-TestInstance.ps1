@@ -217,7 +217,7 @@ Write-Host "Resource group : $ResourceGroup"
 Write-Host "Image          : $loginServer/${imageRepository}:$tag"
 Write-Host "MCP endpoint   : $($app.mcpEndpoint.value)"
 Write-Host ''
-Write-Host 'Try it with your own token (needs New-EntraAppRegistrations.ps1 -PreAuthorizeAzureCli, for a test tenant):'
+Write-Host 'Try it with your own token (the Azure CLI needs consent for the server''s scope; on a test tenant, New-EntraAppRegistrations.ps1 -PreAuthorizeAzureCli gives it):'
 Write-Host "  `$token = az account get-access-token --resource api://$EntraClientId --query accessToken -o tsv"
 Write-Host "  Invoke-RestMethod $($app.mcpEndpoint.value) -Method Post -Headers @{ Authorization = ""Bearer `$token""; Accept = 'application/json, text/event-stream' } -ContentType 'application/json' -Body '{""jsonrpc"":""2.0"",""id"":1,""method"":""tools/list"",""params"":{}}'"
 Write-Host "Your account must be assigned to $ServerAppName (Complete-CoworkSetup.ps1 -AssignUser does it)."
