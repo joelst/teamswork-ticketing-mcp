@@ -234,7 +234,12 @@ if ($problems) {
 }
 if ($CheckOnly) { Write-Host 'Plugin skills and manifest template pass the upload checks.'; return }
 
+# Paths a caller passes are resolved where PowerShell is, as they read; the .NET file APIs used below would otherwise
+# resolve a relative one against the process's directory, which Set-Location doesn't move.
+function Resolve-CallerPath([string] $Path) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path) }
+
 if (-not $SettingsPath) { $SettingsPath = Join-Path $pluginRoot 'cowork/cowork.local.json' }
+$SettingsPath = Resolve-CallerPath $SettingsPath
 $given = @{}
 foreach ($name in Get-CoworkSettingNames) { $given[$name] = (Get-Variable -Name $name -ValueOnly) }
 $values = Merge-CoworkSettings $given $SettingsPath
@@ -264,6 +269,7 @@ $manifestText = Expand-ManifestTemplate (Get-Content -Raw -Encoding UTF8 (Join-P
 $null = $manifestText | ConvertFrom-Json   # still valid JSON after the values went in
 
 if (-not $OutputPath) { $OutputPath = Join-Path $root 'artifacts/cowork' }
+$OutputPath = Resolve-CallerPath $OutputPath
 New-Item -ItemType Directory -Force $OutputPath | Out-Null
 $zipPath = Join-Path $OutputPath 'teamswork-ticketing-cowork.zip'
 if (Test-Path $zipPath) { Remove-Item $zipPath }

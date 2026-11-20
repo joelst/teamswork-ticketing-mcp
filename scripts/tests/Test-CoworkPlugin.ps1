@@ -195,6 +195,19 @@ try {
     Check 'a later build reads the saved values' ($rebuilt.id -eq $testAppId -and $rebuilt.agentConnectors[0].toolSource.remoteMcpServer.authorization.referenceId -eq 'test-auth-config-id')
     Check 'a value passed wins over the saved one' ($rebuilt.developer.name -eq 'Another Org')
     Check 'a build without -SaveSettings leaves the saved values alone' ((Get-Content -Raw $settings | ConvertFrom-Json).DeveloperName -eq 'Example Org')
+
+    # Relative paths are PowerShell's, so a build run after Set-Location saves and writes where its next build looks.
+    $nested = Join-Path $out 'nested'
+    New-Item -ItemType Directory -Force $nested | Out-Null
+    Push-Location $nested
+    try {
+        & $script -McpServerUrl 'https://taasmcp-test-app.example.test/mcp' -OAuthReferenceId 'test-auth-config-id' -AppId $testAppId `
+            -DeveloperName 'Example Org' -WebsiteUrl 'https://example.test' -PrivacyUrl 'https://example.test/privacy' `
+            -TermsUrl 'https://example.test/terms' -OutputPath 'relative-out' -SettingsPath 'relative.local.json' -SaveSettings 6>&1 | Out-Null
+    }
+    finally { Pop-Location }
+    Check 'relative paths resolve from the current PowerShell location' ((Test-Path (Join-Path $nested 'relative.local.json')) -and
+        (Test-Path (Join-Path $nested 'relative-out/teamswork-ticketing-cowork.zip')))
 }
 finally { if (Test-Path $out) { Remove-Item -Recurse -Force $out } }
 
