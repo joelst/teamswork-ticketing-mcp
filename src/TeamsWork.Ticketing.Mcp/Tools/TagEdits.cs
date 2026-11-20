@@ -17,9 +17,16 @@ internal static class TagEdits
     /// </summary>
     public static List<TicketTag> Current(JsonElement? ticketTags, IReadOnlyList<TagCategory> categories)
     {
-        if (ticketTags is not { ValueKind: JsonValueKind.Array } list)
+        if (ticketTags is null or { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined })
         {
             return [];
+        }
+
+        // The edit replaces the whole list, so a value of another shape (a single tag object, say) is refused rather than
+        // read as no tags, which would erase them.
+        if (ticketTags is not { ValueKind: JsonValueKind.Array } list)
+        {
+            throw new McpException("The ticket's tags are in a form this server doesn't recognise, so they can't be kept for certain. Pass the whole list in 'tags' instead.");
         }
 
         var current = new List<TicketTag>();

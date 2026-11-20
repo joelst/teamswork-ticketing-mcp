@@ -111,9 +111,9 @@ public sealed class WorkloadTools
                     "or escalate an SLA. A Ticketing administrator can turn it on in the instance's SLA settings.");
             }
 
-            // For each row's state label; the settings were just read for SLA, so this is the cached copy. If that read
-            // failed, rows show the raw status rather than try again.
-            System.Text.Json.JsonElement? workflows = slaEnabled is null ? null : await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken);
+            // For each row's state label: the settings were just read for SLA, so the cached copy, if that read worked;
+            // if it failed, rows show the raw status rather than try again.
+            System.Text.Json.JsonElement? workflows = _cache.CachedInstance(timezoneOffset)?.Workflows;
             bool AtRisk(Ticket t)
             {
                 bool breached = t.IsFrtBreached == true || t.IsRtBreached == true;
@@ -234,9 +234,13 @@ public sealed class WorkloadTools
             TicketScan.Result<GroupKey> scan = await TicketScan.RunAsync(
                 _client, query, t => GroupOf(t, by), _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
 
+            // A custom state is counted by its ID and shown by its label, with the ID beside it, as the other tools show it.
+            System.Text.Json.JsonElement? workflows = by == "status"
+                ? await WorkflowStatus.WorkflowsForLabelsAsync(scan.Matches.Select(k => new Ticket { Status = k.Identity }).ToList(), _cache, _client, timezoneOffset, cancellationToken)
+                : null;
             List<CountGroup> groups = scan.Matches
                 .GroupBy(k => k.Identity, StringComparer.OrdinalIgnoreCase)
-                .Select(g => new CountGroup(g.First().Label, g.Count()))
+                .Select(g => StatusGroup(g.First(), g.Count(), workflows))
                 .OrderByDescending(g => g.Count)
                 .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -257,6 +261,17 @@ public sealed class WorkloadTools
 
         string? value = Blank(by == "priority" ? t.Priority : t.Status);
         return new GroupKey(value ?? "", value ?? "(none)");
+    }
+
+    private static CountGroup StatusGroup(GroupKey key, int count, System.Text.Json.JsonElement? workflows)
+    {
+        if (workflows is null || key.Identity.Length == 0)
+        {
+            return new CountGroup(key.Label, count);
+        }
+
+        string label = WorkflowStatus.LabelOf(new Ticket { Status = key.Identity }, workflows) ?? key.Label;
+        return string.Equals(label, key.Identity, StringComparison.OrdinalIgnoreCase) ? new CountGroup(label, count) : new CountGroup(label, count, key.Identity);
     }
 
     private static string? Blank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
@@ -280,7 +295,8 @@ public sealed class WorkloadTools
 
     private sealed record CountGroup(
         [property: JsonPropertyName("key")] string Key,
-        [property: JsonPropertyName("count")] int Count);
+        [property: JsonPropertyName("count")] int Count,
+        [property: JsonPropertyName("statusId"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? StatusId = null);
 
     private sealed record CountResult(
         [property: JsonPropertyName("groupBy")] string GroupBy,

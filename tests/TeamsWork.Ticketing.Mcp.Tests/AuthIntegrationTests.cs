@@ -299,6 +299,36 @@ public sealed class AuthIntegrationTests : IClassFixture<McpServerFactory>
     }
 
     [Fact]
+    public async Task A_ticket_number_sent_as_a_json_number_is_taken_as_the_number()
+    {
+        await using McpClient client = await ConnectAsync(McpServerFactory.UserToken());
+
+        CallToolResult one = await client.CallToolAsync("get_ticket_brief", new Dictionary<string, object?> { ["ticket"] = 2213 }, cancellationToken: Ct);
+        CallToolResult many = await client.CallToolAsync("preview_bulk_update",
+            new Dictionary<string, object?> { ["tickets"] = new object[] { 2213, "2214" }, ["set"] = new Dictionary<string, object?> { ["priority"] = "Low" } },
+            cancellationToken: Ct);
+
+        // Past binding either way: the call got as far as the API (unreachable here), where an argument the SDK couldn't
+        // convert stops it before with a message that names nothing.
+        foreach (CallToolResult result in new[] { one, many })
+        {
+            string text = string.Join(" ", result.Content.OfType<TextContentBlock>().Select(c => c.Text));
+            Assert.True(text.Contains("Ticketing API", StringComparison.Ordinal), text);
+        }
+    }
+
+    [Fact]
+    public async Task No_tool_schema_points_elsewhere_with_a_ref()
+    {
+        await using McpClient client = await ConnectAsync(McpServerFactory.UserToken());
+
+        IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: Ct);
+
+        // Some MCP clients don't follow $ref, and would see a tool's input as untyped.
+        Assert.All(tools, t => Assert.DoesNotContain("\"$ref\"", t.ProtocolTool.InputSchema.GetRawText(), StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Write_tools_never_expose_a_user_parameter()
     {
         await using McpClient client = await ConnectAsync(McpServerFactory.UserToken());

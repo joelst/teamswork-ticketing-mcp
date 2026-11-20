@@ -142,7 +142,8 @@ internal static partial class TicketViews
     /// A ticket in a list: what triage needs. <paramref name="content"/> adds text fields a 'select' asked for
     /// (description, custom fields, resolution comment); scans that read whole tickets leave them out.
     /// </summary>
-    public static JsonObject Row(Ticket t, bool content = false, JsonElement? workflows = null)
+    /// <param name="textChars">How much of each text value to keep in a custom field.</param>
+    public static JsonObject Row(Ticket t, bool content = false, JsonElement? workflows = null, int textChars = ListTextChars)
     {
         var o = new JsonObject();
         Number(o, t);
@@ -168,11 +169,39 @@ internal static partial class TicketViews
             Add(o, "lastResolutionOn", Time(t.LastResolutionOn));
             if (t.CustomFields is { ValueKind: not JsonValueKind.Null and not JsonValueKind.Undefined } fields)
             {
-                o["customFields"] = JsonNode.Parse(fields.GetRawText());
+                o["customFields"] = ClipTexts(JsonNode.Parse(fields.GetRawText()), textChars);
             }
         }
 
         return o;
+    }
+
+    /// <summary>
+    /// Custom field values with each text cut like any other (a text field may hold 20,000 characters), the rest as is.
+    /// </summary>
+    private static JsonNode? ClipTexts(JsonNode? node, int max)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (string key in obj.Select(p => p.Key).ToList())
+                {
+                    obj[key] = ClipTexts(obj[key]?.DeepClone(), max);
+                }
+
+                return obj;
+            case JsonArray array:
+                for (int i = 0; i < array.Count; i++)
+                {
+                    array[i] = ClipTexts(array[i]?.DeepClone(), max);
+                }
+
+                return array;
+            case JsonValue value when value.TryGetValue(out string? text):
+                return JsonValue.Create(max >= FullTextChars ? text : Clip(text, max) ?? text);
+            default:
+                return node;
+        }
     }
 
     /// <summary>
@@ -181,7 +210,7 @@ internal static partial class TicketViews
     /// </summary>
     public static JsonObject Detail(Ticket t, bool includeHtml, JsonElement? instanceWorkflows = null, int textChars = DetailTextChars)
     {
-        JsonObject o = Row(t, content: true, instanceWorkflows);
+        JsonObject o = Row(t, content: true, instanceWorkflows, textChars);
         o.Remove("description");
         o.Remove("lastResolutionComment");
         Add(o, "id", t.Id);
@@ -454,12 +483,13 @@ internal static partial class TicketViews
     [GeneratedRegex(@"^\d+_")]
     private static partial Regex NumberPrefix();
 
-    // Where the quoted part of an emailed reply starts: Outlook's header block (a "From:" line followed within a few lines
-    // by a Sent or Date header, which a note such as "From: 10.1.1.1 / To: 10.2.2.2" doesn't have; with the underscore
-    // separator above it if there is one), its original-message
+    // Where the quoted part of an emailed reply starts: a mail header block (a "From:" line, then within a few lines a
+    // Sent or Date header and after it a Subject header, as Outlook's replies and forwarded messages have, where a note
+    // such as "From: 10.1.1.1 / Sent: 500 requests" has no Subject; with the underscore separator above it if there is
+    // one), its original-message
     // banner, or Gmail's "On ... wrote:" when it names an address or quoted lines follow it ("On startup the logger
     // wrote:" in a pasted log does neither). A "From:" line or a "--" line on its own is ordinary text, so it is kept.
     // Email text often ends lines with CRLF, and a multiline $ matches before the \n only, so each $ allows the \r.
-    [GeneratedRegex(@"^(?:-{2,}[ \t]*Original Message[ \t]*-{2,}[ \t]*\r?$|On [^\r\n]{0,200}@[^\r\n]{0,200} wrote:[ \t]*\r?$|On [^\r\n]{4,200} wrote:[ \t]*\r?\n(?:[ \t]*\r?\n)?>|(?:_{10,}[ \t]*\r?\n)?From:[ \t][^\r\n]+\r?\n(?:[^\r\n]*\r?\n){0,3}?(?:Sent|Date):)", RegexOptions.Multiline | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 200)]
+    [GeneratedRegex(@"^(?:-{2,}[ \t]*Original Message[ \t]*-{2,}[ \t]*\r?$|On [^\r\n]{0,200}@[^\r\n]{0,200} wrote:[ \t]*\r?$|On [^\r\n]{4,200} wrote:[ \t]*\r?\n(?:[ \t]*\r?\n)?>|(?:_{10,}[ \t]*\r?\n)?From:[ \t][^\r\n]+\r?\n(?:[^\r\n]*\r?\n){0,3}?(?:Sent|Date):[^\r\n]*\r?\n(?:[^\r\n]*\r?\n){0,4}?Subject:)", RegexOptions.Multiline | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 200)]
     private static partial Regex QuoteStart();
 }

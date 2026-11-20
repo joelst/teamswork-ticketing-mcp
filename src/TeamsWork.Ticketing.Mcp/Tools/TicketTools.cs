@@ -72,13 +72,22 @@ public sealed class TicketTools
             // unresolved ticket).
             string? state = ToolValidation.OptionalText(status, "status", 128);
             string? olderName = ToolValidation.OptionalText(statusId, "statusId", 128);
-            if (state is not null && olderName is not null && !string.Equals(state, olderName, StringComparison.OrdinalIgnoreCase))
+            // Rows give a custom state as its label (status) and ID (statusId), so both may come back together: they
+            // conflict only when they name different states, not when one is the other's label. Two default states'
+            // names differ only as different states, so those need no lookup.
+            bool differ = state is not null && olderName is not null && !string.Equals(state, olderName, StringComparison.OrdinalIgnoreCase);
+            if (differ && WorkflowStatus.DefaultStates.Contains(state, StringComparer.OrdinalIgnoreCase) &&
+                WorkflowStatus.DefaultStates.Contains(olderName, StringComparer.OrdinalIgnoreCase))
             {
                 throw new McpException("'status' and 'statusId' name different states; pass only 'status'.");
             }
 
             string? extra = ToolValidation.OptionalSelect(select);
             StateFilter? filter = (state ?? olderName) is string wanted ? await StateFilterAsync(wanted, timezoneOffset, cancellationToken) : null;
+            if (differ && !string.Equals(filter?.StatusId, (await StateFilterAsync(olderName!, timezoneOffset, cancellationToken)).StatusId, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new McpException("'status' and 'statusId' name different states; pass only 'status'.");
+            }
             var query = new TicketListQuery
             {
                 Search = ToolValidation.OptionalText(search, "search", 500),
@@ -105,6 +114,10 @@ public sealed class TicketTools
             ListResponse<Ticket> r = await _client.ListTicketsAsync(query, cancellationToken);
             IReadOnlyList<Ticket> items = r.Items ?? [];
             _cache.Numbers.Remember(items);
+            foreach (Ticket t in items)
+            {
+                _cache.Assignees.Remember(t.Assignee);
+            }
             string? hint = string.Join(" ", new[]
             {
                 isResolved is null ? filter?.Hint : null,
@@ -194,9 +207,12 @@ public sealed class TicketTools
                 }
             }
 
+            var state = new JsonObject();
+            TicketViews.Status(state, created, await WorkflowStatus.WorkflowsForLabelsAsync([created], _cache, _client, timezoneOffset, CancellationToken.None));
             return TicketViews.Ack(created, actor, new Dictionary<string, object?>
             {
-                ["status"] = created.Status,
+                ["status"] = state["status"]?.GetValue<string>(),
+                ["statusId"] = state["statusId"]?.GetValue<string>(),
                 ["priority"] = TicketViews.Priority(created.Priority),
                 ["requestor"] = TicketViews.Person(write.Requestor),
                 ["assignee"] = TicketViews.Person(write.Assignee),
@@ -326,6 +342,17 @@ public sealed class TicketTools
             }
 
             JsonElement? workflows = await WorkflowStatus.WorkflowsForAsync(current, _cache, _client, timezoneOffset, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(current.Status) && WorkflowStatus.IsIn(current, target, workflows))
+            {
+                // Already there (a retry after an unknown outcome, say): said plainly, rather than refused as a step the
+                // workflow doesn't allow from the state it is in.
+                var already = new JsonObject();
+                TicketViews.Status(already, current, workflows);
+                return TicketViews.Ack(current, actor, warning:
+                    $"It is already in '{already["status"]?.GetValue<string>() ?? current.Status}', so nothing was changed" +
+                    (note is null ? "." : "; the comment wasn't added either (add_ticket_comment adds one)."));
+            }
+
             target = WorkflowStatus.CheckTarget(current, target, note, workflows);
             Ticket updated = await _client.UpdateTicketStatusAsync(id, target, res, note, actor.ToTicketUser(), timezoneOffset, cancellationToken);
             _cache.Numbers.Remember(updated);

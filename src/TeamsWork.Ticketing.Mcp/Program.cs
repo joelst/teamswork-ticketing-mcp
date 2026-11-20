@@ -451,7 +451,9 @@ static void AddTools(IMcpServerBuilder mcp) =>
         .WithTools<ActivityTools>()
         .WithTools<AttachmentTools>()
         .WithTools<InstanceTools>()
-        .WithInstanceStates();
+        .WithInstanceStates()
+        // A ticket number sent as a JSON number (2213, not "2213") is taken as the string it stands for.
+        .WithRequestFilters(filters => filters.AddCallToolFilter(TicketArguments.Filter));
 
 static void ConfigureServerOptions(ModelContextProtocol.Server.McpServerOptions options)
 {

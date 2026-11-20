@@ -231,7 +231,8 @@ public sealed partial class BulkTools
         for (int i = 0; i < batch.Items.Count; i++)
         {
             // Clients give a tool call about 30 seconds (Copilot Cowork, for one), so a long batch hands the rest back.
-            if (Stopwatch.GetElapsedTime(started) > TimeBudget)
+            TimeSpan left = TimeBudget - Stopwatch.GetElapsedTime(started);
+            if (left <= TimeSpan.Zero)
             {
                 remaining.AddRange(batch.Items.Skip(i));
                 stopped = "time";
@@ -241,15 +242,25 @@ public sealed partial class BulkTools
             BulkItem item = batch.Items[i];
             JsonNode label = item.TicketNo is int no ? JsonValue.Create(no) : JsonValue.Create(item.Id.ToString("D"));
             var done = new List<string>();
-            string? attempting = null;   // the write under way, if any: until one is, nothing can have changed
-            SemaphoreSlim gate = _store.TicketGate(item.Id);
-            bool held = false;
+            // The write under way, and whether a cancel can leave it done: the client sends a comment, or a status change
+            // carrying one, to the end once sent, so a cancel stops those only before they go; a PUT can be cut off after.
+            string? attempting = null;
+            bool mayHaveLanded = false;
+            IDisposable? hold = null;
             try
             {
                 // One ticket at a time across batches, from its re-read to its last write: two confirmations running
-                // at once over the same ticket would otherwise both see the preview's version and both write.
-                await gate.WaitAsync(cancellationToken);
-                held = true;
+                // at once over the same ticket would otherwise both see the preview's version and both write. The wait
+                // fits in what is left of the time budget; if another confirmation holds the ticket longer, the rest of
+                // this batch is handed back for later.
+                hold = await _store.EnterTicketAsync(item.Id, left, cancellationToken);
+                if (hold is null)
+                {
+                    remaining.AddRange(batch.Items.Skip(i));
+                    stopped = "time";
+                    break;
+                }
+
                 Ticket now;
                 try
                 {
@@ -277,7 +288,7 @@ public sealed partial class BulkTools
 
                 if (item.ChangesAssignee || item.ChangesPriority || item.ChangesExpectedDate || item.Tags is not null)
                 {
-                    attempting = "fields";
+                    (attempting, mayHaveLanded) = ("fields", true);
                     await _client.UpdateTicketAsync(item.Id, new TicketWrite
                     {
                         Assignee = item.ChangesAssignee ? plan.Assignee : null,
@@ -286,21 +297,24 @@ public sealed partial class BulkTools
                         Tags = item.Tags,
                     }, who, includeHtml: false, plan.TimezoneOffset, cancellationToken);
                     done.Add("fields");
+                    attempting = null;
                 }
 
                 bool noteWithStatus = item.StatusValue is not null && plan.CommentText is not null && !plan.CommentIsPrivate;
                 if (item.StatusValue is not null)
                 {
-                    attempting = "status";
+                    (attempting, mayHaveLanded) = ("status", !noteWithStatus);
                     await _client.UpdateTicketStatusAsync(item.Id, item.StatusValue, plan.Resolution, noteWithStatus ? plan.CommentText : null, who, plan.TimezoneOffset, cancellationToken);
                     done.Add("status");
+                    attempting = null;
                 }
 
                 if (plan.CommentText is not null && !noteWithStatus)
                 {
-                    attempting = "comment";
+                    (attempting, mayHaveLanded) = ("comment", false);
                     await _client.AddCommentAsync(item.Id, plan.CommentText, null, plan.CommentIsPrivate, who, includeHtml: false, cancellationToken);
                     done.Add("comment");
+                    attempting = null;
                 }
 
                 applied.Add(label.DeepClone());
@@ -329,18 +343,19 @@ public sealed partial class BulkTools
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                // The caller gave up (a client's time limit, say). Before any write was under way (waiting for the
-                // ticket, its re-read, or the quota), nothing changed, so it goes back with the rest. With a write out,
-                // whether it was carried out isn't known. What was done is kept with the batch, so confirming the token
-                // again returns it, with a token for the tickets not reached.
-                if (attempting is null)
+                // The caller gave up (a client's time limit, say). With nothing done to the ticket yet, it goes back with
+                // the rest: a comment can't have been sent, and a PUT cut off after it landed moves the ticket's _ts, so
+                // the resumed batch skips it rather than apply anything twice. With part done, it can't be retried as
+                // previewed, so it is reported. What was done is kept with the batch, so confirming the token again
+                // returns it, with a token for the tickets not reached.
+                if (done.Count == 0)
                 {
                     remaining.AddRange(batch.Items.Skip(i));
                 }
                 else
                 {
-                    string so = done.Count > 0 ? $"{string.Join(", ", done)} changed; the {attempting} change may or may not have been" : "it may or may not have been changed";
-                    failed.Add(new JsonObject { ["ticketNo"] = label.DeepClone(), ["error"] = $"Interrupted: {so}. Check it with get_ticket_brief." });
+                    string next = attempting is null ? "nothing else was" : mayHaveLanded ? $"the {attempting} change may or may not have been" : $"the {attempting} change was not made";
+                    failed.Add(new JsonObject { ["ticketNo"] = label.DeepClone(), ["error"] = $"Interrupted: {string.Join(", ", done)} changed; {next}. Check it with get_ticket_brief." });
                     remaining.AddRange(batch.Items.Skip(i + 1));
                 }
 
@@ -349,10 +364,7 @@ public sealed partial class BulkTools
             }
             finally
             {
-                if (held)
-                {
-                    gate.Release();
-                }
+                hold?.Dispose();
             }
         }
 
@@ -456,7 +468,7 @@ public sealed partial class BulkTools
                 return (null, row);
             }
 
-            from["status"] = t.Status;
+            from["status"] = WorkflowStatus.LabelOf(t, workflows);
         }
 
         bool assignee = change.Plan.Assignee is TicketUser a && !TicketPeople.Same(t.Assignee, a);
@@ -682,7 +694,7 @@ public sealed partial class BulkTools
             throw new McpException("Nothing to change: give 'set' (status, assignee, priority, tags or due date) or a 'comment'.");
         }
 
-        return new Change(plan, status, addTags, set?.RemoveTags ?? []);
+        return new Change(plan, status, addTags, set?.RemoveTags?.Select(r => r.AsTagRef()).ToList() ?? []);
     }
 
     /// <summary>The change asked for, with the tag edits, which are worked out per ticket.</summary>
@@ -844,13 +856,29 @@ public sealed record BulkChanges
     [JsonPropertyName("addTags")]
     public IReadOnlyList<TagRef>? AddTags { get; init; }
 
+    // A type of its own, though shaped like TagRef: the schema would otherwise point one list at the other with a $ref,
+    // which some MCP clients don't follow.
     [Description("Tags to remove, keeping the others.")]
     [JsonPropertyName("removeTags")]
-    public IReadOnlyList<TagRef>? RemoveTags { get; init; }
+    public IReadOnlyList<TagRemoval>? RemoveTags { get; init; }
 
     [Description("New due date, YYYY-MM-DD.")]
     [JsonPropertyName("expectedDate")]
     public string? ExpectedDate { get; init; }
+}
+
+/// <summary>A tag a bulk update removes: by its text, and its category when the text is in more than one.</summary>
+public sealed record TagRemoval
+{
+    [Description("ID or name of the tag category (from list_tag_categories). Can be left out when the tag's text is in one category only.")]
+    [JsonPropertyName("tagCategoryId")]
+    public string? TagCategoryId { get; init; }
+
+    [Description("Tag text as defined in the category (case doesn't matter).")]
+    [JsonPropertyName("text")]
+    public required string Text { get; init; }
+
+    internal TagRef AsTagRef() => new() { TagCategoryId = TagCategoryId, Text = Text };
 }
 
 /// <summary>A comment a bulk update adds to every ticket.</summary>

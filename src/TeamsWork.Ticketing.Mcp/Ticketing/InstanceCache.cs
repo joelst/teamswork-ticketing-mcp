@@ -35,6 +35,9 @@ public sealed class InstanceCache
     /// <summary>Ticket numbers seen so far and their UUIDs, shared like the rest of the cache.</summary>
     public TicketNumbers Numbers { get; } = new();
 
+    /// <summary>Everyone seen as a ticket's assignee, who counts as staff in every tool alike.</summary>
+    public SeenAssignees Assignees { get; } = new();
+
     private readonly TimeSpan _ttl;
     private readonly TimeProvider _time;
     private readonly TimeZoneOffsetResolver _timeZones;

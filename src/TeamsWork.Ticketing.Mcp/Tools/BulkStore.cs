@@ -32,9 +32,9 @@ public sealed class BulkStore
     private readonly int _max;
     private long _added;   // the order batches were stored in, so "oldest" never depends on two having the same deadline
 
-    // Confirmations take a ticket one at a time, across batches. Striped, so the memory stays fixed; two tickets sharing
-    // a stripe only wait on each other for a moment.
-    private readonly SemaphoreSlim[] _ticketGates = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+    // Confirmations take a ticket one at a time, across batches: a gate for each ticket being confirmed, dropped once
+    // nobody holds or waits for it, so unrelated tickets never wait on each other and the map stays small.
+    private readonly Dictionary<Guid, TicketGate> _ticketGates = [];
 
     public BulkStore(TimeProvider? time = null)
         : this(time, MaxBatchesPerOwner, MaxBatches)
@@ -132,8 +132,70 @@ public sealed class BulkStore
         }
     }
 
-    /// <summary>The gate a confirmation holds while it re-reads and writes one ticket.</summary>
-    internal SemaphoreSlim TicketGate(Guid ticket) => _ticketGates[(ticket.GetHashCode() & int.MaxValue) % _ticketGates.Length];
+    /// <summary>
+    /// Takes a ticket for a confirmation to re-read and write, waiting at most <paramref name="wait"/> for another
+    /// confirmation that has it; null when that wasn't long enough. Disposing the result gives the ticket back.
+    /// </summary>
+    internal async Task<IDisposable?> EnterTicketAsync(Guid ticket, TimeSpan wait, CancellationToken cancellationToken)
+    {
+        TicketGate gate;
+        lock (_ticketGates)
+        {
+            if (!_ticketGates.TryGetValue(ticket, out gate!))
+            {
+                _ticketGates[ticket] = gate = new TicketGate();
+            }
+
+            gate.Users++;
+        }
+
+        bool entered = false;
+        try
+        {
+            entered = await gate.Semaphore.WaitAsync(wait < TimeSpan.Zero ? TimeSpan.Zero : wait, cancellationToken);
+            return entered ? new TicketHold(this, ticket, gate) : null;
+        }
+        finally
+        {
+            if (!entered)
+            {
+                Leave(ticket, gate);
+            }
+        }
+    }
+
+    private void Leave(Guid ticket, TicketGate gate)
+    {
+        lock (_ticketGates)
+        {
+            if (--gate.Users == 0)
+            {
+                _ticketGates.Remove(ticket);
+            }
+        }
+    }
+
+    /// <summary>A ticket's gate, and how many confirmations hold or wait for it.</summary>
+    private sealed class TicketGate
+    {
+        public SemaphoreSlim Semaphore { get; } = new(1, 1);
+
+        public int Users { get; set; }
+    }
+
+    private sealed class TicketHold(BulkStore store, Guid ticket, TicketGate gate) : IDisposable
+    {
+        private int _released;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                gate.Semaphore.Release();
+                store.Leave(ticket, gate);
+            }
+        }
+    }
 
     // 128 random bits, URL-safe.
     private static string NewToken() => Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));

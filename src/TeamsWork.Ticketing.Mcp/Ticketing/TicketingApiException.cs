@@ -46,8 +46,11 @@ public sealed class TicketingApiException : Exception
     /// <summary>True when this server held the request back to keep within the API's rate limit: it was never sent.</summary>
     public bool Throttled { get; init; }
 
-    /// <summary>Refused for rate, here or by the API (429): worth retrying after a wait, and nothing was changed.</summary>
-    public bool IsRateLimited => Throttled || StatusCode == HttpStatusCode.TooManyRequests;
+    /// <summary>
+    /// Refused for rate, here or by the API (429): worth retrying after a wait, and nothing was changed. Never so when
+    /// the outcome is unknown, as when an earlier attempt of the same write may have been carried out.
+    /// </summary>
+    public bool IsRateLimited => !OutcomeUnknown && (Throttled || StatusCode == HttpStatusCode.TooManyRequests);
 
     internal const string OutcomeUnknownAdvice =
         " The request may have been carried out anyway, so check before trying again (get_ticket_brief shows a ticket's latest " +

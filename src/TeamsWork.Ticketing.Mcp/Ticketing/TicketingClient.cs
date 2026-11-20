@@ -297,14 +297,31 @@ public sealed class TicketingClient
         string? callerKey,
         CancellationToken cancellationToken)
     {
-        // A request that isn't idempotent is only retried when it provably wasn't processed.
+        // A request that isn't idempotent is only retried when it provably wasn't processed. An idempotent write retried
+        // after an attempt that may have been carried out (a 5xx, a connection lost after sending) has an unknown outcome
+        // if a later attempt then fails, even one held back for rate: "nothing was changed" would no longer be true.
+        bool mayHaveBeenProcessed = false;
         for (int attempt = 1; ; attempt++)
         {
-            (bool done, T? result, TimeSpan retryDelay) = await AttemptAsync<T>(method, path, uri, body, continuationToken, idempotent, callerKey, attempt, cancellationToken);
+            bool done;
+            T? result;
+            TimeSpan retryDelay;
+            bool reached;
+            try
+            {
+                (done, result, retryDelay, reached) = await AttemptAsync<T>(method, path, uri, body, continuationToken, idempotent, callerKey, attempt, cancellationToken);
+            }
+            catch (TicketingApiException ex) when (mayHaveBeenProcessed && method != HttpMethod.Get && !ex.OutcomeUnknown)
+            {
+                throw TicketingApiException.Unknown(ex.StatusCode, ex.Message + " An earlier attempt may have been carried out.", ex);
+            }
+
             if (done)
             {
                 return result!;
             }
+
+            mayHaveBeenProcessed |= reached;
 
             // Waited out with every lease released, so a backoff holds no in-flight slot while others queue for one.
             await Task.Delay(retryDelay, cancellationToken);
@@ -314,7 +331,7 @@ public sealed class TicketingClient
     /// <summary>
     /// One attempt: the answer (Done), or the delay before trying again. Throws for a failure that isn't retried.
     /// </summary>
-    private async Task<(bool Done, T? Result, TimeSpan RetryDelay)> AttemptAsync<T>(
+    private async Task<(bool Done, T? Result, TimeSpan RetryDelay, bool MayHaveBeenProcessed)> AttemptAsync<T>(
         HttpMethod method,
         string path,
         Uri uri,
@@ -382,7 +399,7 @@ public sealed class TicketingClient
             ServiceMetrics.RecordUpstreamFailure(MetricOperation(path), statusCode: null, "network_error");
             ServiceMetrics.RecordUpstreamRetry(method, MetricOperation(path));
             _logger.LogWarning("Ticketing API {Method} /{Path} failed to connect (attempt {Attempt}); retrying. {Error}", method, path, attempt, ex.HttpRequestError);
-            return (false, default, Backoff(attempt, null));
+            return (false, default, Backoff(attempt, null), !IsPreSendFailure(ex));
         }
         catch (HttpRequestException ex)
         {
@@ -418,7 +435,7 @@ public sealed class TicketingClient
                         (int)response.StatusCode >= 500 ? "server_error" : "client_error");
                     ServiceMetrics.RecordUpstreamRetry(method, MetricOperation(path));
                     _logger.LogWarning("Ticketing API {Method} /{Path} returned {Status} (attempt {Attempt}); retrying.", method, path, (int)response.StatusCode, attempt);
-                    return (false, default, Backoff(attempt, response.Headers.RetryAfter));
+                    return (false, default, Backoff(attempt, response.Headers.RetryAfter), (int)response.StatusCode >= 500);
                 }
 
                 ReadOnlyMemory<byte> payload;
@@ -481,7 +498,7 @@ public sealed class TicketingClient
                     throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned an empty response.", null);
                 }
 
-                return (true, result, default);
+                return (true, result, default, true);
             }
         }
         catch (TicketingApiException ex)

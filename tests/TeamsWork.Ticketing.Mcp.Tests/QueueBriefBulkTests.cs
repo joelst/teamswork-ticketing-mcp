@@ -320,7 +320,7 @@ public sealed class QueueBriefBulkTests
     public async Task A_brief_of_five_activities_fits_the_4_kb_budget()
     {
         string acts = "{\"items\":[" + string.Join(",", Enumerable.Range(1, 20).Select(i => $$"""
-            {"id":"act-{{i}}-0000000000000000","action":"commented","comment":"{{new string('w', 300)}}\n\nFrom: Someone\nSent: earlier\n{{new string('q', 2000)}}",
+            {"id":"act-{{i}}-0000000000000000","action":"commented","comment":"{{new string('w', 300)}}\n\nFrom: Someone\nSent: earlier\nSubject: Re: help\n{{new string('q', 2000)}}",
              "user":{{(i % 2 == 0 ? Agent : Requestor)}},"createdOn":"2026-11-18T12:00:00.1234567Z","cc":[],"_ts":1,"inboundProcessingId":"x"}
             """)) + "]}";
         var handler = new Router(r => r.Path switch
@@ -587,13 +587,13 @@ public sealed class QueueBriefBulkTests
     }
 
     [Theory]
-    [InlineData("Thanks.\n________________________________\nFrom: Pat <pat@example.test>\nSent: Monday\nTo: Help\nold")]
-    [InlineData("Thanks.\nFrom: Pat <pat@example.test>\nDate: Monday\nold")]
+    [InlineData("Thanks.\n________________________________\nFrom: Pat <pat@example.test>\nSent: Monday\nTo: Help\nSubject: Re: help\nold")]
+    [InlineData("Thanks.\nFrom: Pat <pat@example.test>\nDate: Monday\nSubject: Re: help\nold")]
     [InlineData("Thanks.\n-----Original Message-----\nold")]
     [InlineData("Thanks.\nOn Mon, 1 Jan 2026 at 10:00, Pat wrote:\n> old")]
     [InlineData("Thanks.\r\n-----Original Message-----\r\nold")]
     [InlineData("Thanks.\r\nOn Mon, 1 Jan 2026 at 10:00, Pat wrote:\r\n> old")]
-    [InlineData("Thanks.\r\nFrom: Pat <pat@example.test>\r\nSent: Monday\r\nold")]
+    [InlineData("Thanks.\r\nFrom: Pat <pat@example.test>\r\nSent: Monday\r\nSubject: Re: help\r\nold")]
     public void A_real_quoted_reply_is_cut(string text)
     {
         Assert.StartsWith("Thanks. [quoted reply cut", TicketViews.StripQuoted(text), StringComparison.Ordinal);
@@ -870,18 +870,22 @@ public sealed class QueueBriefBulkTests
     [Fact]
     public async Task An_interrupted_confirmation_keeps_what_it_did_for_the_retry()
     {
+        // Priority and a status change with no comment: both PUTs, which a cancel can cut off after they were sent.
         var store = new BulkStore(Clock);
-        string token = await PreviewWeeklyAsync(store);
+        var preview = new Router(r => r.Path.EndsWith("/instance", StringComparison.Ordinal) ? InstanceJson : WeeklyChecks());
+        using JsonDocument previewed = JsonDocument.Parse(await Bulk(preview, store).PreviewBulkUpdate(
+            filter: new BulkFilter { TitlePattern = "Weekly check:*" }, set: Resolve with { Priority = "Urgent" }, cancellationToken: Ct));
+        string token = previewed.RootElement.GetProperty("confirmToken").GetString()!;
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         var confirm = new Router(r =>
         {
-            if (r.Method == HttpMethod.Put)
+            if (r.Method == HttpMethod.Put && r.Path.EndsWith("/status", StringComparison.Ordinal))
             {
-                cts.Cancel();   // the client gives up while the first ticket's change is out
+                cts.Cancel();   // the client gives up while the first ticket's status change is out
                 throw new OperationCanceledException(cts.Token);
             }
 
-            return "{\"item\":" + (r.Path.EndsWith(Id(1), StringComparison.Ordinal) ? Bulk(1, "Weekly check: backups", "In Progress", 1000) : Bulk(2, "Weekly check: patching", "In Progress", 2000)) + "}";
+            return "{\"item\":" + (r.Path.Contains(Id(1), StringComparison.Ordinal) ? Bulk(1, "Weekly check: backups", "In Progress", 1000) : Bulk(2, "Weekly check: patching", "In Progress", 2000)) + "}";
         });
         BulkTools bulk = Bulk(confirm, store);
 
@@ -896,7 +900,8 @@ public sealed class QueueBriefBulkTests
 
         using JsonDocument doc = JsonDocument.Parse(await bulk.BulkUpdate(token, Ct));
 
-        Assert.Contains("Interrupted", Assert.Single(doc.RootElement.GetProperty("failed").EnumerateArray()).GetProperty("error").GetString(), StringComparison.Ordinal);
+        string error = Assert.Single(doc.RootElement.GetProperty("failed").EnumerateArray()).GetProperty("error").GetString()!;
+        Assert.Contains("fields changed; the status change may or may not have been", error, StringComparison.Ordinal);
         Assert.NotNull(store.Find(doc.RootElement.GetProperty("resumeToken").GetString()!));   // ticket 102, not reached
     }
 
@@ -1120,7 +1125,7 @@ public sealed class QueueBriefBulkTests
     [Fact]
     public void The_whole_text_keeps_the_quoted_reply()
     {
-        var a = new Activity { Id = "a", Comment = "Thanks.\nFrom: Pat <pat@example.test>\nSent: Monday\nold message" };
+        var a = new Activity { Id = "a", Comment = "Thanks.\nFrom: Pat <pat@example.test>\nSent: Monday\nSubject: Re: help\nold message" };
 
         Assert.EndsWith("old message", TicketViews.Activity(a, includeHtml: false, TicketViews.FullTextChars)["text"]!.GetValue<string>(), StringComparison.Ordinal);
         Assert.Contains("quoted reply cut", TicketViews.Activity(a, includeHtml: false)["text"]!.GetValue<string>(), StringComparison.Ordinal);
@@ -1293,7 +1298,7 @@ public sealed class QueueBriefBulkTests
         Assert.Equal("    indented code\n    more", TicketViews.Activity(a, includeHtml: false, TicketViews.FullTextChars)["text"]!.GetValue<string>());
         Assert.Equal("indented code\n    more", TicketViews.Activity(a, includeHtml: false)["text"]!.GetValue<string>());
         Assert.EndsWith("[quoted reply cut; list_ticket_activities with maxChars=20000 has it]",
-            TicketViews.StripQuoted("Thanks.\r\nFrom: Pat\r\nSent: Monday\r\nTo: Help desk\r\n\r\nOld text"), StringComparison.Ordinal);
+            TicketViews.StripQuoted("Thanks.\r\nFrom: Pat\r\nSent: Monday\r\nTo: Help desk\r\nSubject: Re: help\r\n\r\nOld text"), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1568,7 +1573,7 @@ public sealed class QueueBriefBulkTests
         BulkTools bulk = Bulk(preview, new BulkStore(Clock));
 
         await Assert.ThrowsAsync<McpException>(() => bulk.PreviewBulkUpdate(filter: new BulkFilter { TitlePattern = "Weekly check:*" },
-            set: new BulkChanges { RemoveTags = [new TagRef { Text = "VPN", TagCategoryId = "No such category" }] }, cancellationToken: Ct));
+            set: new BulkChanges { RemoveTags = [new TagRemoval { Text = "VPN", TagCategoryId = "No such category" }] }, cancellationToken: Ct));
         using JsonDocument doc = JsonDocument.Parse(await bulk.PreviewBulkUpdate(filter: new BulkFilter { TitlePattern = "Weekly check:*" },
             set: Resolve, comment: new BulkComment { Text = "Checks complete.", IsPrivate = false }, cancellationToken: Ct));
 
@@ -1614,7 +1619,7 @@ public sealed class QueueBriefBulkTests
     [Fact]
     public void The_quoted_reply_note_comes_after_the_cut_whole()
     {
-        string text = new string('n', 300) + "\r\nFrom: Pat\r\nSent: Monday\r\nTo: Help desk\r\n\r\n" + new string('q', 5000);
+        string text = new string('n', 300) + "\r\nFrom: Pat\r\nSent: Monday\r\nTo: Help desk\r\nSubject: Re: help\r\n\r\n" + new string('q', 5000);
 
         string? reply = TicketViews.Reply("\r\n  " + text, 160);
 
@@ -1643,6 +1648,149 @@ public sealed class QueueBriefBulkTests
 
         Assert.Null(WorkflowStatus.IsResolved(t));
         Assert.True(WorkflowStatus.IsResolved(Parse<Ticket>("""{"id":"t","status":"c_done","isCustomWorkflow":true,"resolvedStatus":["c_done"]}""")));
+    }
+
+    // ---- Review round 9 ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task A_cancel_while_a_comment_waits_to_be_sent_puts_the_ticket_back()
+    {
+        // A comment, or a status change carrying one, is never cut off once sent, so a cancel ends it only before.
+        var store = new BulkStore(Clock);
+        string token = await PreviewWeeklyAsync(store);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var confirm = new Router(r =>
+        {
+            if (r.Method == HttpMethod.Put)
+            {
+                cts.Cancel();
+                throw new OperationCanceledException(cts.Token);
+            }
+
+            return "{\"item\":" + (r.Path.Contains(Id(1), StringComparison.Ordinal) ? Bulk(1, "Weekly check: backups", "In Progress", 1000) : Bulk(2, "Weekly check: patching", "In Progress", 2000)) + "}";
+        });
+        BulkTools bulk = Bulk(confirm, store);
+
+        try
+        {
+            await bulk.BulkUpdate(token, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        using JsonDocument doc = JsonDocument.Parse(await bulk.BulkUpdate(token, Ct));
+
+        Assert.False(doc.RootElement.TryGetProperty("failed", out _));
+        Assert.Equal(2, store.Find(doc.RootElement.GetProperty("resumeToken").GetString()!)!.Items.Count);
+    }
+
+    [Fact]
+    public async Task A_ticket_gate_waits_only_as_long_as_it_is_given_and_frees_when_released()
+    {
+        var store = new BulkStore(Clock);
+        Guid ticket = Guid.NewGuid();
+
+        IDisposable? first = await store.EnterTicketAsync(ticket, TimeSpan.Zero, Ct);
+        IDisposable? second = await store.EnterTicketAsync(ticket, TimeSpan.FromMilliseconds(50), Ct);
+        IDisposable? other = await store.EnterTicketAsync(Guid.NewGuid(), TimeSpan.Zero, Ct);   // another ticket isn't held up
+        first!.Dispose();
+        IDisposable? third = await store.EnterTicketAsync(ticket, TimeSpan.Zero, Ct);
+
+        Assert.Null(second);
+        Assert.NotNull(other);
+        Assert.NotNull(third);
+        other!.Dispose();
+        third!.Dispose();
+    }
+
+    [Fact]
+    public async Task A_write_retried_after_a_5xx_then_held_back_for_rate_has_an_unknown_outcome()
+    {
+        // The 503 may have come after the change was made; the retry is then refused by the caller's quota (one a minute).
+        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.ServiceUnavailable, "{}");
+        IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(TestFactory.Options(o => o.MaxUpstreamRequestsPerCallerPerMinute = 1));
+        using var quota = new UpstreamQuota(opts);
+        var client = new TicketingClient(new HttpClient(handler), opts, new TicketingRateLimiter(opts), new TimeZoneOffsetResolver(opts, Clock),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<TicketingClient>.Instance, Clock, quota, new KeyedCaller("me"));
+
+        TicketingApiException ex = await Assert.ThrowsAsync<TicketingApiException>(() =>
+            client.UpdateTicketStatusAsync(Guid.NewGuid(), "Resolved", null, null, new TicketUser("u1", "Jane", "jane@example.test"), null, Ct));
+
+        Assert.Single(handler.Requests);
+        Assert.True(ex.OutcomeUnknown);
+        Assert.False(ex.IsRateLimited);   // so a bulk confirmation reports it rather than resume it as untouched
+    }
+
+    [Fact]
+    public void A_transition_label_that_leads_on_from_here_isnt_where_the_ticket_already_is()
+    {
+        // Draft -Approve-> Manager approved -Approve-> Director approved: at the middle state, "Approve" still moves it.
+        Ticket t = Parse<Ticket>("""
+            {"id":"t","status":"s_mgr","isCustomWorkflow":true,
+             "workflow":[{"id":"s_draft","label":"Draft","nextSteps":[{"targetId":"s_mgr","transitionLabel":"Approve"}]},
+                         {"id":"s_mgr","label":"Manager approved","nextSteps":[{"targetId":"s_dir","transitionLabel":"Approve"}]},
+                         {"id":"s_dir","label":"Director approved","nextSteps":[]}]}
+            """);
+
+        Assert.False(WorkflowStatus.IsIn(t, "Approve"));
+        Assert.Equal("s_dir", WorkflowStatus.CheckTarget(t, "Approve", null));
+    }
+
+    [Fact]
+    public void Tags_in_a_shape_other_than_a_list_are_refused_not_read_as_none()
+    {
+        JsonElement single = JsonDocument.Parse("""{"tagCategoryId":"net","text":"VPN"}""").RootElement;
+
+        Assert.Throws<McpException>(() => TagEdits.Current(single, []));
+        Assert.Empty(TagEdits.Current(JsonDocument.Parse("null").RootElement, []));
+    }
+
+    [Theory]
+    [InlineData("Load test:\nFrom: 10.1.1.1\nSent: 500 requests\nAll were denied", false)]
+    [InlineData("Thanks.\nFrom: Pat <pat@example.test>\nSent: Monday\nTo: Help\nSubject: Re: VPN\nold", true)]
+    public void A_header_block_needs_a_subject_to_be_cut_as_a_quoted_email(string text, bool cut) =>
+        Assert.Equal(cut, TicketViews.StripQuoted(text).Contains("[quoted reply cut", StringComparison.Ordinal));
+
+    [Fact]
+    public void Custom_field_text_is_clipped_like_any_other_unless_the_whole_text_is_asked_for()
+    {
+        Ticket t = Parse<Ticket>($$"""{"id":"t","ticketNo":5,"customFields":{"notes":"{{new string('n', 5000)}}","count":3,"list":["{{new string('l', 5000)}}"]} }""");
+
+        JsonNode fields = TicketViews.Detail(t, includeHtml: false, textChars: 100)["customFields"]!;
+        JsonNode whole = TicketViews.Detail(t, includeHtml: false, textChars: TicketViews.FullTextChars)["customFields"]!;
+
+        Assert.True(fields["notes"]!.GetValue<string>().Length < 200);
+        Assert.True(fields["list"]![0]!.GetValue<string>().Length < 200);
+        Assert.Equal(3, fields["count"]!.GetValue<int>());
+        Assert.Equal(5000, whole["notes"]!.GetValue<string>().Length);
+    }
+
+    [Fact]
+    public void Without_the_staff_list_a_reply_from_someone_unplaced_leaves_waiting_on_unknown()
+    {
+        string stranger = """{"id":"x9","name":"Sam","email":"sam@example.test"}""";
+        List<Activity> history = Parse<List<Activity>>($$"""[{"action":"commented","comment":"Looking into it.","user":{{stranger}},"createdOn":"2026-11-18T12:00:00Z"}]""");
+
+        Waiting.State none = Waiting.Compute(Ticket("In Progress"), history, TicketPeople.From(null, TestFactory.Options()), resolved: false, complete: true, Now);
+        Waiting.State known = Waiting.Compute(Ticket("In Progress"), history, People(), resolved: false, complete: true, Now);
+
+        Assert.Null(none.WaitingOn);
+        Assert.True(none.RosterUnknown);
+        Assert.NotNull(known.WaitingOn);
+    }
+
+    [Fact]
+    public void Count_groups_and_queue_judge_staff_from_every_assignee_seen()
+    {
+        var cache = new InstanceCache(Microsoft.Extensions.Options.Options.Create(TestFactory.Options()), new TimeZoneOffsetResolver(Microsoft.Extensions.Options.Options.Create(TestFactory.Options()), Clock), Clock);
+        var alex = new TicketUser(Guid.NewGuid().ToString(), "Alex", "alex@example.test");
+
+        cache.Assignees.Remember(alex);
+        cache.Assignees.Remember(alex with { Name = "Alex B." });   // the same person, by object ID
+
+        Assert.Single(cache.Assignees.All);
+        Assert.True(TicketPeople.From(null, TestFactory.Options()).WithAgents(cache.Assignees.All).IsAgent(alex));
     }
 
     // ---- Helpers -------------------------------------------------------------------------------------------------

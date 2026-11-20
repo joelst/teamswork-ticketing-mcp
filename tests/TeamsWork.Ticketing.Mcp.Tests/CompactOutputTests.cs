@@ -208,7 +208,7 @@ public sealed class CompactOutputTests
         var activity = new Activity
         {
             Id = "a1",
-            Comment = "Thanks, that fixed it.\n\nFrom: Jane Doe <jane@example.test>\nSent: Monday\nOld message",
+            Comment = "Thanks, that fixed it.\n\nFrom: Jane Doe <jane@example.test>\nSent: Monday\nSubject: Re: help\nOld message",
             CommentHtml = "<p>Thanks</p>",
             CreatedDateTime = "2026-11-18T17:30:29.5Z",
             CreatedBy = new TicketUser("r1", "Pat Example", "pat@example.test"),

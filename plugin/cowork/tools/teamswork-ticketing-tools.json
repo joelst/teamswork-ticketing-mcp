@@ -1203,7 +1203,29 @@
                   "null"
                 ],
                 "items": {
-                  "$ref": "#/properties/set/properties/addTags/items"
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "tagCategoryId": {
+                      "description": "ID or name of the tag category (from list_tag_categories). Can be left out when the tag's text is in one category only.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "text": {
+                      "description": "Tag text as defined in the category (case doesn't matter).",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ]
                 }
               },
               "expectedDate": {

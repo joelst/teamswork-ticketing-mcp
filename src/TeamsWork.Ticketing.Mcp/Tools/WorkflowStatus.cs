@@ -147,8 +147,22 @@ internal static class WorkflowStatus
     public static List<string> StateNames(JsonElement? workflows)
     {
         List<WorkflowState> found = StatesIn(workflows);
-        IEnumerable<string> names = found.Count > 0 ? found.Select(s => s.Label ?? s.Id!) : DefaultStates;
-        return names.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (found.Count == 0)
+        {
+            return [.. DefaultStates];
+        }
+
+        // A label more than one state has (two custom states, or a custom state named like a default one) can't choose
+        // between them, so such a state is named with its ID too, which the status filter takes.
+        Dictionary<string, int> owners = found.Select(s => (Id: s.Id!, Label: s.Label ?? s.Id!))
+            .Concat(DefaultStates.Select(d => (Id: d, Label: d)))
+            .DistinctBy(s => s.Id, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(s => s.Label, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+        return found
+            .Select(s => s.Label is string label && owners[label] > 1 && !Same(label, s.Id) ? $"{label} (ID {s.Id})" : s.Label ?? s.Id!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     /// <summary>
@@ -293,14 +307,13 @@ internal static class WorkflowStatus
             return true;
         }
 
-        // A custom workflow's ticket carries the state's ID; when its label can't be found, a list of labels can't say.
-        string? label = LabelOf(ticket, instanceWorkflows);
-        if (ticket.IsCustomWorkflow == true && Same(label, ticket.Status))
+        // A custom workflow's ticket carries the state's ID; when that state can't be found, a list of labels can't say.
+        if (StatesOf(ticket, instanceWorkflows) is not { } states || Current(states, ticket.Status) is not { } current)
         {
-            return null;
+            return ticket.IsCustomWorkflow == true ? null : false;
         }
 
-        return resolved.Any(r => Same(r, label));
+        return resolved.Any(r => Same(r, current.Label));
     }
 
     /// <summary>The ticket's current state in its workflow, when exactly one state has its status as ID or label.</summary>
@@ -364,6 +377,7 @@ internal static class WorkflowStatus
         (StatesOf(ticket, instanceWorkflows) is { } states && Current(states, ticket.Status) is { } current &&
          (Same(current.Id, target) || Same(current.Label, target) ||
           (!states.Any(s => Same(s.Id, target) || Same(s.Label, target)) &&
+           current.NextSteps?.Any(n => Same(n.TransitionLabel, target)) != true &&   // a step of that name leads on from here
            states.Any(s => s.NextSteps?.Any(n => Same(n.TransitionLabel, target) && Same(n.TargetId, current.Id)) == true))));
 
     /// <summary>

@@ -29,8 +29,9 @@ From the TeamsWork Ticketing connector: `list_tickets`, `get_queue`, `get_ticket
    - Otherwise, list recent unresolved tickets with `list_tickets`: `isResolved: false`, `orderBy: createdDateTime`,
      and a `createdAfter` date (default to the last 2 days, as YYYY-MM-DD). Its rows are already summaries.
    - For the unassigned backlog ("sort out the unassigned tickets"), call `get_queue` with `who: unassigned`
-     instead; `include: ["counts"]` adds the backlog's size. `count_tickets` with `groupBy: assignee` also shows how
-     many are "(unassigned)".
+     instead; `include: ["waitingOn", "idleDays", "sla", "counts"]` adds the backlog's size (`include` replaces the
+     default extras, so list them too to keep them and the urgency order). `count_tickets` with `groupBy: assignee`
+     also shows how many are "(unassigned)".
    - If `continuationToken` comes back, there are more; say how many you looked at and offer to continue.
 
 2. **Read each ticket.** Call `get_ticket_brief` for its details, recent activity and attachments in one call.

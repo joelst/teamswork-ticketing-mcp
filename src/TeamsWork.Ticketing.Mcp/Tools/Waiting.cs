@@ -21,9 +21,15 @@ internal sealed class TicketPeople
 
     private TicketPeople(IReadOnlySet<string> system) => _system = system;
 
+    /// <summary>
+    /// Whether the instance's assignee list was read. Without it, someone writing who isn't the ticket's assignee or
+    /// requestor may be staff or may not, so their reply can't say who the ticket waits on.
+    /// </summary>
+    public bool HasRoster { get; private init; }
+
     public static TicketPeople From(Instance? instance, TicketingOptions options)
     {
-        var people = new TicketPeople(options.SystemAccountSet());
+        var people = new TicketPeople(options.SystemAccountSet()) { HasRoster = instance?.Assignees?.Peoples is not null };
         foreach (Persona p in instance?.Assignees?.Peoples ?? [])
         {
             people.AddAgent(p.Id, p.Email);
@@ -171,7 +177,11 @@ internal static partial class Waiting
     /// Why <paramref name="WaitingOn"/> is null when it is: true when whether the ticket is resolved isn't known, false
     /// when the history read doesn't reach back far enough to tell.
     /// </param>
-    public sealed record State(string? WaitingOn, DateTimeOffset? WaitingSince, int? IdleDays, Reply? LastPublic, bool ResolutionUnknown = false);
+    /// <param name="RosterUnknown">
+    /// True when <paramref name="WaitingOn"/> is null because the latest reply's author couldn't be placed: the staff
+    /// list wasn't read, and they are neither the ticket's assignee nor its requestor.
+    /// </param>
+    public sealed record State(string? WaitingOn, DateTimeOffset? WaitingSince, int? IdleDays, Reply? LastPublic, bool ResolutionUnknown = false, bool RosterUnknown = false);
 
     /// <param name="By">requestor, agent, or other (someone else on the requestor's side, such as a cc).</param>
     public sealed record Reply(string By, DateTimeOffset? On, string? Text);
@@ -236,6 +246,12 @@ internal static partial class Waiting
             // Nobody has replied since the ticket was created: it waits on its assignee. With only its latest history read,
             // an older reply may still decide, so it is unknown.
             return complete ? new State(Assignee, created, idle, null) : new State(null, null, idle, null);
+        }
+
+        if (reply.By == "other" && !people.HasRoster)
+        {
+            // Without the staff list, an author who is neither assignee nor requestor may be an agent.
+            return new State(null, null, idle, reply, RosterUnknown: true);
         }
 
         return new State(reply.By == "agent" ? Requestor : Assignee, reply.On, idle, reply);

@@ -142,6 +142,28 @@ public sealed class UsabilityTests
     }
 
     [Fact]
+    public async Task A_rows_status_label_and_id_together_name_one_state()
+    {
+        var handler = new FakeHttpHandler()
+            .Enqueue(HttpStatusCode.OK, """{"item":{"id":"i","workflows":[{"id":"w1","states":[{"id":"s1","label":"Waiting on vendor","nextSteps":[]}]}]}}""")
+            .Enqueue(HttpStatusCode.OK, """{"items":[]}""");
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
+
+        await new TicketTools(client, new FixedActor(Jane), cache, options).ListTickets(status: "Waiting on vendor", statusId: "s1", cancellationToken: Ct);
+
+        Assert.Equal("s1", TestFactory.Query(handler.Requests[^1].Uri)["statusId"]);
+    }
+
+    [Fact]
+    public void State_names_give_the_id_of_a_state_whose_label_another_shares()
+    {
+        List<string> names = WorkflowStatus.StateNames(CustomWorkflows);
+
+        Assert.Contains("Open (ID s2)", names);        // a custom state named like the default Open
+        Assert.Contains("Waiting on vendor", names);   // a label only one state has
+    }
+
+    [Fact]
     public async Task Status_and_its_older_name_must_agree()
     {
         (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(new FakeHttpHandler());

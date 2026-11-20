@@ -99,11 +99,25 @@ public sealed class LookupTools
             _cache.Numbers.Remember(t);
             ListResponse<Activity> h = await history;
             IReadOnlyList<Activity> recent = h.Items ?? [];
-            System.Text.Json.JsonElement? workflows = await WorkflowStatus.WorkflowsForAsync(t, _cache, _client, timezoneOffset, cancellationToken);
+            // The instance settings (cached), read once: the ticket's workflow and the help desk's staff both come from
+            // them, and a failed read isn't cached, so reading them twice would repeat a failure.
+            Instance? instance = null;
+            try
+            {
+                instance = await _cache.GetInstanceAsync(_client, timezoneOffset, refresh: false, cancellationToken);
+            }
+            catch (TicketingApiException)
+            {
+                // They only add to what's known: without them, states show as the ticket carries them.
+            }
+
+            System.Text.Json.JsonElement? workflows = t.Workflow is { Count: > 0 } ? null : instance?.Workflows;
             JsonObject brief = TicketViews.Detail(t, includeHtml, workflows, detailChars);
 
-            // The caller counts as staff, as in get_queue, so their own replies aren't taken for the requestor's.
-            TicketPeople people = await TicketPeople.LoadAsync(_cache, _client, _options, timezoneOffset, cancellationToken);
+            // The caller and everyone seen as an assignee count as staff, as in get_queue, so the two tools judge a reply
+            // alike and the caller's own replies aren't taken for the requestor's.
+            _cache.Assignees.Remember(t.Assignee);
+            TicketPeople people = TicketPeople.From(instance, _options).WithAgents(_cache.Assignees.All);
             if (await CallerAsync(cancellationToken) is TicketUser caller)
             {
                 people.WithAgents([caller]);
@@ -165,6 +179,7 @@ public sealed class LookupTools
             string? leftOut = left.Any(x => x is not null) ? $"Left out: {string.Join(" and ", left.OfType<string>())} (includeAutomation, includePrivate)." : null;
             string? unknown = state.WaitingOn is not null ? null
                 : state.ResolutionUnknown ? "waitingOn is left out: the ticket's workflow doesn't say whether its state is resolved."
+                : state.RosterUnknown ? "waitingOn is left out: the help desk's staff list couldn't be read, so whether the latest reply came from staff isn't known."
                 : $"waitingOn is left out: none of the latest {recent.Count} activities is a public reply; list_ticket_activities has older ones.";
             if (string.Join(" ", new[] { unknown, leftOut, more }.OfType<string>()) is { Length: > 0 } hint)
             {

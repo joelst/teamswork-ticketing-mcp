@@ -174,7 +174,7 @@ internal sealed partial class InstanceLookup
         {
             throw new McpException(
                 $"'{paramName}' mixes the ID and email of different people ({(byId ?? byEmail)!.Name} is in the assignee list with other " +
-                "details). Use the id, name, and email exactly as get_instance lists them, or just the email.");
+                "details). Give just the listed person's email (get_instance shows each assignee as name and email).");
         }
 
         if (assigneeOnly)
