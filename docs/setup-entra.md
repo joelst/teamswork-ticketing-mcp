@@ -50,12 +50,16 @@ Cloud Application Administrator (see Microsoft's
 ```powershell
 & {
     $ErrorActionPreference = 'Stop'   # a failed request stops it, so nothing is revoked from a partial list
-    $cli    = az ad sp show --id 04b07795-8ddb-461a-bbee-02f9e1bf7b46 --query id -o tsv 2>$null   # the Azure CLI
+    # az reports a failure (an expired sign-in, say) only in its exit code, which 'Stop' doesn't catch, so check it here:
+    # otherwise a failed lookup would read as "no service principal".
+    function Invoke-Az { $out = az @args; if ($LASTEXITCODE) { throw "az $($args[0..2] -join ' ') failed (exit $LASTEXITCODE)." }; $out }
+    # 'sp list' returns nothing, successfully, for an app with no service principal; 'sp show' fails for it.
+    $cli    = Invoke-Az ad sp list --filter "appId eq '04b07795-8ddb-461a-bbee-02f9e1bf7b46'" --query '[0].id' -o tsv   # the Azure CLI
     if (-not $cli) { 'The Azure CLI has no service principal in this tenant, so it holds no consent to revoke.'; return }
-    $server = az ad sp show --id <serverClientId> --query id -o tsv
+    $server = Invoke-Az ad sp list --filter "appId eq '<serverClientId>'" --query '[0].id' -o tsv
     if (-not $server) { throw 'No service principal for <serverClientId>: check the client ID and that az is signed in to the right tenant.' }
     # Invoke-RestMethod rather than az rest: a next-page link holds '&', which az.cmd on Windows would split on.
-    $headers = @{ Authorization = 'Bearer ' + (az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv) }
+    $headers = @{ Authorization = 'Bearer ' + (Invoke-Az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv) }
     # Every page: each user's consent is a grant of its own, so there can be more than Graph returns at once.
     $url = "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$cli' and resourceId eq '$server'"
     $grants = @()
