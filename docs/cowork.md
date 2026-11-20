@@ -126,6 +126,19 @@ The script checks the skills and manifest against Microsoft's upload rules first
 It then writes `artifacts/cowork/teamswork-ticketing-cowork.zip`. `./scripts/Build-CoworkPackage.ps1 -CheckOnly`
 runs just the checks; CI runs them with `scripts/tests/Test-CoworkPlugin.ps1`.
 
+The manifest's `id` is your organization's own. Microsoft 365 identifies the plugin by it, so the template carries
+only an `{{APP_ID}}` placeholder, and the checks fail if a real ID is committed. The first build creates a new ID and
+saves it in `plugin/cowork/app-id.txt`, which git ignores; later builds reuse it. Keep that file, or note the ID it
+prints: building without it creates a new ID, and uploading that package adds a second plugin instead of updating
+the first. To build with a known ID, such as one from an earlier install, pass `-AppId <GUID>`. The organization
+name, URLs and package aren't committed either: they're build parameters, and the package is written under the
+git-ignored `artifacts/`.
+
+To keep your values for the next build, add `-SaveSettings` once. The build writes them, with the app ID, to
+`plugin/cowork/cowork.local.json`, which git also ignores. After that, `./scripts/Build-CoworkPackage.ps1` with no
+arguments builds your package. A value you pass still wins over the saved one, but is saved only with `-SaveSettings`
+again. Keep the file with your other deployment notes: it's your organization's copy of the plugin's settings.
+
 Before uploading, check the package with the upload's own rules:
 `atk validate --package-file ./artifacts/cowork/teamswork-ticketing-cowork.zip`. It reports one warning, which you can
 ignore for your own organization: the short name contains "Teams", from the vendor's product name TeamsWork, and
@@ -136,8 +149,8 @@ schema requires it, though Cowork reads the tools from the endpoint itself. Afte
 refresh it with `./scripts/Update-CoworkToolDescription.ps1`; the tests fail when its tool names fall out of step with
 the source.
 
-The icons in `plugin/cowork/` are placeholders. Replace them before publishing: `color.png` is 192×192, and
-`outline.png` is a 32×32 white outline on a transparent background.
+The icons in `plugin/cowork/` are a ticket with a check mark. A replacement must keep their format: `color.png` is
+192×192, and `outline.png` is a 32×32 white outline on a transparent background.
 
 ## 4. Install it for yourself
 
@@ -166,8 +179,8 @@ Changes are recorded as you: `whoami` shows the account. The server accepts any 
 ## 6. Publish to the organization
 
 Go to Microsoft 365 admin center → **Manage apps** → **Upload custom app** → **...** → **Add agent**, and upload the
-same `.zip`. For an update, raise `version` in `plugin/cowork/manifest.json`, rebuild, and upload again. Keep `id`
-unchanged: it identifies the plugin across versions.
+same `.zip`. For an update, raise `version` in `plugin/cowork/manifest.json`, rebuild, and upload again. Build with
+the same app ID (`plugin/cowork/app-id.txt` or `-AppId`): it identifies the plugin across versions.
 
 ## Troubleshooting
 

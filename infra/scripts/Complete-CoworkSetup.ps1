@@ -18,7 +18,8 @@
       5. Prints the Teams developer portal's OAuth client registration fields. That registration has no documented
          API, so you create it by hand. It gives the OAuth client registration ID.
       6. With -OAuthReferenceId and the developer URLs, builds the package with scripts/Build-CoworkPackage.ps1.
-         With -Install as well, installs it for you with the Agents Toolkit CLI (atk).
+         The first build creates the plugin's own app ID in plugin/cowork/app-id.txt (git-ignored); -AppId uses a
+         specific one instead. With -Install as well, installs it for you with the Agents Toolkit CLI (atk).
 
     Requires Azure CLI 2.60+ signed in to the tenant with rights to register apps, grant admin consent and assign
     users (Application Administrator, as for New-EntraAppRegistrations.ps1). Assigning a group needs Entra ID P1 or
@@ -51,6 +52,7 @@ param(
     [string] $WebsiteUrl,
     [string] $PrivacyUrl,
     [string] $TermsUrl,
+    [string] $AppId,
     [switch] $Install,
     [switch] $OpenPortal
 )
@@ -298,7 +300,7 @@ if ($missing) { throw "The package needs -$($missing -join ', -') (the organizat
 
 $build = Join-Path $repoRoot 'scripts/Build-CoworkPackage.ps1'
 & $build -McpServerUrl $McpServerUrl -OAuthReferenceId $OAuthReferenceId -DeveloperName $DeveloperName `
-    -WebsiteUrl $WebsiteUrl -PrivacyUrl $PrivacyUrl -TermsUrl $TermsUrl
+    -WebsiteUrl $WebsiteUrl -PrivacyUrl $PrivacyUrl -TermsUrl $TermsUrl -AppId $AppId
 $zip = Join-Path $repoRoot 'artifacts/cowork/teamswork-ticketing-cowork.zip'
 
 # Wrapped in @(): an if expression would unroll a one-item array, leaving the string 'atk', whose [0] is 'a'.

@@ -11,10 +11,23 @@
     from the Teams developer portal, and the developer URLs from the organization publishing the plugin. No secret
     goes into the package; the auth config ID only points at the OAuth client stored in Microsoft's token store.
 
+    The app ID is each organization's own too: Microsoft 365 identifies the plugin by it, so two organizations
+    building from this repository must not share one. The first build creates a new ID and saves it in
+    plugin/cowork/app-id.txt (git-ignored), and later builds reuse it, so an upload updates the plugin rather than
+    adding a second one. Pass -AppId to use a specific ID instead, such as the one an existing install was built with.
+
+    To build without repeating the values, keep them in plugin/cowork/cowork.local.json (git-ignored): any value not
+    passed is read from it, and -SaveSettings writes the values a build used (the app ID included) into it. -SettingsPath
+    points at another file.
+
 .EXAMPLE
     ./scripts/Build-CoworkPackage.ps1 -McpServerUrl https://taasmcp-test-app.example.azurecontainerapps.io/mcp `
         -OAuthReferenceId <auth config ID> -DeveloperName 'Contoso' -WebsiteUrl https://contoso.com `
         -PrivacyUrl https://contoso.com/privacy -TermsUrl https://contoso.com/terms
+
+.EXAMPLE
+    ./scripts/Build-CoworkPackage.ps1
+    Builds with the values saved in plugin/cowork/cowork.local.json by an earlier build with -SaveSettings.
 
 .EXAMPLE
     ./scripts/Build-CoworkPackage.ps1 -CheckOnly
@@ -22,13 +35,16 @@
 #>
 [CmdletBinding(DefaultParameterSetName = 'Build')]
 param(
-    [Parameter(Mandatory, ParameterSetName = 'Build')] [string] $McpServerUrl,
-    [Parameter(Mandatory, ParameterSetName = 'Build')] [string] $OAuthReferenceId,
-    [Parameter(Mandatory, ParameterSetName = 'Build')] [string] $DeveloperName,
-    [Parameter(Mandatory, ParameterSetName = 'Build')] [string] $WebsiteUrl,
-    [Parameter(Mandatory, ParameterSetName = 'Build')] [string] $PrivacyUrl,
-    [Parameter(Mandatory, ParameterSetName = 'Build')] [string] $TermsUrl,
+    [Parameter(ParameterSetName = 'Build')] [string] $McpServerUrl,
+    [Parameter(ParameterSetName = 'Build')] [string] $OAuthReferenceId,
+    [Parameter(ParameterSetName = 'Build')] [string] $DeveloperName,
+    [Parameter(ParameterSetName = 'Build')] [string] $WebsiteUrl,
+    [Parameter(ParameterSetName = 'Build')] [string] $PrivacyUrl,
+    [Parameter(ParameterSetName = 'Build')] [string] $TermsUrl,
+    [Parameter(ParameterSetName = 'Build')] [string] $AppId,
     [Parameter(ParameterSetName = 'Build')] [string] $OutputPath,
+    [Parameter(ParameterSetName = 'Build')] [string] $SettingsPath,
+    [Parameter(ParameterSetName = 'Build')] [switch] $SaveSettings,
     [Parameter(Mandatory, ParameterSetName = 'Check')] [switch] $CheckOnly
 )
 
@@ -74,7 +90,8 @@ function Test-CoworkPluginSource([string] $PluginRoot) {
         if ($field -notin $allowedRootFields) { $problems.Add("manifest field '$field' isn't allowed by the v1.28 schema") }
     }
     if ($manifest.manifestVersion -ne '1.28') { $problems.Add("manifestVersion must be 1.28, not '$($manifest.manifestVersion)'") }
-    if (-not ($manifest.id -as [guid])) { $problems.Add('manifest id must be a GUID') }
+    # Each organization's build gets its own ID (see Resolve-AppId), so the template never carries one.
+    if ($manifest.id -cne '{{APP_ID}}') { $problems.Add("manifest id must be the {{APP_ID}} placeholder, not '$($manifest.id)'; the build fills in each organization's own ID") }
     # Agents Toolkit's validation (the upload's rules) refuses a version starting with 0, such as 0.1.0.
     if ([string] $manifest.version -notmatch '^[1-9]\d*(\.\d+){1,2}$') { $problems.Add("manifest version '$($manifest.version)' must be like 1.0.0 and not start with 0") }
     foreach ($icon in $manifest.icons.color, $manifest.icons.outline) {
@@ -157,6 +174,52 @@ function Expand-ManifestTemplate([string] $Template, [hashtable] $Values) {
     return $text
 }
 
+# The plugin's app ID: -AppId when given, else the one saved in $IdFile, else a new one saved there for later builds.
+# An explicit -AppId isn't saved, so a test or one-off build can't replace the ID an organization's installs use.
+function Resolve-AppId([string] $Given, [string] $IdFile) {
+    if ($Given) {
+        $id = $Given -as [guid]
+        if (-not $id -or $id -eq [guid]::Empty) { throw "-AppId must be a GUID, not '$Given'." }
+        return $id.ToString()
+    }
+    if (Test-Path -LiteralPath $IdFile -PathType Leaf) {
+        $saved = (Get-Content -Raw -LiteralPath $IdFile).Trim()
+        $id = $saved -as [guid]
+        if (-not $id -or $id -eq [guid]::Empty) { throw "$IdFile must hold the plugin's app ID (a GUID), not '$saved'." }
+        return $id.ToString()
+    }
+    $id = [guid]::NewGuid().ToString()
+    Set-Content -LiteralPath $IdFile -Value $id -Encoding ascii
+    Write-Host "Created app ID $id for this plugin and saved it in $IdFile (git-ignored). Keep that file: later builds"
+    Write-Host 'reuse it, so an upload updates the plugin instead of adding a second one.'
+    return $id
+}
+
+# The names a settings file holds, as the build's parameters are named.
+function Get-CoworkSettingNames { 'AppId', 'McpServerUrl', 'OAuthReferenceId', 'DeveloperName', 'WebsiteUrl', 'PrivacyUrl', 'TermsUrl' }
+
+# $Given with each value it lacks taken from the settings file at $Path, when there is one.
+function Merge-CoworkSettings([hashtable] $Given, [string] $Path) {
+    $merged = @{}
+    foreach ($name in $Given.Keys) { $merged[$name] = $Given[$name] }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $merged }
+    try { $saved = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json }
+    catch { throw "$Path isn't valid JSON: $($_.Exception.Message)" }
+    foreach ($name in Get-CoworkSettingNames) {
+        $value = $saved.$name
+        if (-not $merged[$name] -and $value) { $merged[$name] = [string] $value }
+    }
+    return $merged
+}
+
+# Writes the values a build used to the settings file at $Path, for later builds.
+function Save-CoworkSettings([hashtable] $Values, [string] $Path) {
+    $ordered = [ordered]@{}
+    foreach ($name in Get-CoworkSettingNames) { $ordered[$name] = $Values[$name] }
+    $json = ConvertTo-Json ([pscustomobject] $ordered)
+    [System.IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+}
+
 function Assert-HttpsUrl([string] $Name, [string] $Value) {
     $uri = $null
     if (-not ([Uri]::TryCreate($Value, [UriKind]::Absolute, [ref] $uri) -and $uri.Scheme -eq 'https')) {
@@ -171,13 +234,26 @@ if ($problems) {
 }
 if ($CheckOnly) { Write-Host 'Plugin skills and manifest template pass the upload checks.'; return }
 
+if (-not $SettingsPath) { $SettingsPath = Join-Path $pluginRoot 'cowork/cowork.local.json' }
+$given = @{}
+foreach ($name in Get-CoworkSettingNames) { $given[$name] = (Get-Variable -Name $name -ValueOnly) }
+$values = Merge-CoworkSettings $given $SettingsPath
+$missing = @(Get-CoworkSettingNames | Where-Object { $_ -ne 'AppId' -and -not $values[$_] })
+if ($missing) {
+    throw "Missing $($missing -join ', '). Pass them (-$($missing[0]) ...), or save them once with -SaveSettings so later builds read them from $SettingsPath."
+}
+$McpServerUrl = $values.McpServerUrl; $OAuthReferenceId = $values.OAuthReferenceId; $DeveloperName = $values.DeveloperName
+$WebsiteUrl = $values.WebsiteUrl; $PrivacyUrl = $values.PrivacyUrl; $TermsUrl = $values.TermsUrl
+
 Assert-HttpsUrl 'McpServerUrl' $McpServerUrl
 Assert-HttpsUrl 'WebsiteUrl' $WebsiteUrl
 Assert-HttpsUrl 'PrivacyUrl' $PrivacyUrl
 Assert-HttpsUrl 'TermsUrl' $TermsUrl
 if ($OAuthReferenceId -notmatch '^\S+$') { throw '-OAuthReferenceId must be the auth config ID from the Teams developer portal.' }
+$resolvedAppId = Resolve-AppId $values.AppId (Join-Path $pluginRoot 'cowork/app-id.txt')
 
 $manifestText = Expand-ManifestTemplate (Get-Content -Raw -Encoding UTF8 (Join-Path $pluginRoot 'cowork/manifest.json')) @{
+    APP_ID             = $resolvedAppId
     MCP_SERVER_URL     = $McpServerUrl
     OAUTH_REFERENCE_ID = $OAuthReferenceId
     DEVELOPER_NAME     = $DeveloperName
@@ -214,5 +290,11 @@ try {
 }
 finally { $zip.Dispose() }
 
-Write-Host "Built $zipPath"
+if ($SaveSettings) {
+    $values.AppId = $resolvedAppId
+    Save-CoworkSettings $values $SettingsPath
+    Write-Host "Saved these values in $SettingsPath (keep it out of source control; .gitignore lists the default path)."
+}
+
+Write-Host "Built $zipPath (app ID $resolvedAppId)"
 Write-Host 'Install it for yourself with: atk install --file-path <that path> --scope Personal (see docs/cowork.md).'
