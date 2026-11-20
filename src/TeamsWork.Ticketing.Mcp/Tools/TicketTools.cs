@@ -110,7 +110,8 @@ public sealed class TicketTools
                 isResolved is null ? filter?.Hint : null,
                 r.ContinuationToken is null ? null : "More results are available: call again with the same filters and this continuationToken.",
             }.OfType<string>());
-            List<JsonObject> rows = items.Select(t => TicketViews.Row(t, content: extra is not null)).ToList();
+            JsonElement? workflows = await WorkflowStatus.WorkflowsForLabelsAsync(items, _cache, _client, timezoneOffset, cancellationToken);
+            List<JsonObject> rows = items.Select(t => TicketViews.Row(t, content: extra is not null, workflows)).ToList();
             return new PageResult<JsonObject>(rows, rows.Count, r.ItemCount, r.ContinuationToken, hint.Length > 0 ? hint : null);
         });
     }
@@ -324,12 +325,16 @@ public sealed class TicketTools
                 current = new Ticket();
             }
 
-            target = WorkflowStatus.CheckTarget(current, target, note, await WorkflowStatus.WorkflowsForAsync(current, _cache, _client, timezoneOffset, cancellationToken));
+            JsonElement? workflows = await WorkflowStatus.WorkflowsForAsync(current, _cache, _client, timezoneOffset, cancellationToken);
+            target = WorkflowStatus.CheckTarget(current, target, note, workflows);
             Ticket updated = await _client.UpdateTicketStatusAsync(id, target, res, note, actor.ToTicketUser(), timezoneOffset, cancellationToken);
             _cache.Numbers.Remember(updated);
+            var state = new JsonObject();
+            TicketViews.Status(state, updated.Status is null ? new Ticket { Status = target, Workflow = current.Workflow, IsCustomWorkflow = current.IsCustomWorkflow } : updated, workflows);
             return TicketViews.Ack(updated, actor, new Dictionary<string, object?>
             {
-                ["status"] = updated.Status ?? target,
+                ["status"] = state["status"]?.GetValue<string>() ?? target,
+                ["statusId"] = state["statusId"]?.GetValue<string>(),
                 ["resolution"] = res,
                 ["comment"] = note is null ? null : "added",
             });

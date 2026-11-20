@@ -105,16 +105,36 @@ internal static partial class TicketViews
     /// The new part of an emailed comment: the quoted earlier message that follows a reply is cut where its header starts
     /// (an Outlook From/Sent block, "-----Original Message-----", or "On … wrote:").
     /// </summary>
-    public static string StripQuoted(string text)
+    public static string StripQuoted(string text) => Reply(text, int.MaxValue)!;
+
+    /// <summary>
+    /// An emailed comment's new part, cut to <paramref name="max"/> characters, with a note when the quoted earlier
+    /// message was cut. The note goes after the cut, so it is never cut itself.
+    /// </summary>
+    public static string? Reply(string? text, int max)
     {
-        Match quote = QuoteStart().Match(text);
-        if (!quote.Success || quote.Index == 0)
+        if (Blank(text) is not string t)
         {
-            return text;
+            return null;
         }
 
-        return text[..quote.Index].TrimEnd() + " [quoted reply cut; list_ticket_activities with maxChars=20000 has it]";
+        Match quote;
+        try
+        {
+            quote = QuoteStart().Match(t);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // Cutting the quote is a nicety: an odd text that takes too long is kept whole (and still clipped).
+            return Clip(t, max);
+        }
+
+        return !quote.Success || quote.Index == 0
+            ? Clip(t, max)
+            : Clip(t[..quote.Index].TrimEnd(), max) + QuoteCutNote;
     }
+
+    private const string QuoteCutNote = " [quoted reply cut; list_ticket_activities with maxChars=20000 has it]";
 
     // ---- Tickets ----------------------------------------------------------------------------------------------------
 
@@ -122,12 +142,12 @@ internal static partial class TicketViews
     /// A ticket in a list: what triage needs. <paramref name="content"/> adds text fields a 'select' asked for
     /// (description, custom fields, resolution comment); scans that read whole tickets leave them out.
     /// </summary>
-    public static JsonObject Row(Ticket t, bool content = false)
+    public static JsonObject Row(Ticket t, bool content = false, JsonElement? workflows = null)
     {
         var o = new JsonObject();
         Number(o, t);
         Add(o, "title", t.Title);
-        Add(o, "status", t.Status);
+        Status(o, t, workflows);
         Add(o, "priority", Priority(t.Priority));
         Add(o, "assignee", Person(t.Assignee));
         Add(o, "requestor", Person(t.Requestor));
@@ -161,7 +181,7 @@ internal static partial class TicketViews
     /// </summary>
     public static JsonObject Detail(Ticket t, bool includeHtml, JsonElement? instanceWorkflows = null, int textChars = DetailTextChars)
     {
-        JsonObject o = Row(t, content: true);
+        JsonObject o = Row(t, content: true, instanceWorkflows);
         o.Remove("description");
         o.Remove("lastResolutionComment");
         Add(o, "id", t.Id);
@@ -213,7 +233,7 @@ internal static partial class TicketViews
         Add(o, "id", a.Id);
         Add(o, "on", Time(a.When));
         Add(o, "by", Person(a.Author));
-        string? text = string.IsNullOrWhiteSpace(a.Comment) ? null : Clip(maxChars >= FullTextChars ? a.Comment : StripQuoted(a.Comment.Trim()), maxChars);
+        string? text = maxChars >= FullTextChars ? Clip(a.Comment, maxChars) : Reply(a.Comment, maxChars);
         bool changes = a.Changes is { Count: > 0 };
         string? action = Blank(a.Action) is string act && act.Length <= 40 ? act : null;
         Add(o, "kind",
@@ -239,8 +259,9 @@ internal static partial class TicketViews
             {
                 var change = new JsonObject();
                 Add(change, "field", c.Name);
-                Add(change, "from", Clip(ChangeValue(c.OldValue), ChangeValueChars));
-                Add(change, "to", Clip(ChangeValue(c.NewValue), ChangeValueChars));
+                // Short by default; whole when the full text is asked for, as a description edit can differ anywhere.
+                Add(change, "from", Clip(ChangeValue(c.OldValue), maxChars >= FullTextChars ? FullTextChars : ChangeValueChars));
+                Add(change, "to", Clip(ChangeValue(c.NewValue), maxChars >= FullTextChars ? FullTextChars : ChangeValueChars));
                 list.Add(change);
             }
 
@@ -314,6 +335,21 @@ internal static partial class TicketViews
         [property: JsonPropertyName("warning")] string? Warning);
 
     // ---- Helpers ----------------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A ticket's state as its workflow labels it, and its raw value as statusId when that differs: a custom workflow's
+    /// ticket carries the state's ID, which says nothing to a reader. update_ticket_status and the status filter take
+    /// either.
+    /// </summary>
+    public static void Status(JsonObject o, Ticket t, JsonElement? workflows)
+    {
+        string? label = Blank(WorkflowStatus.LabelOf(t, workflows));
+        Add(o, "status", label);
+        if (Blank(t.Status) is string raw && !string.Equals(raw, label, StringComparison.OrdinalIgnoreCase))
+        {
+            o["statusId"] = raw;
+        }
+    }
 
     /// <summary>A ticket's tag texts, from either shape the API uses (plain texts, or {tagCategoryId, text}).</summary>
     public static JsonArray? Tags(JsonElement? tags)

@@ -111,6 +111,9 @@ public sealed class WorkloadTools
                     "or escalate an SLA. A Ticketing administrator can turn it on in the instance's SLA settings.");
             }
 
+            // For each row's state label; the settings were just read for SLA, so this is the cached copy. If that read
+            // failed, rows show the raw status rather than try again.
+            System.Text.Json.JsonElement? workflows = slaEnabled is null ? null : await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken);
             bool AtRisk(Ticket t)
             {
                 bool breached = t.IsFrtBreached == true || t.IsRtBreached == true;
@@ -132,7 +135,7 @@ public sealed class WorkloadTools
                 {
                     anyFlags |= HasSlaFlags(t);
                     _cache.Numbers.Remember(t);
-                    return AtRisk(t) ? TicketViews.Row(t) : null;
+                    return AtRisk(t) ? TicketViews.Row(t, workflows: workflows) : null;
                 },
                 _options.MaxScanTickets,
                 FullTicketPageSize,

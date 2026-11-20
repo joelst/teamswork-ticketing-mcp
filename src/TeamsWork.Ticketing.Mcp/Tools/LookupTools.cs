@@ -112,7 +112,7 @@ public sealed class LookupTools
             DateTimeOffset now = _time.GetUtcNow();
             bool? resolved = brief["isResolved"]?.GetValue<bool>();
             Waiting.State state = Waiting.Compute(t, recent, people, resolved, complete: h.ContinuationToken is null, now,
-                WorkflowStatus.LabelOf(t, workflows ?? await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken)));
+                WorkflowStatus.LabelOf(t, workflows));
             if (Waiting.Parse(t.CreatedOn) is DateTimeOffset created)
             {
                 brief["ageDays"] = Waiting.Days(created, now);
@@ -231,10 +231,11 @@ public sealed class LookupTools
                 }
             }
 
+            System.Text.Json.JsonElement? workflows = await WorkflowStatus.WorkflowsForLabelsAsync(found.Values, _cache, _client, timezoneOffset, cancellationToken);
             if (keywords.Count == 0)
             {
                 // Nothing to score with: return what the phrase search found, unranked, rather than claiming there's none.
-                List<JsonObject> unranked = found.Values.Take(max).Select(t => Scored(null, t)).ToList();
+                List<JsonObject> unranked = found.Values.Take(max).Select(t => Scored(null, t, workflows)).ToList();
                 return new SimilarResult(unranked, keywords, unranked.Count == 0
                     ? "No similar tickets found; it's reasonable to create a new one."
                     : "The title has no words to compare, so these search results are unranked. Check them before creating a ticket.");
@@ -245,7 +246,7 @@ public sealed class LookupTools
                 .Where(m => m.Score > 0)
                 .OrderByDescending(m => m.Score)
                 .Take(max)
-                .Select(m => Scored(m.Score, m.Ticket))
+                .Select(m => Scored(m.Score, m.Ticket, workflows))
                 .ToList();
 
             return new SimilarResult(ranked, keywords,
@@ -254,7 +255,7 @@ public sealed class LookupTools
     }
 
     /// <summary>A match: its score first, then the ticket's row.</summary>
-    private static JsonObject Scored(double? score, Ticket t)
+    private static JsonObject Scored(double? score, Ticket t, System.Text.Json.JsonElement? workflows)
     {
         var o = new JsonObject();
         if (score is double s)
@@ -262,7 +263,7 @@ public sealed class LookupTools
             o["score"] = s;
         }
 
-        foreach ((string key, JsonNode? value) in TicketViews.Row(t).ToList())
+        foreach ((string key, JsonNode? value) in TicketViews.Row(t, workflows: workflows).ToList())
         {
             o[key] = value?.DeepClone();
         }

@@ -180,7 +180,12 @@ public sealed class QueueTools
             List<Ticket> page = Coarse(scan.Matches, order, resolvedSince).Take(candidates).ToList();
             var states = new Waiting.State?[page.Count];
             var attempted = new bool[page.Count];
-            int read = 0, failed = 0;
+            var unreadable = new HashSet<Ticket>(ReferenceEqualityComparer.Instance);
+            // Cached instance settings: for working out who a ticket waits on, and each row's state by its label.
+            System.Text.Json.JsonElement? workflows = history
+                ? await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken)
+                : await WorkflowStatus.WorkflowsForLabelsAsync(page, _cache, _client, timezoneOffset, cancellationToken);
+            int read = 0;
             if (history && page.Count > 0)
             {
                 TicketUser? caller = null;
@@ -195,7 +200,6 @@ public sealed class QueueTools
 
                 TicketPeople people = (await TicketPeople.LoadAsync(_cache, _client, _options, timezoneOffset, cancellationToken))
                     .WithAgents(scan.Matches.Select(t => t.Assignee).Append(caller));
-                System.Text.Json.JsonElement? workflows = await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken);
                 read = Math.Min(page.Count, HistoryBudget);
                 using var gate = new SemaphoreSlim(HistoryConcurrency);
                 await Task.WhenAll(Enumerable.Range(0, read).Select(async i =>
@@ -213,7 +217,10 @@ public sealed class QueueTools
                     }
                     catch (TicketingApiException)
                     {
-                        Interlocked.Increment(ref failed);
+                        lock (unreadable)
+                        {
+                            unreadable.Add(page[i]);
+                        }
                     }
                     finally
                     {
@@ -228,6 +235,11 @@ public sealed class QueueTools
             int unknown = rows.Count(r => r.State is { WaitingOn: null, ResolutionUnknown: false });
             int unresolvable = rows.Count(r => r.State is { WaitingOn: null, ResolutionUnknown: true });
             int unread = history ? rows.Count(r => !r.Attempted) : 0;
+            int failed = rows.Count(r => unreadable.Contains(r.Ticket));   // among the rows returned, not every read tried
+
+            // Whether SLA ranking was left out is only worth saying when SLA tracking may be on: told from the cached
+            // instance settings when there are any, without a request just for a hint.
+            bool? slaForHint = slaOn ?? (_cache.CachedInstance(timezoneOffset) is Instance cachedInstance ? WorkloadTools.SlaEnabled(cachedInstance.Sla) : null);
             string extrasNamed = string.Join(", ", new[] { "waitingOn", "idleDays", "lastPublic" }.Where(extras.Contains));
 
             var result = new JsonObject { ["who"] = label };
@@ -246,7 +258,7 @@ public sealed class QueueTools
                 result["counts"] = Counts(scan.Matches);
             }
 
-            result["items"] = new JsonArray(rows.Select(r => (JsonNode?)Row(r.Ticket, r.State, extras, slaOn != false, hideAssignee, hideRequestor, resolvedSince, now)).ToArray());
+            result["items"] = new JsonArray(rows.Select(r => (JsonNode?)Row(r.Ticket, r.State, extras, slaOn != false, hideAssignee, hideRequestor, resolvedSince, now, workflows)).ToArray());
             result["returned"] = rows.Count;
             result["matched"] = scan.Matches.Count;
 
@@ -265,7 +277,7 @@ public sealed class QueueTools
                     ? $"{unread} rows have no {extrasNamed}: only {HistoryBudget} histories are read per call; lower 'limit' to get them for every row."
                     : null,
                 // Each input a ranking goes without is said, so a lean 'include' isn't taken for the full order.
-                order == "urgency" && !resolvedSince && !wholeTickets && slaOn != false
+                order == "urgency" && !resolvedSince && !wholeTickets && slaForHint != false
                     ? "SLA breaches aren't ranked first: include sla (a default) for that."
                     : null,
                 order == "urgency" && !resolvedSince && !rankedByHistory
@@ -274,7 +286,7 @@ public sealed class QueueTools
                 order == "idle" && !history
                     ? "Ranked by the last update, which automation also moves: include idleDays to rank by the last thing a person did."
                     : null,
-                failed > 0 ? $"{failed} rows have no waitingOn: their history couldn't be read (the API quota may be used up for now)." : null,
+                failed > 0 ? $"{failed} rows have no {extrasNamed}: their history couldn't be read (the API quota may be used up for now), so they may rank too low." : null,
                 unknown > 0 && extras.Contains("waitingOn")
                     ? $"{unknown} rows have no waitingOn: none of their latest {Waiting.HistoryWindow} activities is a public reply, so who they wait on isn't known."
                     : null,
@@ -292,7 +304,8 @@ public sealed class QueueTools
     }
 
     /// <summary>One queue row: the ticket in brief, and the extras asked for.</summary>
-    private static JsonObject Row(Ticket t, Waiting.State? state, HashSet<string> extras, bool slaOn, bool hideAssignee, bool hideRequestor, bool resolvedSince, DateTimeOffset now)
+    private static JsonObject Row(Ticket t, Waiting.State? state, HashSet<string> extras, bool slaOn, bool hideAssignee, bool hideRequestor, bool resolvedSince, DateTimeOffset now,
+        System.Text.Json.JsonElement? workflows)
     {
         var o = new JsonObject();
         if (t.TicketNo is int number)
@@ -305,7 +318,7 @@ public sealed class QueueTools
         }
 
         Add(o, "title", TicketViews.Short(t.Title, TitleChars));
-        Add(o, "status", t.Status);
+        TicketViews.Status(o, t, workflows);
         Add(o, "priority", TicketViews.Priority(t.Priority));
         if (!hideAssignee)
         {
@@ -351,7 +364,7 @@ public sealed class QueueTools
                 last["on"] = TicketViews.Time(on);
             }
 
-            Add(last, "text", reply.Text is null ? null : TicketViews.Clip(TicketViews.StripQuoted(reply.Text), LastPublicChars));
+            Add(last, "text", TicketViews.Reply(reply.Text, LastPublicChars));
             o["lastPublic"] = last;
         }
 

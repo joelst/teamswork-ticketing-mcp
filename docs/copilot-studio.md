@@ -42,7 +42,7 @@ should have. Recommended for a helpdesk agent: all read tools plus `add_ticket_c
 
 ## 4. Test
 
-Ask the agent: *"Show my three most recent open tickets"* → `list_tickets`. Then *"Add a comment to ticket 1839
+Ask the agent: *"Show my open tickets"* → `get_queue`. Then *"Add a comment to ticket 1839
 saying the technician is on the way"* → the agent calls
 `add_ticket_comment` with the ticket number. Open the ticket in Teams and confirm the comment is attributed to the signed-in user.
 

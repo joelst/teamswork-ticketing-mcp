@@ -22,18 +22,18 @@ if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed.' }
 $psi = [System.Diagnostics.ProcessStartInfo]::new('dotnet', "`"$(Join-Path $outDir 'TeamsWork.Ticketing.Mcp.dll')`" --stdio")
 $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
 $psi.UseShellExecute = $false
-# Placeholders only: listing tools makes no API call, and the server needs these to start. Any Ticketing setting in
-# this shell's environment is removed so it can't add or hide a tool.
+# Placeholders only: the server needs these to start, and the one read listing tools tries (below) can't reach the API.
+# Any Ticketing setting in this shell's environment is removed so it can't add or hide a tool.
 foreach ($name in @($psi.Environment.Keys)) {
     if ($name -like 'Ticketing*' -or $name -like 'KeyVault*' -or $name -like 'ApplicationInsights*') {
         [void]$psi.Environment.Remove($name)
     }
 }
 $psi.Environment['Ticketing__ApiKey'] = 'placeholder-for-tools-list'
-# Listing tools reads the instance's workflow states when it can; an unresolvable host keeps that read off the network,
-# so the file carries the fixed description. A region saved in user secrets (which stdio also loads) would name another
-# endpoint than this URL and stop the server, so it is cleared too.
-$psi.Environment['Ticketing__BaseUrl'] = 'https://ticketing.invalid/v1'
+# Listing tools reads the instance's workflow states when it can; a closed loopback port keeps that read off the network
+# entirely (no DNS lookup either), so the file carries the fixed description. A region saved in user secrets (which
+# stdio also loads) would name another endpoint than this URL and stop the server, so it is cleared too.
+$psi.Environment['Ticketing__BaseUrl'] = 'https://127.0.0.1:9/v1'
 $psi.Environment['Ticketing__Region'] = ''
 $psi.Environment['Ticketing__ServiceAccount__Id'] = '00000000-0000-0000-0000-0000000000c1'
 $psi.Environment['Ticketing__ServiceAccount__Name'] = 'Tools List'

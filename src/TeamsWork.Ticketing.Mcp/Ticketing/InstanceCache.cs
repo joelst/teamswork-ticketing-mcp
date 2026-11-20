@@ -111,6 +111,16 @@ public sealed class InstanceCache
             cancellationToken);
     }
 
+    /// <summary>The instance settings when a current copy is cached for this offset, without reading them.</summary>
+    public Instance? CachedInstance(int? timezoneOffset)
+    {
+        int offset = _timeZones.Resolve(timezoneOffset);
+        lock (_lock)
+        {
+            return Usable(_instances.GetValueOrDefault(offset), refresh: false);
+        }
+    }
+
     /// <summary>Tag categories that haven't been deleted. <paramref name="refresh"/> works as for the instance.</summary>
     public Task<IReadOnlyList<TagCategory>> GetTagCategoriesAsync(TicketingClient client, bool refresh, CancellationToken cancellationToken)
     {

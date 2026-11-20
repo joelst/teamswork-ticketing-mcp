@@ -30,6 +30,11 @@ public sealed class BulkStore
     private readonly TimeProvider _time;
     private readonly int _maxPerOwner;
     private readonly int _max;
+    private long _added;   // the order batches were stored in, so "oldest" never depends on two having the same deadline
+
+    // Confirmations take a ticket one at a time, across batches. Striped, so the memory stays fixed; two tickets sharing
+    // a stripe only wait on each other for a moment.
+    private readonly SemaphoreSlim[] _ticketGates = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
 
     public BulkStore(TimeProvider? time = null)
         : this(time, MaxBatchesPerOwner, MaxBatches)
@@ -73,6 +78,7 @@ public sealed class BulkStore
             }
 
             string token = NewToken();
+            batch.Order = ++_added;
             _batches[token] = batch;
             return token;
         }
@@ -95,7 +101,7 @@ public sealed class BulkStore
     private bool Evict(List<KeyValuePair<string, Batch>> batches, int max, bool finishedToo)
     {
         int over = batches.Count - max + 1;
-        foreach (KeyValuePair<string, Batch> old in batches.OrderBy(b => b.Value.IsDone).ThenBy(b => b.Value.Expires))
+        foreach (KeyValuePair<string, Batch> old in batches.OrderBy(b => b.Value.IsDone).ThenBy(b => b.Value.Order))
         {
             if (over <= 0)
             {
@@ -126,6 +132,9 @@ public sealed class BulkStore
         }
     }
 
+    /// <summary>The gate a confirmation holds while it re-reads and writes one ticket.</summary>
+    internal SemaphoreSlim TicketGate(Guid ticket) => _ticketGates[(ticket.GetHashCode() & int.MaxValue) % _ticketGates.Length];
+
     // 128 random bits, URL-safe.
     private static string NewToken() => Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));
 
@@ -143,6 +152,9 @@ public sealed class BulkStore
         public string Owner { get; } = owner;
 
         public DateTimeOffset Expires { get; } = expires;
+
+        /// <summary>When the store took it, relative to the others; set under the store's lock.</summary>
+        public long Order { get; set; }
 
         public string BatchId { get; } = batchId;
 

@@ -75,7 +75,8 @@ comment and the required `isPrivate`. This attaches links, not files.
    `titlePattern: "Weekly check:*"`), the change in `set` (status, resolution, assignee, priority, tags, due date),
    and any `comment` with its required `isPrivate`. It changes nothing.
 2. Show the user the preview: how many tickets change (`count`), the change (`to`), each ticket's current values
-   (`from`), and any that are `blocked` or `unchanged` and why.
+   (`from`), and any that are `blocked` or `unchanged` and why. With a comment, quote `to.comment.text` word for word
+   and say its `visibility`, so the user approves the exact message every ticket will get.
 3. After a yes, call `bulk_update` with the `confirmToken` alone. Report `applied`, and any `skipped` (changed since
    the preview) or `failed`. If it returns a `resumeToken`, call `bulk_update` with it as the `confirmToken` to do
    the rest (after a minute, if the hint says the quota ran out).

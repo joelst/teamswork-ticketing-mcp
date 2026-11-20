@@ -52,7 +52,8 @@ internal static class WorkflowStatus
                 "Pass the state ID to choose one, or isResolved for every open or every closed ticket."),
             _ when custom.Count > 0 => throw new McpException(
                 $"'{paramName}' '{value}' isn't a workflow state. States: " +
-                string.Join(", ", DefaultStates.Concat(custom.Select(s => s.Label is null ? s.Id! : $"{s.Label} ({s.Id})")).Distinct(StringComparer.OrdinalIgnoreCase)) +
+                // A state whose ID is its label (the default graph's, live) is named once.
+                string.Join(", ", DefaultStates.Concat(custom.Select(s => s.Label is null || Same(s.Label, s.Id) ? s.Label ?? s.Id! : $"{s.Label} ({s.Id})")).Distinct(StringComparer.OrdinalIgnoreCase)) +
                 ". For every open or every closed ticket, use isResolved instead."),
             _ => value,
         };
@@ -228,6 +229,16 @@ internal static class WorkflowStatus
             : InstanceWorkflowsAsync(cache, client, timezoneOffset, cancellationToken);
 
     /// <summary>The instance's workflow settings (cached), or null when they can't be read: they only add to what's known.</summary>
+    /// <summary>
+    /// The instance's workflows (cached) when any of these tickets needs them to show its state's label: a custom
+    /// workflow's ticket, or a status that isn't a default state's name. A default-workflow ticket names its state
+    /// already, so a list of only those reads nothing.
+    /// </summary>
+    public static Task<JsonElement?> WorkflowsForLabelsAsync(IEnumerable<Ticket> tickets, InstanceCache cache, TicketingClient client, int? timezoneOffset, CancellationToken cancellationToken) =>
+        tickets.Any(t => t.IsCustomWorkflow == true || (!string.IsNullOrWhiteSpace(t.Status) && !DefaultStates.Contains(t.Status.Trim(), StringComparer.OrdinalIgnoreCase)))
+            ? InstanceWorkflowsAsync(cache, client, timezoneOffset, cancellationToken)
+            : Task.FromResult<JsonElement?>(null);
+
     public static async Task<JsonElement?> InstanceWorkflowsAsync(InstanceCache cache, TicketingClient client, int? timezoneOffset, CancellationToken cancellationToken)
     {
         try
@@ -277,8 +288,19 @@ internal static class WorkflowStatus
             return null;
         }
 
+        if (resolved.Any(r => Same(r, ticket.Status)))
+        {
+            return true;
+        }
+
+        // A custom workflow's ticket carries the state's ID; when its label can't be found, a list of labels can't say.
         string? label = LabelOf(ticket, instanceWorkflows);
-        return resolved.Any(r => Same(r, ticket.Status) || Same(r, label));
+        if (ticket.IsCustomWorkflow == true && Same(label, ticket.Status))
+        {
+            return null;
+        }
+
+        return resolved.Any(r => Same(r, label));
     }
 
     /// <summary>The ticket's current state in its workflow, when exactly one state has its status as ID or label.</summary>
@@ -333,12 +355,16 @@ internal static class WorkflowStatus
 
     /// <summary>
     /// Whether the ticket is already in the state <paramref name="target"/> names, by state ID or label: a custom
-    /// workflow's ticket carries its state ID as its status, so the text alone doesn't say.
+    /// workflow's ticket carries its state ID as its status, so the text alone doesn't say. A target no state is named
+    /// is taken as a transition's label, as <see cref="CheckTarget"/> takes it ("Close"), and the ticket is in it when
+    /// such a transition leads to its current state.
     /// </summary>
     public static bool IsIn(Ticket ticket, string target, JsonElement? instanceWorkflows = null) =>
         Same(ticket.Status, target) ||
         (StatesOf(ticket, instanceWorkflows) is { } states && Current(states, ticket.Status) is { } current &&
-         (Same(current.Id, target) || Same(current.Label, target)));
+         (Same(current.Id, target) || Same(current.Label, target) ||
+          (!states.Any(s => Same(s.Id, target) || Same(s.Label, target)) &&
+           states.Any(s => s.NextSteps?.Any(n => Same(n.TransitionLabel, target) && Same(n.TargetId, current.Id)) == true))));
 
     /// <summary>
     /// Checks a requested status change against the ticket's workflow and returns the value to send: a target given by
@@ -367,7 +393,10 @@ internal static class WorkflowStatus
         }
 
         // The closest kind of match decides: the target state's ID, then its label, then a transition's label. So the
-        // 'Closed' state isn't ambiguous with another state reached by a transition labelled 'Closed'.
+        // 'Closed' state isn't ambiguous with another state reached by a transition labelled 'Closed'; and a target that
+        // names a state of the workflow means that state even when it isn't reachable from here, so it is refused rather
+        // than taken for a transition of that name to somewhere else.
+        bool namesState = states.Any(s => Same(s.Id, target) || Same(s.Label, target));
         var candidates = steps
             .Where(s => !string.IsNullOrWhiteSpace(s.TargetId))
             .Select(s => (Step: s, State: states.FirstOrDefault(w => Same(w.Id, s.TargetId))))
@@ -376,7 +405,7 @@ internal static class WorkflowStatus
             {
                 m => Same(m.Step.TargetId, target),
                 m => Same(m.State?.Label, target),
-                m => Same(m.Step.TransitionLabel, target),
+                m => !namesState && Same(m.Step.TransitionLabel, target),
             }
             .Select(tier => candidates.Where(tier).DistinctBy(m => m.Step.TargetId, StringComparer.OrdinalIgnoreCase).ToList())
             .FirstOrDefault(found => found.Count > 0) ?? [];

@@ -223,6 +223,14 @@ internal static partial class Waiting
             return new State(on, null, idle, reply);
         }
 
+        // Reopened by a person since the latest reply (a requestor's Reopen button sends no comment): the ticket is back
+        // with the help desk. Any reply the history read doesn't reach is older still, so it holds either way.
+        int replyAt = lastReply is null ? history.Count : IndexOf(history, lastReply);
+        if (history.Take(replyAt).FirstOrDefault(a => IsByPerson(a, people) && string.Equals(a.Action?.Trim(), "reopened", StringComparison.OrdinalIgnoreCase)) is Activity reopen)
+        {
+            return new State(Assignee, Parse(reopen.When), idle, reply);
+        }
+
         if (reply is null)
         {
             // Nobody has replied since the ticket was created: it waits on its assignee. With only its latest history read,
@@ -240,6 +248,19 @@ internal static partial class Waiting
         : "other";
 
     private static bool IsByPerson(Activity a, TicketPeople people) => !a.IsAutomation && !people.IsSystem(a.Author);
+
+    private static int IndexOf(IReadOnlyList<Activity> history, Activity a)
+    {
+        for (int i = 0; i < history.Count; i++)
+        {
+            if (ReferenceEquals(history[i], a))
+            {
+                return i;
+            }
+        }
+
+        return history.Count;
+    }
 
     public static int Days(DateTimeOffset from, DateTimeOffset now) => Math.Max(0, (int)Math.Floor((now - from).TotalDays));
 

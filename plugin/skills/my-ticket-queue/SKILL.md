@@ -33,10 +33,13 @@ From the TeamsWork Ticketing connector: `get_queue`, `get_ticket_brief` for a cl
    (first response or resolution). A row without `sla` has an unknown state: report it as **not verified**. If the
    response has `slaTracking: "off"`, say SLA tracking is turned off rather than reporting nothing at risk.
 
-3. **Read who each ticket is waiting on.** `waitingOn: assignee` means it's waiting on the user; `requestor` means
-   it's waiting on the person who raised it; `thirdParty` on someone outside. A row without `waitingOn` has no recent
-   public reply to tell by: call `get_ticket_brief` if it matters. `idleDays` is how long since anyone last did
-   anything on it.
+3. **Read who each ticket is waiting on.** `waitingOn` names a role on the ticket: `assignee` (the help desk),
+   `requestor` (the person who raised it) or `thirdParty` (someone outside). Map it to the user row by row: with the
+   default `role`, `assignee` means the user; with `role: requestor`, `requestor` means the user and `assignee` the
+   person working on it; with `role: either`, compare the row's `assignee` and `requestor` with the user. A row
+   without `waitingOn` couldn't be told: the `hint` says why (no recent public reply, history not read for that row,
+   a failed read, or a workflow that doesn't say whether it's resolved); call `get_ticket_brief` if it matters.
+   `idleDays` is how long since anyone last did anything on it.
 
 4. **Look closer only where it matters.** If the user asks about one ticket, or the next step isn't clear from the
    row, call `get_ticket_brief` with its number.

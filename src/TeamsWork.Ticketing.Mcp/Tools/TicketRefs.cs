@@ -63,7 +63,8 @@ internal sealed partial class TicketRefs
             { Conclusive: true } => throw new McpException($"There is no ticket number {number}. Check the number, or search with list_tickets."),
             _ => throw new McpException(
                 $"Ticket number {number} wasn't found among the {_options.MaxScanTickets} tickets a lookup may read " +
-                "(Ticketing:MaxScanTickets), so it may still exist. Find it with list_tickets and pass its UUID."),
+                "(Ticketing:MaxScanTickets), so it may still exist. Find it with list_tickets (search or filters): a ticket listed " +
+                "is remembered by its number, so then call again with the same number."),
         };
     }
 

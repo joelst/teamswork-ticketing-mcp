@@ -22,5 +22,6 @@ internal static class DateFilterText
         "Date filters take whole days (YYYY-MM-DD; a time of day is refused). Created and updated days are local to " +
         "timezoneOffset (default: the server's zone); a 'before' day is excluded, though a time of exactly that midnight is " +
         "included, and all filters in one call share one offset, so across a daylight-saving change the later end can be an " +
-        "hour off. Due dates are calendar dates in the server's zone. Returned times are UTC.";
+        "hour off. Due dates are calendar dates in the server's zone; combined with a created or updated filter, a due date " +
+        "set from another time zone can come out a day off. Returned times are UTC.";
 }

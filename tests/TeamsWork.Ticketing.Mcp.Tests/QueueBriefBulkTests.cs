@@ -1499,6 +1499,152 @@ public sealed class QueueBriefBulkTests
     public void Ticket_numbers_take_up_to_ten_digits_within_range(string given, int? expected) =>
         Assert.Equal(expected, TicketRefs.BareNumber(given));
 
+    // ---- Review round 8 ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Two_confirmations_at_once_over_one_ticket_write_it_once()
+    {
+        var store = new BulkStore(Clock);
+        string first = await PreviewWeeklyAsync(store);
+        string second = await PreviewWeeklyAsync(store);
+        int writes = 0;
+        long ts1 = 1000;
+        var confirm = new Router(r =>
+        {
+            if (r.Method != HttpMethod.Get)
+            {
+                Interlocked.Increment(ref writes);
+                Thread.Sleep(150);                       // long enough for the other confirmation to re-read meanwhile
+                Interlocked.Exchange(ref ts1, 1001);   // the write moves the ticket's _ts
+                return "{\"item\":" + Bulk(1, "x", "Resolved", 1001) + "}";
+            }
+
+            return "{\"item\":" + (r.Path.EndsWith(Id(1), StringComparison.Ordinal)
+                ? Bulk(1, "Weekly check: backups", "In Progress", Interlocked.Read(ref ts1))
+                : Bulk(2, "Weekly check: patching", "In Progress", 2000)) + "}";
+        });
+        BulkTools bulk = Bulk(confirm, store);
+
+        string[] results = await Task.WhenAll(Task.Run(() => bulk.BulkUpdate(first, Ct)), Task.Run(() => bulk.BulkUpdate(second, Ct)));
+
+        int applied101 = results.Sum(r => JsonDocument.Parse(r).RootElement.GetProperty("applied").EnumerateArray().Count(a => a.GetInt32() == 101));
+        Assert.Equal(1, applied101);
+        Assert.Contains(results, r => r.Contains("changedSincePreview", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_confirmation_cancelled_before_any_write_puts_the_ticket_back_with_the_rest()
+    {
+        var store = new BulkStore(Clock);
+        string token = await PreviewWeeklyAsync(store);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var confirm = new Router(_ =>
+        {
+            cts.Cancel();   // the client gives up during the first ticket's re-read
+            throw new OperationCanceledException(cts.Token);
+        });
+        BulkTools bulk = Bulk(confirm, store);
+
+        try
+        {
+            await bulk.BulkUpdate(token, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        using JsonDocument doc = JsonDocument.Parse(await bulk.BulkUpdate(token, Ct));
+
+        Assert.False(doc.RootElement.TryGetProperty("failed", out _));      // nothing was written, so nothing to check
+        Assert.Equal(2, store.Find(doc.RootElement.GetProperty("resumeToken").GetString()!)!.Items.Count);
+    }
+
+    [Fact]
+    public async Task A_mistake_in_the_tags_given_fails_the_preview_once_and_a_comment_is_shown_word_for_word()
+    {
+        var preview = new Router(r => r.Path.EndsWith("/instance", StringComparison.Ordinal) ? InstanceJson
+            : r.Path.EndsWith("/tags", StringComparison.Ordinal) ? """{"items":[{"id":"net","text":"Network","tags":[{"text":"VPN"}]}]}"""
+            : WeeklyChecks());
+        BulkTools bulk = Bulk(preview, new BulkStore(Clock));
+
+        await Assert.ThrowsAsync<McpException>(() => bulk.PreviewBulkUpdate(filter: new BulkFilter { TitlePattern = "Weekly check:*" },
+            set: new BulkChanges { RemoveTags = [new TagRef { Text = "VPN", TagCategoryId = "No such category" }] }, cancellationToken: Ct));
+        using JsonDocument doc = JsonDocument.Parse(await bulk.PreviewBulkUpdate(filter: new BulkFilter { TitlePattern = "Weekly check:*" },
+            set: Resolve, comment: new BulkComment { Text = "Checks complete.", IsPrivate = false }, cancellationToken: Ct));
+
+        JsonElement comment = doc.RootElement.GetProperty("to").GetProperty("comment");
+        Assert.Equal("Checks complete.", comment.GetProperty("text").GetString());
+        Assert.Equal("reply the requestor sees", comment.GetProperty("visibility").GetString());
+    }
+
+    [Fact]
+    public void A_transition_label_names_the_state_it_leads_to_only_when_no_state_has_that_name()
+    {
+        Ticket t = Parse<Ticket>("""
+            {"id":"t","status":"s_closed","isCustomWorkflow":true,
+             "workflow":[{"id":"s_open","label":"Open","nextSteps":[{"targetId":"s_closed","transitionLabel":"Close"},{"targetId":"s_resolved","transitionLabel":"Resolved"}]},
+                         {"id":"s_closed","label":"Closed","nextSteps":[{"targetId":"s_open","transitionLabel":"Reopen"}]},
+                         {"id":"s_resolved","label":"Resolved","nextSteps":[]}]}
+            """);
+        // Closed can't be reached from Open here; only a transition labelled "Closed", which leads to Resolved.
+        Ticket open = Parse<Ticket>("""
+            {"id":"t","status":"s_open","isCustomWorkflow":true,
+             "workflow":[{"id":"s_open","label":"Open","nextSteps":[{"targetId":"s_resolved","transitionLabel":"Closed"}]},
+                         {"id":"s_closed","label":"Closed","nextSteps":[]},{"id":"s_resolved","label":"Resolved","nextSteps":[]}]}
+            """);
+
+        Assert.True(WorkflowStatus.IsIn(t, "Close"));                                        // already where "Close" leads
+        Assert.Throws<McpException>(() => WorkflowStatus.CheckTarget(open, "Closed", null));  // the state, refused; not Resolved
+    }
+
+    [Fact]
+    public void A_requestor_reopening_without_a_word_puts_the_ticket_back_with_the_assignee()
+    {
+        List<Activity> history = Parse<List<Activity>>($$"""
+            [{"action":"reopened","user":{{Requestor}},"createdOn":"2026-11-18T12:00:00Z"},
+             {"action":"resolved","comment":"Fixed, closing.","user":{{Agent}},"createdOn":"2026-11-17T12:00:00Z"}]
+            """);
+
+        Waiting.State state = Waiting.Compute(Ticket("Reopened"), history, People(), resolved: false, complete: false, Now);
+
+        Assert.Equal("assignee", state.WaitingOn);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-18T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture), state.WaitingSince);
+    }
+
+    [Fact]
+    public void The_quoted_reply_note_comes_after_the_cut_whole()
+    {
+        string text = new string('n', 300) + "\r\nFrom: Pat\r\nSent: Monday\r\nTo: Help desk\r\n\r\n" + new string('q', 5000);
+
+        string? reply = TicketViews.Reply("\r\n  " + text, 160);
+
+        Assert.EndsWith("[quoted reply cut; list_ticket_activities with maxChars=20000 has it]", reply, StringComparison.Ordinal);
+        Assert.Contains("[140 more characters]", reply, StringComparison.Ordinal);   // the new part's count, not the note's
+    }
+
+    [Fact]
+    public void A_custom_state_shows_its_label_with_its_id_and_full_text_shows_whole_changes()
+    {
+        Ticket t = Parse<Ticket>("""
+            {"id":"t","ticketNo":5,"status":"c_wait","isCustomWorkflow":true,"workflow":[{"id":"c_wait","label":"Waiting on vendor","nextSteps":[]}]}
+            """);
+        Activity a = Parse<Activity>($$"""{"id":"a","action":"updated","createdOn":"2026-11-18T12:00:00Z","changes":[{"name":"description","oldValue":"{{new string('o', 300)}}","newValue":"x"}]}""");
+
+        JsonObject row = TicketViews.Row(t);
+        Assert.Equal(("Waiting on vendor", "c_wait"), (row["status"]!.GetValue<string>(), row["statusId"]!.GetValue<string>()));
+        Assert.Equal(300, TicketViews.Activity(a, includeHtml: false, TicketViews.FullTextChars)["changes"]![0]!["from"]!.GetValue<string>().Length);
+        Assert.True(TicketViews.Activity(a, includeHtml: false)["changes"]![0]!["from"]!.GetValue<string>().Length < 300);
+    }
+
+    [Fact]
+    public void A_custom_ticket_whose_state_label_cant_be_found_has_an_unknown_resolution()
+    {
+        Ticket t = Parse<Ticket>("""{"id":"t","status":"c_done","isCustomWorkflow":true,"resolvedStatus":["Closed"]}""");
+
+        Assert.Null(WorkflowStatus.IsResolved(t));
+        Assert.True(WorkflowStatus.IsResolved(Parse<Ticket>("""{"id":"t","status":"c_done","isCustomWorkflow":true,"resolvedStatus":["c_done"]}""")));
+    }
+
     // ---- Helpers -------------------------------------------------------------------------------------------------
 
     private static async Task<string> PreviewWeeklyAsync(BulkStore store, IUpstreamCaller? caller = null)

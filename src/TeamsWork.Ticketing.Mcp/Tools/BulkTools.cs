@@ -109,6 +109,9 @@ public sealed partial class BulkTools
                 : await PickByRefsAsync(tickets!, change.Status is not null, timezoneOffset, cancellationToken);
 
             IReadOnlyList<TagCategory> categories = change.AddTags.Count > 0 || change.RemoveTags.Count > 0 ? await lookup.TagCategoriesAsync() : [];
+            // A mistake in the tags given (a removal with no text or an unknown category, a tag both added and removed)
+            // is the request's, not any one ticket's: refused once here rather than blocking every ticket.
+            _ = TagEdits.Apply([], change.AddTags, change.RemoveTags, categories);
             var items = new List<BulkItem>();
             var rows = new JsonArray();
             var unchanged = new JsonArray();
@@ -238,8 +241,15 @@ public sealed partial class BulkTools
             BulkItem item = batch.Items[i];
             JsonNode label = item.TicketNo is int no ? JsonValue.Create(no) : JsonValue.Create(item.Id.ToString("D"));
             var done = new List<string>();
+            string? attempting = null;   // the write under way, if any: until one is, nothing can have changed
+            SemaphoreSlim gate = _store.TicketGate(item.Id);
+            bool held = false;
             try
             {
+                // One ticket at a time across batches, from its re-read to its last write: two confirmations running
+                // at once over the same ticket would otherwise both see the preview's version and both write.
+                await gate.WaitAsync(cancellationToken);
+                held = true;
                 Ticket now;
                 try
                 {
@@ -267,6 +277,7 @@ public sealed partial class BulkTools
 
                 if (item.ChangesAssignee || item.ChangesPriority || item.ChangesExpectedDate || item.Tags is not null)
                 {
+                    attempting = "fields";
                     await _client.UpdateTicketAsync(item.Id, new TicketWrite
                     {
                         Assignee = item.ChangesAssignee ? plan.Assignee : null,
@@ -280,12 +291,14 @@ public sealed partial class BulkTools
                 bool noteWithStatus = item.StatusValue is not null && plan.CommentText is not null && !plan.CommentIsPrivate;
                 if (item.StatusValue is not null)
                 {
+                    attempting = "status";
                     await _client.UpdateTicketStatusAsync(item.Id, item.StatusValue, plan.Resolution, noteWithStatus ? plan.CommentText : null, who, plan.TimezoneOffset, cancellationToken);
                     done.Add("status");
                 }
 
                 if (plan.CommentText is not null && !noteWithStatus)
                 {
+                    attempting = "comment";
                     await _client.AddCommentAsync(item.Id, plan.CommentText, null, plan.CommentIsPrivate, who, includeHtml: false, cancellationToken);
                     done.Add("comment");
                 }
@@ -316,14 +329,30 @@ public sealed partial class BulkTools
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                // The caller gave up (a client's time limit, say) with a request out: whether it was carried out isn't
-                // known. What was done is kept with the batch, so confirming the token again returns it, with a token for
-                // the tickets not reached.
-                string so = done.Count > 0 ? $"{string.Join(", ", done)} changed; the next change may or may not have been" : "it may or may not have been changed";
-                failed.Add(new JsonObject { ["ticketNo"] = label.DeepClone(), ["error"] = $"Interrupted: {so}. Check it with get_ticket_brief." });
-                remaining.AddRange(batch.Items.Skip(i + 1));
+                // The caller gave up (a client's time limit, say). Before any write was under way (waiting for the
+                // ticket, its re-read, or the quota), nothing changed, so it goes back with the rest. With a write out,
+                // whether it was carried out isn't known. What was done is kept with the batch, so confirming the token
+                // again returns it, with a token for the tickets not reached.
+                if (attempting is null)
+                {
+                    remaining.AddRange(batch.Items.Skip(i));
+                }
+                else
+                {
+                    string so = done.Count > 0 ? $"{string.Join(", ", done)} changed; the {attempting} change may or may not have been" : "it may or may not have been changed";
+                    failed.Add(new JsonObject { ["ticketNo"] = label.DeepClone(), ["error"] = $"Interrupted: {so}. Check it with get_ticket_brief." });
+                    remaining.AddRange(batch.Items.Skip(i + 1));
+                }
+
                 stopped = "cancelled";
                 break;
+            }
+            finally
+            {
+                if (held)
+                {
+                    gate.Release();
+                }
             }
         }
 
@@ -349,7 +378,7 @@ public sealed partial class BulkTools
             string why = stopped switch
             {
                 "quota" => $"The API quota ran out with {remaining.Count} tickets to go.",
-                "cancelled" => $"The call was interrupted with {remaining.Count} tickets to go; check the one marked interrupted.",
+                "cancelled" => $"The call was interrupted with {remaining.Count} tickets to go{(failed.Count > 0 ? "; check the one marked interrupted" : "")}.",
                 _ => $"Stopped after {TimeBudget.TotalSeconds:0} seconds with {remaining.Count} tickets to go.",
             };
             var rest = new BulkStore.Batch(batch.Owner, _store.Now + BulkStore.Lifetime, batch.BatchId, plan, remaining);
@@ -594,7 +623,9 @@ public sealed partial class BulkTools
         var refsTool = new TicketRefs(_client, _cache, _options);
         foreach ((string given, Guid? gid, int? number) in wanted)
         {
-            Picked? p = open.Matches.FirstOrDefault(m => (gid is Guid g && Guid.TryParse(m.Ticket.Id, out Guid tid) && tid == g) || (number is int n && m.Ticket.TicketNo == n));
+            // A match whose _ts wasn't read (the two reads drifted apart) is read on its own, which carries it.
+            Picked? p = open.Matches.FirstOrDefault(m => m.Version.Ts is not null &&
+                ((gid is Guid g && Guid.TryParse(m.Ticket.Id, out Guid tid) && tid == g) || (number is int n && m.Ticket.TicketNo == n)));
             if (p is null)
             {
                 Guid id = gid ?? await refsTool.ResolveAsync(given, timezoneOffset, cancellationToken, "tickets");
@@ -677,7 +708,12 @@ public sealed partial class BulkTools
 
             if (Plan.CommentText is not null)
             {
-                to["comment"] = Plan.CommentIsPrivate ? "private note" : "reply the requestor sees";
+                // The text itself, so the user approves the message every ticket will get, not just its kind.
+                to["comment"] = new JsonObject
+                {
+                    ["text"] = Plan.CommentText,
+                    ["visibility"] = Plan.CommentIsPrivate ? "private note" : "reply the requestor sees",
+                };
             }
 
             return to;
