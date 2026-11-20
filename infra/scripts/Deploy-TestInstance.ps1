@@ -51,6 +51,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Before anything is deployed: a value the server would refuse at startup (",", "@ ;") is refused here instead.
+& (Join-Path $PSScriptRoot 'Test-ExternalEmailDomains.ps1') -Value $ExternalEmailDomains
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $ticketingBaseUrls = @{
     US  = 'https://teamswork.azure-api.net/ticketing/v1'

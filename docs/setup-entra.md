@@ -37,9 +37,25 @@ What it configures on the server app:
   token cache can then call the server as that user without seeing a consent screen. The stdio transport doesn't
   need it; it uses the API key, not a token. Running the script without the switch removes an earlier
   pre-authorization, but not consent a user or admin has already granted the Azure CLI for the scope, nor tokens
-  already issued (they last until they expire, about an hour). To close it fully, review the CLI's grants under
-  Enterprise applications → Microsoft Azure CLI → Permissions (admin and user consent) and revoke the ones for this
-  server.
+  already issued (they last until they expire, about an hour). To close it fully, revoke those grants as below.
+
+### Revoke the Azure CLI's consent for the server
+
+The portal can revoke admin consent (Enterprise applications → Microsoft Azure CLI → Permissions), but its **User
+consent** tab is read-only. Microsoft Graph lists and deletes both kinds: admin consent has `consentType`
+`AllPrincipals`, and each user's has `Principal` with their object ID. It needs a Privileged Role Administrator or
+Cloud Application Administrator (see Microsoft's
+[Review permissions granted to enterprise applications](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/manage-application-permissions)).
+
+```powershell
+$cli    = az ad sp show --id 04b07795-8ddb-461a-bbee-02f9e1bf7b46 --query id -o tsv   # the Azure CLI
+$server = az ad sp show --id <serverClientId> --query id -o tsv
+$grants = az rest --method GET --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$cli' and resourceId eq '$server'" | ConvertFrom-Json
+$grants.value | Format-Table id, consentType, principalId, scope
+$grants.value | ForEach-Object { az rest --method DELETE --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($_.id)" }
+```
+
+Tokens already issued stay valid until they expire.
 
 ## Restrict calling client applications
 

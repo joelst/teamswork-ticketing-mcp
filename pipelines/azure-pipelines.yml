@@ -126,6 +126,18 @@ stages:
       - job: CoreInfra
         displayName: core.bicep
         steps:
+          # Before anything is created or changed: a domain choice the server would refuse (missing, or naming no domain)
+          # stops the run here, not after the core resources, the API key and the image have been updated. A variable
+          # the group doesn't define arrives as its own macro text, which counts as empty.
+          - pwsh: |
+              $value = $env:OPT_EXTERNAL_EMAIL_DOMAINS
+              if ($value -like '$(*') { $value = '' }
+              try { ./infra/scripts/Test-ExternalEmailDomains.ps1 -Value $value }
+              catch { Write-Host "##vso[task.logissue type=error]$($_.Exception.Message)"; exit 1 }
+            displayName: Check deployment inputs
+            env:
+              OPT_EXTERNAL_EMAIL_DOMAINS: $(externalEmailDomains)
+
           - task: AzureCLI@2
             displayName: az deployment group create (core)
             name: core
@@ -235,6 +247,16 @@ stages:
               steps:
                 - checkout: self
 
+                # Checked again here (see the Core stage), right before the value is deployed.
+                - pwsh: |
+                    $value = $env:OPT_EXTERNAL_EMAIL_DOMAINS
+                    if ($value -like '$(*') { $value = '' }
+                    try { ./infra/scripts/Test-ExternalEmailDomains.ps1 -Value $value }
+                    catch { Write-Host "##vso[task.logissue type=error]$($_.Exception.Message)"; exit 1 }
+                  displayName: Check deployment inputs
+                  env:
+                    OPT_EXTERNAL_EMAIL_DOMAINS: $(externalEmailDomains)
+
                 - task: AzureCLI@2
                   displayName: az deployment group create (app)
                   name: app
@@ -257,11 +279,6 @@ stages:
                       set -euo pipefail
                       # Empty for a variable the group doesn't define (see the Core stage for how that is detected).
                       opt() { case "$1" in \$\(*) printf '' ;; *) printf '%s' "$1" ;; esac; }
-                      # app.bicep refuses an empty value too; this says what to set before anything is deployed.
-                      if [ -z "$(opt "$OPT_EXTERNAL_EMAIL_DOMAINS")" ]; then
-                        echo "##vso[task.logissue type=error]Set the externalEmailDomains variable to your organization's email domains (such as contoso.com), or * to allow any."
-                        exit 1
-                      fi
                       OUT=$(az deployment group create \
                         --name "app-$(Build.BuildNumber)" \
                         --resource-group "$(azureResourceGroup)" \
