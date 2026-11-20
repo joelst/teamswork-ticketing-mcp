@@ -48,21 +48,26 @@ Cloud Application Administrator (see Microsoft's
 [Review permissions granted to enterprise applications](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/manage-application-permissions)).
 
 ```powershell
-$cli    = az ad sp show --id 04b07795-8ddb-461a-bbee-02f9e1bf7b46 --query id -o tsv   # the Azure CLI
-$server = az ad sp show --id <serverClientId> --query id -o tsv
-# Every page: each user's consent is a grant of its own, so there can be more than Graph returns at once.
-$url = "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$cli' and resourceId eq '$server'"
-$grants = @()
-while ($url) {
-    $page = az rest --method GET --url $url | ConvertFrom-Json
-    if ($LASTEXITCODE -ne 0) { throw 'Listing the grants failed, so none was revoked.' }
-    $grants += $page.value
-    $url = $page.'@odata.nextLink'
-}
-$grants | Format-Table id, consentType, principalId, scope
-foreach ($grant in $grants) {
-    az rest --method DELETE --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($grant.id)"
-    if ($LASTEXITCODE -ne 0) { throw "Revoking grant $($grant.id) failed; run this again to finish." }
+& {
+    $ErrorActionPreference = 'Stop'   # a failed request stops it, so nothing is revoked from a partial list
+    $cli    = az ad sp show --id 04b07795-8ddb-461a-bbee-02f9e1bf7b46 --query id -o tsv 2>$null   # the Azure CLI
+    if (-not $cli) { 'The Azure CLI has no service principal in this tenant, so it holds no consent to revoke.'; return }
+    $server = az ad sp show --id <serverClientId> --query id -o tsv
+    if (-not $server) { throw 'No service principal for <serverClientId>: check the client ID and that az is signed in to the right tenant.' }
+    # Invoke-RestMethod rather than az rest: a next-page link holds '&', which az.cmd on Windows would split on.
+    $headers = @{ Authorization = 'Bearer ' + (az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv) }
+    # Every page: each user's consent is a grant of its own, so there can be more than Graph returns at once.
+    $url = "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$cli' and resourceId eq '$server'"
+    $grants = @()
+    while ($url) {
+        $page = Invoke-RestMethod -Uri $url -Headers $headers
+        $grants += $page.value
+        $url = $page.'@odata.nextLink'
+    }
+    $grants | Format-Table id, consentType, principalId, scope
+    foreach ($grant in $grants) {
+        Invoke-RestMethod -Method Delete -Uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($grant.id)" -Headers $headers
+    }
 }
 ```
 

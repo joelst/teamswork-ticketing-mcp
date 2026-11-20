@@ -215,7 +215,8 @@ if (-not $SkipConnectorApp) {
                 )
             }
         )
-        web = @{ redirectUris = @() }
+        # No 'web': the connector's redirect URLs are added by hand after its Copilot Studio or Foundry connection is
+        # saved, so a re-run (to change pre-authorization, say) must leave them as they are. A new app has none anyway.
     }
 
     if ($PSCmdlet.ShouldProcess($ConnectorAppName, 'Configure OBO scope, pre-authorized Azure API Connections, permission to server')) {
