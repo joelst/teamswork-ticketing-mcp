@@ -10,8 +10,12 @@
          - Delegated scope access_as_user (users / Copilot Studio / Foundry identity passthrough / VS Code)
          - App role        Ticketing.ReadWrite (application; for Foundry project managed identity / agent identity)
          - v2 access tokens, optional claims for email
-         - Azure CLI pre-authorized so `az login` users can run the stdio transport locally
          - Service principal with "assignment required" so only assigned users/groups/identities can get tokens
+         - With -PreAuthorizeAzureCli only: Azure CLI pre-authorized, so `az account get-access-token` gets a token
+           for the server without a consent prompt, for testing the HTTP endpoint by hand. Leave it off in production:
+           it lets anyone who phishes an assigned user's Azure CLI sign-in (device code) or copies their CLI token
+           cache call the server as that user without ever seeing a consent screen. A run without it removes an
+           earlier pre-authorization.
 
       2. Copilot Studio connector app (default name: taas-mcp-copilot-connector)
          - Delegated permission to the server scope
@@ -23,6 +27,10 @@
 
 .EXAMPLE
     ./New-EntraAppRegistrations.ps1 -TenantId 00000000-0000-0000-0000-000000000000
+
+.EXAMPLE
+    ./New-EntraAppRegistrations.ps1 -TenantId 00000000-0000-0000-0000-000000000000 -PreAuthorizeAzureCli
+    For a test tenant: also lets `az account get-access-token` get a token for the server, to call it by hand.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -31,7 +39,8 @@ param(
     [string] $ConnectorAppName = 'taas-mcp-copilot-connector',
     [string] $ScopeName = 'access_as_user',
     [string] $AppRoleName = 'Ticketing.ReadWrite',
-    [switch] $SkipConnectorApp
+    [switch] $SkipConnectorApp,
+    [switch] $PreAuthorizeAzureCli
 )
 
 $ErrorActionPreference = 'Stop'
@@ -137,8 +146,9 @@ $serverPatch = @{
                 userConsentDescription = 'Allows the app to read and update help-desk tickets on your behalf.'
             }
         )
+        # Sent even when empty, so a run without -PreAuthorizeAzureCli removes an earlier pre-authorization.
         preAuthorizedApplications = @(
-            @{ appId = $AzureCliClientId; delegatedPermissionIds = @($scopeId) }
+            if ($PreAuthorizeAzureCli) { @{ appId = $AzureCliClientId; delegatedPermissionIds = @($scopeId) } }
         )
     }
     appRoles = @(
@@ -162,6 +172,8 @@ $serverPatch = @{
 if ($PSCmdlet.ShouldProcess($ServerAppName, 'Configure identifier URI, scope, app role, optional claims')) {
     Update-Application -ObjectId $serverObjectId -Patch $serverPatch
     Write-Host "Configured $ServerAppName ($identifierUri, scope $ScopeName, role $AppRoleName)."
+    Write-Host $(if ($PreAuthorizeAzureCli) { 'Azure CLI is pre-authorized for the scope (for testing; leave it off in production).' }
+        else { 'Azure CLI is not pre-authorized for the scope (-PreAuthorizeAzureCli adds it, for testing by hand).' })
 }
 
 $serverSp = Ensure-ServicePrincipal -AppId $serverAppId -AssignmentRequired $true

@@ -42,6 +42,7 @@ public sealed class McpServerFactory : WebApplicationFactory<Program>
         builder.UseSetting("Ticketing:ServiceAccount:Id", "33333333-3333-3333-3333-333333333333");
         builder.UseSetting("Ticketing:ServiceAccount:Name", "Ticketing Bot");
         builder.UseSetting("Ticketing:ServiceAccount:Email", "bot@example.test");
+        builder.UseSetting("Ticketing:ExternalEmailDomains", "example.test");
 
         foreach ((string key, string value) in Settings)
         {

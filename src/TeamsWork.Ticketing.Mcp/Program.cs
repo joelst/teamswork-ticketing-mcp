@@ -74,7 +74,7 @@ static async Task RunStdioAsync(string[] args)
     Program.UserSecretsLoaded = true;
     AddKeyVaultIfConfigured(builder.Configuration);
     AddTelemetry(builder.Services, builder.Configuration);
-    AddTicketingServices(builder.Services, builder.Configuration, requireServiceAccount: true);
+    AddTicketingServices(builder.Services, builder.Configuration, requireServiceAccount: true, requireExternalEmailDomains: false);
     builder.Services.AddSingleton<IActingUserProvider, ServiceAccountActingUserProvider>();
 
     IMcpServerBuilder mcp = builder.Services
@@ -156,7 +156,8 @@ static async Task RunHttpAsync(string[] args)
 
     AddKeyVaultIfConfigured(builder.Configuration);
     AddTelemetry(builder.Services, builder.Configuration);
-    AddTicketingServices(builder.Services, builder.Configuration, requireServiceAccount: authMode == AuthMode.Local);
+    AddTicketingServices(builder.Services, builder.Configuration, requireServiceAccount: authMode == AuthMode.Local,
+        requireExternalEmailDomains: authMode == AuthMode.Entra);
     builder.Services.AddHealthChecks();
     // This service is stateless and stores no authentication cookies. Avoid creating an ephemeral key ring on disk
     // inside the container, and the repeated warning that the keys won't survive a restart.
@@ -521,7 +522,8 @@ static void AddTelemetry(IServiceCollection services, IConfiguration configurati
     }
 }
 
-static void AddTicketingServices(IServiceCollection services, IConfiguration configuration, bool requireServiceAccount)
+static void AddTicketingServices(IServiceCollection services, IConfiguration configuration, bool requireServiceAccount,
+    bool requireExternalEmailDomains)
 {
     IConfigurationSection section = configuration.GetSection(TicketingOptions.SectionName);
     services.AddOptions<TicketingOptions>()
@@ -566,7 +568,16 @@ static void AddTicketingServices(IServiceCollection services, IConfiguration con
             "(on Linux, the tzdata package provides them).")
         .Validate(o => o.InvalidExternalEmailDomains().Count == 0,
             "Ticketing:ExternalEmailDomains must list plain domain names, such as contoso.com, separated by commas: no wildcards, and " +
-            "an internationalised domain in its xn-- punycode form. Matching is exact, so list each subdomain that should be allowed.")
+            "an internationalised domain in its xn-- punycode form. Matching is exact, so list each subdomain that should be allowed. " +
+            "To allow any domain, set it to * alone.")
+        // Shared by many signed-in callers, any of whose agents can be steered by text it has read into making an outside
+        // address a ticket's requestor, who then gets the ticket's notifications. So the choice is made explicitly.
+        // A value with no domain in it (",", "@") would read as unset and allow any domain, so it counts as not set.
+        .Validate(o => string.IsNullOrWhiteSpace(o.ExternalEmailDomains) || o.HasExternalEmailDomainEntries(),
+            "Ticketing:ExternalEmailDomains names no domain. List your email domains, such as contoso.com, or set it to * to allow any.")
+        .Validate(o => !requireExternalEmailDomains || o.HasExternalEmailDomainEntries(),
+            "Ticketing:ExternalEmailDomains must be set when the server accepts Entra sign-ins: list the email domains people outside " +
+            "the assignee list may have as requestors (such as contoso.com), or set it to * to allow any domain.")
         // The ID is what the help desk records and matches people by. Anything but an Entra object ID (or the email, in
         // the email-to-ticket form) attributes every write to someone the help desk doesn't know, silently.
         .Validate(o => o.ServiceAccount?.IsConfigured != true || o.ServiceAccount.IsValidIdentity,

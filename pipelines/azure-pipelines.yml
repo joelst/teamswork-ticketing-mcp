@@ -16,7 +16,8 @@
 #       entraTenantId, entraClientId (from infra/scripts/New-EntraAppRegistrations.ps1),
 #       serviceAccountId, serviceAccountName, serviceAccountEmail (optional, for app-only callers),
 #       publicBaseUrl (optional custom domain),
-#       externalEmailDomains (optional; comma-separated domains allowed for requestors outside the assignee list),
+#       externalEmailDomains (required; comma-separated domains allowed for requestors outside the assignee list,
+#         such as contoso.com, or * to allow any),
 #       acceptedClientApplicationIds (optional; comma-separated Entra client app IDs; empty allows all),
 #       blockedClientApplicationIds (optional; comma-separated Entra client app IDs always refused)
 #     An optional variable left out of the group is deployed as empty.
@@ -110,6 +111,9 @@ stages:
               az bicep build-params --file infra/app.bicepparam --stdout > /dev/null
               echo "Bicep templates and parameter files compile."
             displayName: Lint Bicep
+            env:
+              # app.bicepparam requires it, with no fallback; any domain compiles.
+              TAAS_EXTERNAL_EMAIL_DOMAINS: example.com
 
   # ---------------------------------------------------------------------------------------------------------------
   - stage: Core
@@ -253,6 +257,11 @@ stages:
                       set -euo pipefail
                       # Empty for a variable the group doesn't define (see the Core stage for how that is detected).
                       opt() { case "$1" in \$\(*) printf '' ;; *) printf '%s' "$1" ;; esac; }
+                      # app.bicep refuses an empty value too; this says what to set before anything is deployed.
+                      if [ -z "$(opt "$OPT_EXTERNAL_EMAIL_DOMAINS")" ]; then
+                        echo "##vso[task.logissue type=error]Set the externalEmailDomains variable to your organization's email domains (such as contoso.com), or * to allow any."
+                        exit 1
+                      fi
                       OUT=$(az deployment group create \
                         --name "app-$(Build.BuildNumber)" \
                         --resource-group "$(azureResourceGroup)" \

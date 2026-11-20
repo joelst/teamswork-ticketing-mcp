@@ -30,8 +30,13 @@ What it configures on the server app:
 - Delegated scope `access_as_user` (users and OBO flows).
 - App role `Ticketing.ReadWrite` for applications (Foundry project managed identity / agent identity).
 - Optional claims `email` and `preferred_username` so writes can be attributed to the user.
-- Azure CLI pre-authorized for the scope, so `az login` users can run the stdio transport without a consent prompt.
 - Service principal with **assignment required**, so only assigned users, groups, or identities can obtain tokens.
+- With `-PreAuthorizeAzureCli` only: Azure CLI pre-authorized for the scope, so `az account get-access-token` gets a
+  token for the server without a consent prompt (see [section 4](#4-verify-a-token-locally)). Use it on a test tenant,
+  not in production: anyone who phishes an assigned user's Azure CLI sign-in (a device-code prompt) or copies their CLI
+  token cache can then call the server as that user without seeing a consent screen. The stdio transport doesn't
+  need it; it uses the API key, not a token. Running the script without the switch removes an earlier
+  pre-authorization.
 
 ## Restrict calling client applications
 
@@ -53,6 +58,16 @@ legitimate integrations will receive HTTP 403.
 Entra admin center → Enterprise applications → **taas-mcp-server** → Users and groups → add the users/groups who
 should be able to use the ticketing tools through any agent.
 
+> **Assign help-desk staff only.** Everyone assigned gets the whole Ticketing API key's reach, through their agent:
+> every ticket and its private notes and attachments, and changing, reassigning or closing any ticket. The server has
+> no per-ticket or per-role permissions yet ([design](design/role-scoped-access.md)). Don't assign a company-wide
+> group, such as everyone licensed for Copilot.
+>
+> Keep **Assignment required** on (Enterprise applications → taas-mcp-server → Properties). The server checks only
+> that a token carries the `access_as_user` scope, so with assignment off, every member and guest of the tenant can
+> use it. Setting `Entra:AcceptedClientApplicationIds` (above) adds a second check on which client applications may
+> call.
+
 For application callers (Foundry managed identity or agent identity) assign the app role instead; see
 [foundry.md](foundry.md).
 
@@ -68,6 +83,10 @@ URL to the app registration under Authentication → Web.
 ```powershell
 az account get-access-token --resource api://<serverClientId> --query accessToken -o tsv
 ```
+
+This works only on a registration made with `-PreAuthorizeAzureCli` (a test tenant); otherwise Entra refuses with
+*consent required* (AADSTS65001). If `Entra:AcceptedClientApplicationIds` is set, the server also refuses the token
+unless the Azure CLI's client ID, `04b07795-8ddb-461a-bbee-02f9e1bf7b46`, is in that list.
 
 Decode it (for example at jwt.ms) and check `aud` = `<serverClientId>` (v2 tokens use the GUID), `scp` contains
 `access_as_user`, and `oid`, `name`, `preferred_username` are present.

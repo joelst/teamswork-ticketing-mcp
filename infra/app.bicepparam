@@ -21,7 +21,8 @@ param defaultTimeZoneId = 'America/Chicago'
 param serviceAccountId = readEnvironmentVariable('TAAS_SERVICE_ACCOUNT_ID', '')
 param serviceAccountName = readEnvironmentVariable('TAAS_SERVICE_ACCOUNT_NAME', '')
 param serviceAccountEmail = readEnvironmentVariable('TAAS_SERVICE_ACCOUNT_EMAIL', '')
-param externalEmailDomains = readEnvironmentVariable('TAAS_EXTERNAL_EMAIL_DOMAINS', '')
+// No fallback: a deployment must say which outside domains may be requestors (your own, such as contoso.com, or *).
+param externalEmailDomains = readEnvironmentVariable('TAAS_EXTERNAL_EMAIL_DOMAINS')
 param acceptedClientApplicationIds = readEnvironmentVariable('TAAS_ACCEPTED_CLIENT_APPLICATION_IDS', '')
 param blockedClientApplicationIds = readEnvironmentVariable('TAAS_BLOCKED_CLIENT_APPLICATION_IDS', '')
 param applicationInsightsConnectionString = readEnvironmentVariable('APPLICATIONINSIGHTS_CONNECTION_STRING', '')
