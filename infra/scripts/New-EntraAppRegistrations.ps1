@@ -15,7 +15,7 @@
            for the server without a consent prompt, for testing the HTTP endpoint by hand. Leave it off in production:
            it lets anyone who phishes an assigned user's Azure CLI sign-in (device code) or copies their CLI token
            cache call the server as that user without ever seeing a consent screen. A run without it removes an
-           earlier pre-authorization.
+           earlier pre-authorization. Clients pre-authorized by hand, on either app, are kept.
 
       2. Copilot Studio connector app (default name: taas-mcp-copilot-connector)
          - Delegated permission to the server scope
@@ -116,6 +116,17 @@ function New-StableGuid {
     return [Guid]::new($bytes).ToString()
 }
 
+# An app's pre-authorized clients with the one this script manages set as asked: present for $ScopeId when $Include,
+# absent otherwise. Graph replaces the whole list, so clients an admin pre-authorized by hand are carried over.
+function Get-PreAuthorized {
+    param($App, [string] $ClientId, [string] $ScopeId, [bool] $Include)
+    $list = @(@($App.api.preAuthorizedApplications) | Where-Object { $_ -and $_.appId -ne $ClientId } |
+        ForEach-Object { @{ appId = $_.appId; delegatedPermissionIds = @($_.delegatedPermissionIds) } })
+    if ($Include) { $list += @{ appId = $ClientId; delegatedPermissionIds = @($ScopeId) } }
+    # The comma keeps an empty or one-item list a list.
+    return , $list
+}
+
 Write-Host "Signing in context: tenant $TenantId"
 Invoke-Az @('account', 'show', '--query', 'tenantId', '-o', 'tsv') | Out-Null
 
@@ -147,9 +158,7 @@ $serverPatch = @{
             }
         )
         # Sent even when empty, so a run without -PreAuthorizeAzureCli removes an earlier pre-authorization.
-        preAuthorizedApplications = @(
-            if ($PreAuthorizeAzureCli) { @{ appId = $AzureCliClientId; delegatedPermissionIds = @($scopeId) } }
-        )
+        preAuthorizedApplications = (Get-PreAuthorized -App $server -ClientId $AzureCliClientId -ScopeId $scopeId -Include $PreAuthorizeAzureCli.IsPresent)
     }
     appRoles = @(
         @{
@@ -203,9 +212,7 @@ if (-not $SkipConnectorApp) {
                     userConsentDescription = 'Allows the ticketing connector to read and update tickets as you.'
                 }
             )
-            preAuthorizedApplications = @(
-                @{ appId = $AzureApiConnectionsClientId; delegatedPermissionIds = @($connectorScopeId) }
-            )
+            preAuthorizedApplications = (Get-PreAuthorized -App $connector -ClientId $AzureApiConnectionsClientId -ScopeId $connectorScopeId -Include $true)
         }
         requiredResourceAccess = @(
             @{
