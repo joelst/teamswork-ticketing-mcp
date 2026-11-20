@@ -22,7 +22,9 @@
     SDK, and Azure CLI 2.60+. The server's app registration comes from New-EntraAppRegistrations.ps1.
 
     -ExternalEmailDomains is required: the email domains people outside the instance's assignee list may have when
-    named as a requestor or in a people field, such as contoso.com, or * to allow any.
+    named as a requestor or in a people field, such as contoso.com, or * to allow any. A server image built before
+    this setting accepted * refuses to start with it, so with -SkipImage (which deploys the newest image already in
+    the registry) or when rolling back to such an image, give real domains instead.
 
 .EXAMPLE
     ./Deploy-TestInstance.ps1 -Location <region> -ExternalEmailDomains contoso.com
