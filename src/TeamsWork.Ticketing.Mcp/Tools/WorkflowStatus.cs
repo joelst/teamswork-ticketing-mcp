@@ -290,6 +290,15 @@ internal static class WorkflowStatus
     }
 
     /// <summary>
+    /// The label of the ticket's current state, from its workflow (its own, or the instance's graph); its status as it is
+    /// when the workflow doesn't say. A custom workflow's ticket carries the state's ID as its status.
+    /// </summary>
+    public static string? LabelOf(Ticket ticket, JsonElement? instanceWorkflows = null) =>
+        StatesOf(ticket, instanceWorkflows) is { } states && Current(states, ticket.Status) is { Label: string label } && !string.IsNullOrWhiteSpace(label)
+            ? label
+            : ticket.Status;
+
+    /// <summary>
     /// Whether the ticket is already in the state <paramref name="target"/> names, by state ID or label: a custom
     /// workflow's ticket carries its state ID as its status, so the text alone doesn't say.
     /// </summary>

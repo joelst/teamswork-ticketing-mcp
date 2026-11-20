@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
+using TeamsWork.Ticketing.Mcp.Auth;
 using TeamsWork.Ticketing.Mcp.Configuration;
 using TeamsWork.Ticketing.Mcp.Ticketing;
 using TeamsWork.Ticketing.Mcp.Ticketing.Models;
@@ -31,12 +32,14 @@ public sealed class LookupTools
     private readonly InstanceCache _cache;
     private readonly TicketingOptions _options;
     private readonly TimeProvider _time;
+    private readonly IActingUserProvider? _actingUser;
 
-    public LookupTools(TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options, TimeProvider? time = null)
+    public LookupTools(TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options, TimeProvider? time = null, IActingUserProvider? actingUser = null)
     {
         _client = client;
         _cache = cache;
         _options = options.Value;
+        _actingUser = actingUser;
         _time = time ?? TimeProvider.System;
     }
 
@@ -95,12 +98,20 @@ public sealed class LookupTools
             _cache.Numbers.Remember(t);
             ListResponse<Activity> h = await history;
             IReadOnlyList<Activity> recent = h.Items ?? [];
-            JsonObject brief = TicketViews.Detail(t, includeHtml, await WorkflowStatus.WorkflowsForAsync(t, _cache, _client, timezoneOffset, cancellationToken));
+            System.Text.Json.JsonElement? workflows = await WorkflowStatus.WorkflowsForAsync(t, _cache, _client, timezoneOffset, cancellationToken);
+            JsonObject brief = TicketViews.Detail(t, includeHtml, workflows);
 
+            // The caller counts as staff, as in get_queue, so their own replies aren't taken for the requestor's.
             TicketPeople people = await TicketPeople.LoadAsync(_cache, _client, _options, timezoneOffset, cancellationToken);
+            if (await CallerAsync(cancellationToken) is TicketUser caller)
+            {
+                people.WithAgents([caller]);
+            }
+
             DateTimeOffset now = _time.GetUtcNow();
             bool resolved = brief["isResolved"]?.GetValue<bool>() == true;
-            Waiting.State state = Waiting.Compute(t, recent, people, resolved, complete: h.ContinuationToken is null, now);
+            Waiting.State state = Waiting.Compute(t, recent, people, resolved, complete: h.ContinuationToken is null, now,
+                WorkflowStatus.LabelOf(t, workflows ?? await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken)));
             if (Waiting.Parse(t.CreatedOn) is DateTimeOffset created)
             {
                 brief["ageDays"] = Waiting.Days(created, now);
@@ -111,7 +122,10 @@ public sealed class LookupTools
                 brief["idleDays"] = idle;
             }
 
-            brief["waitingOn"] = state.WaitingOn;
+            if (state.WaitingOn is string waitingOn)
+            {
+                brief["waitingOn"] = waitingOn;
+            }
             if (state.WaitingSince is DateTimeOffset since)
             {
                 brief["waitingSince"] = TicketViews.Time(since);
@@ -148,7 +162,10 @@ public sealed class LookupTools
                 notes > 0 ? $"{notes} private {(notes == 1 ? "note" : "notes")}" : null,
             ];
             string? leftOut = left.Any(x => x is not null) ? $"Left out: {string.Join(" and ", left.OfType<string>())} (includeAutomation, includePrivate)." : null;
-            if (string.Join(" ", new[] { leftOut, more }.OfType<string>()) is { Length: > 0 } hint)
+            string? unknown = state.WaitingOn is null
+                ? $"waitingOn is left out: none of the latest {recent.Count} activities is a public reply; list_ticket_activities has older ones."
+                : null;
+            if (string.Join(" ", new[] { unknown, leftOut, more }.OfType<string>()) is { Length: > 0 } hint)
             {
                 brief["hint"] = hint;
             }
@@ -277,6 +294,24 @@ public sealed class LookupTools
 
         var candidate = new HashSet<string>(Words(candidateTitle), StringComparer.Ordinal);
         return (double)queryWords.Count(candidate.Contains) / queryWords.Count;
+    }
+
+    /// <summary>The caller, for telling their replies apart; null when there is none to tell (a read needs no caller).</summary>
+    private async Task<TicketUser?> CallerAsync(CancellationToken cancellationToken)
+    {
+        if (_actingUser is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return (await _actingUser.GetActingUserAsync(cancellationToken)).ToTicketUser();
+        }
+        catch (ActingUserException)
+        {
+            return null;
+        }
     }
 
     private static async Task<T> CancelOthersOnFailure<T>(Task<T> task, CancellationTokenSource others)

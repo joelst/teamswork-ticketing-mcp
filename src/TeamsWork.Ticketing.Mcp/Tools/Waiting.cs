@@ -135,7 +135,8 @@ internal sealed class TicketPeople
 /// Who a ticket is waiting on, worked out from its latest history (spec section 8): nobody once it is resolved; the
 /// requestor (or a third party) in a state named for waiting; otherwise whoever didn't write the latest public reply by
 /// a person. Automation, system accounts and private notes don't count as replies. A ticket nobody has replied to waits
-/// on its assignee.
+/// on its assignee; when the history read doesn't reach back to the ticket's creation, that can't be told, so it is
+/// left unknown (null) rather than guessed.
 /// </summary>
 internal static partial class Waiting
 {
@@ -147,14 +148,18 @@ internal static partial class Waiting
     /// <param name="WaitingSince">When the ticket started waiting, when known: the reply it waits after, or its creation.</param>
     /// <param name="IdleDays">Whole days since a person last did anything on it, of any visibility.</param>
     /// <param name="LastPublic">The latest public reply by a person, if any was read.</param>
-    public sealed record State(string WaitingOn, DateTimeOffset? WaitingSince, int? IdleDays, Reply? LastPublic);
+    public sealed record State(string? WaitingOn, DateTimeOffset? WaitingSince, int? IdleDays, Reply? LastPublic);
 
     /// <param name="By">requestor, agent, or other (someone else on the requestor's side, such as a cc).</param>
     public sealed record Reply(string By, DateTimeOffset? On, string? Text);
 
     /// <param name="history">The ticket's activities, newest first, as the API returns them.</param>
     /// <param name="complete">Whether <paramref name="history"/> reaches back to the ticket's creation.</param>
-    public static State Compute(Ticket t, IReadOnlyList<Activity> history, TicketPeople people, bool resolved, bool complete, DateTimeOffset now)
+    /// <param name="statusLabel">
+    /// The ticket's state as its workflow labels it (see <see cref="WorkflowStatus.LabelOf"/>): a custom workflow's ticket
+    /// carries a state ID as its status, which says nothing about waiting.
+    /// </param>
+    public static State Compute(Ticket t, IReadOnlyList<Activity> history, TicketPeople people, bool resolved, bool complete, DateTimeOffset now, string? statusLabel = null)
     {
         DateTimeOffset? created = Parse(t.CreatedOn);
         Activity? lastHuman = history.FirstOrDefault(a => IsByPerson(a, people));
@@ -170,15 +175,16 @@ internal static partial class Waiting
             return new State(None, null, idle, reply);
         }
 
-        if (Blank(t.Status) is string status && WaitingState().IsMatch(status))
+        if (Blank(statusLabel ?? t.Status) is string status && WaitingState().IsMatch(status))
         {
             return new State(ThirdPartyState().IsMatch(status) ? ThirdParty : Requestor, null, idle, reply);
         }
 
         if (reply is null)
         {
-            // Nobody has replied in what was read: the ticket waits on its assignee, since it was created if that is known.
-            return new State(Assignee, complete ? created : null, idle, null);
+            // Nobody has replied since the ticket was created: it waits on its assignee. With only its latest history read,
+            // an older reply may still decide, so it is unknown.
+            return complete ? new State(Assignee, created, idle, null) : new State(null, null, idle, null);
         }
 
         return new State(reply.By == "agent" ? Requestor : Assignee, reply.On, idle, reply);

@@ -225,7 +225,7 @@ public sealed class QueueBriefBulkTests
             .GetQueue(include: ["waitingOn"], limit: 30, cancellationToken: Ct));
 
         Assert.Equal(QueueTools.HistoryBudget, handler.Requests.Count(r => r.Path.EndsWith("/activities", StringComparison.Ordinal)));
-        Assert.Contains($"first {QueueTools.HistoryBudget} rows", doc.RootElement.GetProperty("hint").GetString(), StringComparison.Ordinal);
+        Assert.Contains($"first {QueueTools.HistoryBudget} candidates", doc.RootElement.GetProperty("hint").GetString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -591,6 +591,9 @@ public sealed class QueueBriefBulkTests
     [InlineData("Thanks.\nFrom: Pat <pat@example.test>\nDate: Monday\nold")]
     [InlineData("Thanks.\n-----Original Message-----\nold")]
     [InlineData("Thanks.\nOn Mon, 1 Jan 2026 at 10:00, Pat wrote:\n> old")]
+    [InlineData("Thanks.\r\n-----Original Message-----\r\nold")]
+    [InlineData("Thanks.\r\nOn Mon, 1 Jan 2026 at 10:00, Pat wrote:\r\n> old")]
+    [InlineData("Thanks.\r\nFrom: Pat <pat@example.test>\r\nSent: Monday\r\nold")]
     public void A_real_quoted_reply_is_cut(string text)
     {
         Assert.StartsWith("Thanks. [quoted reply cut", TicketViews.StripQuoted(text), StringComparison.Ordinal);
@@ -667,15 +670,127 @@ public sealed class QueueBriefBulkTests
     }
 
     [Fact]
-    public void Versions_compare_on_ts_when_both_have_it_and_on_fields_otherwise()
+    public void Versions_match_on_the_fields_and_on_ts_when_both_have_it()
     {
         Ticket listed = Parse<Ticket>("""{"id":"t","status":"Open","priority":"2_Medium","tags":["VPN"],"lastUpdatedOn":"2026-11-18T12:00:00.1234567Z"}""");
         Ticket read = Parse<Ticket>("""{"id":"t","status":"Open","priority":"Medium","tags":[{"tagCategoryId":"net","text":"VPN"}],"lastUpdatedOn":"2026-11-18T12:00:00Z","_ts":5}""");
-        Ticket moved = Parse<Ticket>("""{"id":"t","status":"In Progress","priority":"Medium","tags":["VPN"],"lastUpdatedOn":"2026-11-18T12:00:00Z","_ts":5}""");
+        Ticket sameSecond = Parse<Ticket>("""{"id":"t","status":"In Progress","priority":"Medium","tags":["VPN"],"lastUpdatedOn":"2026-11-18T12:00:00Z","_ts":5}""");
+        Ticket commented = Parse<Ticket>("""{"id":"t","status":"Open","priority":"Medium","tags":["VPN"],"lastUpdatedOn":"2026-11-18T12:00:00Z","_ts":9}""");
 
-        Assert.True(TicketVersion.Of(listed).Matches(TicketVersion.Of(read)));      // only one has _ts: the fields decide
-        Assert.False(TicketVersion.Of(listed).Matches(TicketVersion.Of(moved)));
-        Assert.True(TicketVersion.Of(read).Matches(TicketVersion.Of(moved)));       // both have _ts: it decides
+        Assert.True(TicketVersion.Of(listed).Matches(TicketVersion.Of(read)));        // only one has _ts: the fields decide
+        Assert.False(TicketVersion.Of(read).Matches(TicketVersion.Of(sameSecond)));   // changed in the same second: _ts alone would miss it
+        Assert.False(TicketVersion.Of(read).Matches(TicketVersion.Of(commented)));    // a comment moves _ts only
+    }
+
+    [Fact]
+    public async Task A_custom_workflow_status_change_sends_the_state_id_read_from_whole_tickets()
+    {
+        // isCustomWorkflow can't be selected, so a preview that changes status reads whole tickets to learn it.
+        string ticket = $$"""
+            {"id":"{{Id(1)}}","ticketNo":101,"title":"Custom","status":"st_7","isCustomWorkflow":true,"_ts":1,
+             "workflow":[{"id":"st_7","label":"Working","nextSteps":[{"targetId":"st_8"}]},{"id":"st_8","label":"Done","nextSteps":[]}]}
+            """;
+        var store = new BulkStore(Clock);
+        var preview = new Router(r => r.Path.EndsWith("/instance", StringComparison.Ordinal) ? InstanceJson : "{\"items\":[" + ticket + "],\"itemCount\":1}");
+        using JsonDocument doc = JsonDocument.Parse(await Bulk(preview, store).PreviewBulkUpdate(
+            filter: new BulkFilter { TitlePattern = "Custom" }, set: new BulkChanges { Status = "Done" }, cancellationToken: Ct));
+        var confirm = new Router(r => "{\"item\":" + ticket + "}");
+
+        await Bulk(confirm, store).BulkUpdate(doc.RootElement.GetProperty("confirmToken").GetString()!, Ct);
+
+        Assert.False(TestFactory.Query(preview.Requests.Single(r => r.Path.EndsWith("/tickets", StringComparison.Ordinal)).Uri).ContainsKey("select"));
+        Assert.Contains("\"status\":\"st_8\"", confirm.Requests.Single(r => r.Method == HttpMethod.Put).Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_deleted_category_doesnt_make_a_tag_ambiguous()
+    {
+        List<TagCategory> categories = Parse<ListResponse<TagCategory>>("""
+            {"items":[{"id":"old","text":"Old network","deleted":true,"tags":[{"text":"Network"}]},
+                      {"id":"net","text":"Network","tags":[{"text":"Network"}]}]}
+            """).Items!.ToList();
+
+        Assert.Equal("net", InstanceLookup.MatchTag(new TagRef { Text = "network" }, 0, categories).TagCategoryId);
+    }
+
+    [Fact]
+    public void A_custom_state_named_for_waiting_is_found_by_its_label()
+    {
+        Ticket t = Parse<Ticket>($$"""
+            {"id":"t","status":"9f1c","requestor":{{Requestor}},"assignee":{{Agent}},"createdOn":"2026-11-10T09:00:00Z",
+             "workflow":[{"id":"9f1c","label":"Awaiting vendor","nextSteps":[]}]}
+            """);
+
+        Assert.Equal("thirdParty", Waiting.Compute(t, [], People(), resolved: false, complete: true, Now, WorkflowStatus.LabelOf(t)).WaitingOn);
+    }
+
+    [Fact]
+    public void Without_a_reply_in_a_partial_history_who_it_waits_on_is_unknown()
+    {
+        List<Activity> notesOnly = Parse<List<Activity>>($$"""[{"action":"commented","comment":"note","isPrivate":true,"user":{{Agent}},"createdOn":"2026-11-18T12:00:00Z"}]""");
+
+        Assert.Null(Waiting.Compute(Ticket("In Progress"), notesOnly, People(), resolved: false, complete: false, Now).WaitingOn);
+        Assert.Equal("assignee", Waiting.Compute(Ticket("In Progress"), notesOnly, People(), resolved: false, complete: true, Now).WaitingOn);
+    }
+
+    [Fact]
+    public async Task A_brief_counts_the_callers_own_reply_as_staffs()
+    {
+        // Kim isn't in the assignee list and isn't this ticket's assignee, but is the one asking.
+        var kim = new ActingUser("k1", "Kim Staff", "kim@example.test", ActingUserSource.DelegatedToken);
+        var handler = new Router(r => r.Path switch
+        {
+            var p when p.EndsWith("/activities", StringComparison.Ordinal) =>
+                """{"items":[{"id":"a","action":"commented","comment":"Try this","user":{"id":"k1","name":"Kim Staff","email":"kim@example.test"},"createdOn":"2026-11-18T12:00:00Z"}]}""",
+            var p when p.EndsWith("/attachments", StringComparison.Ordinal) => """{"items":[]}""",
+            var p when p.EndsWith("/instance", StringComparison.Ordinal) => InstanceJson,
+            _ => $$"""{"item":{"id":"{{Id(1)}}","ticketNo":1,"title":"T","status":"Open","requestor":{{Requestor}},"assignee":{{Agent}} } }""",
+        });
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(handler);
+
+        using JsonDocument doc = JsonDocument.Parse(await new LookupTools(client, cache, options, Clock, new FixedActor(kim)).GetTicketBrief(Id(1), cancellationToken: Ct));
+
+        Assert.Equal("requestor", doc.RootElement.GetProperty("waitingOn").GetString());
+    }
+
+    [Fact]
+    public async Task The_limit_is_applied_after_ranking_with_history()
+    {
+        // Both Medium; the older one waits on the requestor, the newer one on me. With limit 1, mine comes first.
+        var handler = new Router(r => r.Path switch
+        {
+            var p when p.EndsWith("/instance", StringComparison.Ordinal) => InstanceJson,
+            var p when p.EndsWith("/tickets", StringComparison.Ordinal) => $$"""
+                {"items":[
+                  {"id":"{{Id(1)}}","ticketNo":1,"title":"Answered","status":"Open","priority":"2_Medium","assignee":{{Agent}},"requestor":{{Requestor}},"createdOn":"2026-11-01T00:00:00Z","lastUpdatedOn":"2026-11-10T00:00:00Z"},
+                  {"id":"{{Id(2)}}","ticketNo":2,"title":"Mine","status":"Open","priority":"2_Medium","assignee":{{Agent}},"requestor":{{Requestor}},"createdOn":"2026-11-01T00:00:00Z","lastUpdatedOn":"2026-11-18T00:00:00Z"}],
+                 "itemCount":2}
+                """,
+            var p when p.Contains(Id(1), StringComparison.Ordinal) =>
+                $$"""{"items":[{"action":"commented","comment":"Try this","user":{{Agent}},"createdOn":"2026-11-10T00:00:00Z"}]}""",
+            _ => $$"""{"items":[{"action":"commented","comment":"Still broken","user":{{Requestor}},"createdOn":"2026-11-18T00:00:00Z"}]}""",
+        });
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(handler);
+
+        using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new FixedActor(Jane), cache, options, Clock)
+            .GetQueue(include: ["waitingOn"], limit: 1, cancellationToken: Ct));
+
+        Assert.Equal(2, Assert.Single(doc.RootElement.GetProperty("items").EnumerateArray()).GetProperty("ticketNo").GetInt32());
+    }
+
+    [Fact]
+    public async Task A_truncated_queue_says_so_without_pointing_at_a_filter_it_lacks()
+    {
+        // A page of the two the scan may read, of three in all.
+        string tickets = "{\"items\":[" + string.Join(",", Enumerable.Range(1, 2).Select(i =>
+            $$"""{"id":"{{Id(i)}}","ticketNo":{{i}},"title":"T","status":"Open","assignee":{{Agent}},"createdOn":"2026-11-0{{i}}T00:00:00Z"}""")) + "],\"itemCount\":3}";
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(new Router(_ => tickets), o => o.MaxScanTickets = 2);
+
+        using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new FixedActor(Jane), cache, options, Clock).GetQueue(include: [], cancellationToken: Ct));
+        string hint = doc.RootElement.GetProperty("hint").GetString()!;
+
+        Assert.Contains("MaxScanTickets", hint, StringComparison.Ordinal);
+        Assert.DoesNotContain("createdBefore", hint, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -728,9 +843,9 @@ public sealed class QueueBriefBulkTests
         return new BulkTools(client, new FixedActor(actor ?? Jane), cache, options, store, caller);
     }
 
-    private static (TicketingClient, InstanceCache, IOptions<TicketingOptions>) BuildRouted(HttpMessageHandler handler)
+    private static (TicketingClient, InstanceCache, IOptions<TicketingOptions>) BuildRouted(HttpMessageHandler handler, Action<TicketingOptions>? configure = null)
     {
-        IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(TestFactory.Options());
+        IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(TestFactory.Options(configure));
         var tz = new TimeZoneOffsetResolver(opts, Clock);
         var client = new TicketingClient(new HttpClient(handler), opts, new TicketingRateLimiter(opts), tz,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<TicketingClient>.Instance, Clock);

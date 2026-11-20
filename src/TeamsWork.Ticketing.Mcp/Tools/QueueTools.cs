@@ -149,17 +149,21 @@ public sealed class QueueTools
                 {
                     _cache.Numbers.Remember(t);
                     bool inRange = sinceUtc is null || Waiting.Parse(t.LastResolutionOn) is not DateTimeOffset resolvedOn || resolvedOn >= sinceUtc;
-                    return matches(t) && inRange ? t : null;
+                    return matches(t) && inRange ? Slim(t) : null;
                 },
                 _options.MaxScanTickets,
                 wholeTickets ? WorkloadTools.FullTicketPageSize : TicketScan.MaxApiPageSize,
                 cancellationToken);
 
-            List<Ticket> page = Coarse(scan.Matches, order).Take(max).ToList();
             DateTimeOffset now = _time.GetUtcNow();
 
-            // Who each row is waiting on, from its history: the rows returned only, a few at a time, within the budget.
+            // Who each candidate is waiting on, from its history, a few at a time within the budget. Urgency and idle order
+            // depend on it, so for those the candidates are more than the rows returned (up to the budget): the rows are
+            // picked after it is known. Other orders need only the rows returned.
             bool history = (extras.Contains("waitingOn") && !resolvedSince) || extras.Contains("idleDays") || extras.Contains("lastPublic");
+            bool rankedByHistory = history && order is "urgency" or "idle";
+            int candidates = rankedByHistory ? Math.Max(max, Math.Min(HistoryBudget, scan.Matches.Count)) : max;
+            List<Ticket> page = Coarse(scan.Matches, order).Take(candidates).ToList();
             var states = new Waiting.State?[page.Count];
             int read = 0, failed = 0;
             if (history && page.Count > 0)
@@ -167,6 +171,7 @@ public sealed class QueueTools
                 ActingUser caller = await _actingUser.GetActingUserAsync(cancellationToken);
                 TicketPeople people = (await TicketPeople.LoadAsync(_cache, _client, _options, timezoneOffset, cancellationToken))
                     .WithAgents(scan.Matches.Select(t => t.Assignee).Append(caller.ToTicketUser()));
+                System.Text.Json.JsonElement? workflows = await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken);
                 read = Math.Min(page.Count, HistoryBudget);
                 using var gate = new SemaphoreSlim(HistoryConcurrency);
                 await Task.WhenAll(Enumerable.Range(0, read).Select(async i =>
@@ -177,7 +182,8 @@ public sealed class QueueTools
                         if (Guid.TryParse(page[i].Id, out Guid id))
                         {
                             ListResponse<Activity> h = await _client.ListActivitiesAsync(id, false, Waiting.HistoryWindow, null, cancellationToken);
-                            states[i] = Waiting.Compute(page[i], h.Items ?? [], people, resolvedSince, h.ContinuationToken is null, now);
+                            states[i] = Waiting.Compute(page[i], h.Items ?? [], people, resolvedSince, h.ContinuationToken is null, now,
+                                WorkflowStatus.LabelOf(page[i], workflows));
                         }
                     }
                     catch (TicketingApiException)
@@ -191,7 +197,8 @@ public sealed class QueueTools
                 }));
             }
 
-            List<(Ticket Ticket, Waiting.State? State)> rows = Fine(page.Zip(states).ToList(), order, now);
+            List<(Ticket Ticket, Waiting.State? State)> rows = Fine(page.Zip(states).ToList(), order, now).Take(max).ToList();
+            int unknown = rows.Count(r => r.State is { WaitingOn: null });
 
             var result = new JsonObject { ["who"] = label };
             if (resolvedSince)
@@ -216,10 +223,17 @@ public sealed class QueueTools
             string?[] hints =
             [
                 whoNote,
-                TicketScan.TruncationHint(scan, query, _client.TimeZones),
+                scan.Truncated
+                    ? $"Only the newest {scan.Scanned} tickets were read (Ticketing:MaxScanTickets), so older ones aren't in this queue; narrow it with 'priority' or 'role'."
+                    : null,
                 scan.Matches.Count > rows.Count ? $"{scan.Matches.Count} tickets matched; raise 'limit' (max 50) or add filters to see more." : null,
-                history && page.Count > read ? $"waitingOn and idleDays cover the first {read} rows only, to stay within the API quota." : null,
+                history && page.Count > read
+                    ? $"waitingOn and idleDays come from the history of the first {read} candidates only, to stay within the API quota; the rest are ranked by their last update."
+                    : null,
                 failed > 0 ? $"{failed} rows have no waitingOn: their history couldn't be read (the API quota may be used up for now)." : null,
+                unknown > 0 && extras.Contains("waitingOn")
+                    ? $"{unknown} rows have no waitingOn: none of their latest {Waiting.HistoryWindow} activities is a public reply, so who they wait on isn't known."
+                    : null,
             ];
             if (string.Join(" ", hints.OfType<string>()) is { Length: > 0 } hint)
             {
@@ -272,9 +286,9 @@ public sealed class QueueTools
         }
 
         // When it started waiting is left to get_ticket_brief: idleDays says how stale it is, in far fewer characters.
-        if (extras.Contains("waitingOn") && state is not null && !resolvedSince)
+        if (extras.Contains("waitingOn") && state?.WaitingOn is string waitingOn && !resolvedSince)
         {
-            o["waitingOn"] = state.WaitingOn;
+            o["waitingOn"] = waitingOn;
         }
 
         if (extras.Contains("sla") && slaOn)
@@ -332,6 +346,30 @@ public sealed class QueueTools
             _ => rows,
         };
     }
+
+    /// <summary>
+    /// What a queue keeps of a matched ticket: a scan of whole tickets (for SLA flags) would otherwise hold every match's
+    /// description and custom fields until the call ends.
+    /// </summary>
+    private static Ticket Slim(Ticket t) => new()
+    {
+        Id = t.Id,
+        TicketNo = t.TicketNo,
+        Title = t.Title,
+        Status = t.Status,
+        Priority = t.Priority,
+        Assignee = t.Assignee,
+        Requestor = t.Requestor,
+        CreatedOn = t.CreatedOn,
+        LastUpdatedOn = t.LastUpdatedOn,
+        LastResolutionOn = t.LastResolutionOn,
+        IsCustomWorkflow = t.IsCustomWorkflow,
+        Workflow = t.Workflow,
+        IsFrtBreached = t.IsFrtBreached,
+        IsRtBreached = t.IsRtBreached,
+        IsFrtEscalated = t.IsFrtEscalated,
+        IsRtEscalated = t.IsRtEscalated,
+    };
 
     private static bool Breached(Ticket t) => t.IsFrtBreached == true || t.IsRtBreached == true;
 

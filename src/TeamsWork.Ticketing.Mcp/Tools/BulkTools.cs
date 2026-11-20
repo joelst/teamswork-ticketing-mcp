@@ -36,6 +36,8 @@ public sealed partial class BulkTools
     /// <summary>How long one confirmation works before handing the rest back with a resumeToken.</summary>
     internal static readonly TimeSpan TimeBudget = TimeSpan.FromSeconds(20);
 
+    // What a preview reads of each ticket. isCustomWorkflow can't be selected (the API fails), and a status change needs it
+    // to send a custom workflow's state ID rather than its label, so a preview that changes status reads whole tickets.
     private const string BulkFields = "id,ticketId,title,status,priority,assignee,tags,expectedDate,lastUpdatedOn,_ts";
     private const int TitleChars = 60;
 
@@ -92,8 +94,8 @@ public sealed partial class BulkTools
             System.Text.Json.JsonElement? workflows = await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken);
 
             (List<Ticket> picked, string? pickHint) = filter is not null
-                ? await PickByFilterAsync(filter, workflows, timezoneOffset, cancellationToken)
-                : await PickByRefsAsync(tickets!, timezoneOffset, cancellationToken);
+                ? await PickByFilterAsync(filter, workflows, change.Status is not null, timezoneOffset, cancellationToken)
+                : await PickByRefsAsync(tickets!, change.Status is not null, timezoneOffset, cancellationToken);
 
             IReadOnlyList<TagCategory> categories = change.AddTags.Count > 0 || change.RemoveTags.Count > 0 ? await lookup.TagCategoriesAsync() : [];
             var items = new List<BulkItem>();
@@ -438,7 +440,7 @@ public sealed partial class BulkTools
     }
 
     /// <summary>The tickets a filter picks, refused when there are more than a batch takes.</summary>
-    private async Task<(List<Ticket> Tickets, string? Hint)> PickByFilterAsync(BulkFilter filter, System.Text.Json.JsonElement? workflows, int? timezoneOffset, CancellationToken cancellationToken)
+    private async Task<(List<Ticket> Tickets, string? Hint)> PickByFilterAsync(BulkFilter filter, System.Text.Json.JsonElement? workflows, bool wholeTickets, int? timezoneOffset, CancellationToken cancellationToken)
     {
         Regex? titlePattern = ToolValidation.OptionalText(filter.TitlePattern, "filter.titlePattern", 500) is string pattern ? Glob(pattern) : null;
         string? assigneeText = ToolValidation.OptionalText(filter.Assignee, "filter.assignee", 320);
@@ -462,7 +464,7 @@ public sealed partial class BulkTools
             Priority = ToolValidation.OptionalEnum(filter.Priority, "filter.priority", ToolValidation.Priorities),
             CreatedAfter = ToolValidation.OptionalDateFilter(filter.CreatedAfter, "filter.createdAfter"),
             CreatedBefore = ToolValidation.OptionalDateFilter(filter.CreatedBefore, "filter.createdBefore"),
-            Select = BulkFields,
+            Select = wholeTickets ? null : BulkFields,
             TimezoneOffset = timezoneOffset,
         };
         if (query.Search is null && titlePattern is null && state is null && query.Priority is null && assigneeText is null &&
@@ -477,10 +479,10 @@ public sealed partial class BulkTools
             t =>
             {
                 _cache.Numbers.Remember(t);
-                return Guid.TryParse(t.Id, out _) && (titlePattern is null || titlePattern.IsMatch(t.Title ?? "")) && assigneeMatches(t) ? t : null;
+                return Guid.TryParse(t.Id, out _) && (titlePattern is null || titlePattern.IsMatch(t.Title ?? "")) && assigneeMatches(t) ? Slim(t) : null;
             },
             _options.MaxScanTickets,
-            TicketScan.MaxApiPageSize,
+            wholeTickets ? WorkloadTools.FullTicketPageSize : TicketScan.MaxApiPageSize,
             cancellationToken);
 
         if (scan.Matches.Count > MaxTickets)
@@ -496,7 +498,7 @@ public sealed partial class BulkTools
     /// read one at a time when there are only a couple; otherwise one read of the open tickets finds most of them,
     /// numbers included, without a lookup each, and the rest are found and read one at a time.
     /// </summary>
-    private async Task<(List<Ticket> Tickets, string? Hint)> PickByRefsAsync(IReadOnlyList<string> refs, int? timezoneOffset, CancellationToken cancellationToken)
+    private async Task<(List<Ticket> Tickets, string? Hint)> PickByRefsAsync(IReadOnlyList<string> refs, bool wholeTickets, int? timezoneOffset, CancellationToken cancellationToken)
     {
         var wanted = new List<(string Given, Guid? Id, int? Number)>();
         foreach (string r in refs)
@@ -513,14 +515,14 @@ public sealed partial class BulkTools
         bool scanPays = wanted.Any(w => w.Id is null) || wanted.Count > 2;
         TicketScan.Result<Ticket> open = !scanPays ? new TicketScan.Result<Ticket>([], 0, 0, false) : await TicketScan.RunAsync(
             _client,
-            new TicketListQuery { IsResolved = false, Select = BulkFields, TimezoneOffset = timezoneOffset },
+            new TicketListQuery { IsResolved = false, Select = wholeTickets ? null : BulkFields, TimezoneOffset = timezoneOffset },
             t =>
             {
                 _cache.Numbers.Remember(t);
-                return wanted.Any(w => (w.Id is Guid g && Guid.TryParse(t.Id, out Guid tid) && tid == g) || (w.Number is int n && t.TicketNo == n)) ? t : null;
+                return wanted.Any(w => (w.Id is Guid g && Guid.TryParse(t.Id, out Guid tid) && tid == g) || (w.Number is int n && t.TicketNo == n)) ? Slim(t) : null;
             },
             _options.MaxScanTickets,
-            TicketScan.MaxApiPageSize,
+            wholeTickets ? WorkloadTools.FullTicketPageSize : TicketScan.MaxApiPageSize,
             cancellationToken);
 
         var found = new List<Ticket>();
@@ -624,6 +626,24 @@ public sealed partial class BulkTools
             }
         }
     }
+
+    /// <summary>What a preview keeps of a picked ticket: whole tickets would otherwise be held, descriptions and all.</summary>
+    private static Ticket Slim(Ticket t) => new()
+    {
+        Id = t.Id,
+        TicketNo = t.TicketNo,
+        Title = t.Title,
+        Status = t.Status,
+        Priority = t.Priority,
+        Assignee = t.Assignee,
+        Tags = t.Tags,
+        ExpectedDate = t.ExpectedDate,
+        LastUpdatedOn = t.LastUpdatedOn,
+        Ts = t.Ts,
+        IsCustomWorkflow = t.IsCustomWorkflow,
+        Workflow = t.Workflow,
+        ResolvedStatus = t.ResolvedStatus,
+    };
 
     /// <summary>The caller a token belongs to: the person (or service account) acting, and the caller the HTTP server knows.</summary>
     private string Owner(ActingUser actor) => $"{actor.Source}|{actor.Id}|{_caller?.Key}";

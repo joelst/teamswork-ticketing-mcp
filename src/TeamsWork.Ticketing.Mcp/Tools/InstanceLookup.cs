@@ -372,8 +372,9 @@ internal sealed partial class InstanceLookup
         string text = ToolValidation.RequireText(tag.Text, $"{paramName}[{index}].text", 256);
         if (Blank(tag.TagCategoryId) is null)
         {
+            // Deleted categories are left out here as well as by the cache, so no caller can make a tag look ambiguous with one.
             var owners = categories
-                .Where(c => c.Id is not null && (c.Tags ?? []).Any(t => t.Deleted != true && Same(t.Text, text)))
+                .Where(c => c.Id is not null && c.Deleted != true && (c.Tags ?? []).Any(t => t.Deleted != true && Same(t.Text, text)))
                 .ToList();
             return owners.Count switch
             {
@@ -387,8 +388,9 @@ internal sealed partial class InstanceLookup
 
         string category = ToolValidation.RequireText(tag.TagCategoryId, $"{paramName}[{index}].tagCategoryId", 256);
 
-        TagCategory? match = categories.FirstOrDefault(c => string.Equals(c.Id, category, StringComparison.Ordinal))
-                             ?? categories.FirstOrDefault(c => Same(c.Text, category));
+        IEnumerable<TagCategory> active = categories.Where(c => c.Deleted != true);
+        TagCategory? match = active.FirstOrDefault(c => string.Equals(c.Id, category, StringComparison.Ordinal))
+                             ?? active.FirstOrDefault(c => Same(c.Text, category));
         if (match?.Id is null)
         {
             throw Miss(

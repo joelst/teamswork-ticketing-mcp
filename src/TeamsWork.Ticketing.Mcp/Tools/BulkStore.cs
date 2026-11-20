@@ -139,9 +139,10 @@ internal sealed record BulkItem(
     bool ChangesExpectedDate);
 
 /// <summary>
-/// How a ticket stood when read: its _ts, which moves with every change and comment, and, for a response without one,
-/// the fields a batch changes with the last update time. Two versions match on _ts when both have it, and on the fields
-/// otherwise, so a preview read and a confirmation read compare even if only one of them carried _ts.
+/// How a ticket stood when read: its _ts, which moves with every change and comment, and the fields a batch changes with
+/// the last update time. Two versions match when the fields do and, if both have _ts, it does too: _ts counts whole
+/// seconds, so a change in the same second as the preview keeps it but still changes the fields. (A comment in that same
+/// second changes neither, and would need a finer revision than the API offers.)
 /// </summary>
 internal sealed record TicketVersion(long? Ts, string Fields)
 {
@@ -156,5 +157,5 @@ internal sealed record TicketVersion(long? Ts, string Fields)
             TicketViews.Time(t.LastUpdatedOn)));
 
     public bool Matches(TicketVersion other) =>
-        Ts is long mine && other.Ts is long theirs ? mine == theirs : string.Equals(Fields, other.Fields, StringComparison.Ordinal);
+        string.Equals(Fields, other.Fields, StringComparison.Ordinal) && (Ts is not long mine || other.Ts is not long theirs || mine == theirs);
 }

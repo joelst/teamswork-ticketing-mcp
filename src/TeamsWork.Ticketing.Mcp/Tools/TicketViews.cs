@@ -409,7 +409,8 @@ internal static partial class TicketViews
 
     // Where the quoted part of an emailed reply starts: Outlook's header block (a "From:" line followed within a few lines
     // by Sent, Date, To, Subject or Cc, with the underscore separator above it if there is one), its original-message
-    // banner, or Gmail's "On ... wrote:". A "From:" line or a "--" line on its own is ordinary text, so it is kept.
-    [GeneratedRegex(@"^(?:-{2,}[ \t]*Original Message[ \t]*-{2,}[ \t]*$|On [^\r\n]{4,200} wrote:[ \t]*$|(?:_{10,}[ \t]*\r?\n)?From:[ \t][^\r\n]+\r?\n(?:[^\r\n]*\r?\n){0,3}?(?:Sent|Date|To|Subject|Cc):)", RegexOptions.Multiline | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 200)]
+    // banner, or Gmail's "On ... wrote:". A "From:" line or a "--" line on its own is ordinary text, so it is kept. Email
+    // text often ends lines with CRLF, and a multiline $ matches before the \n only, so each $ allows the \r before it.
+    [GeneratedRegex(@"^(?:-{2,}[ \t]*Original Message[ \t]*-{2,}[ \t]*\r?$|On [^\r\n]{4,200} wrote:[ \t]*\r?$|(?:_{10,}[ \t]*\r?\n)?From:[ \t][^\r\n]+\r?\n(?:[^\r\n]*\r?\n){0,3}?(?:Sent|Date|To|Subject|Cc):)", RegexOptions.Multiline | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 200)]
     private static partial Regex QuoteStart();
 }
