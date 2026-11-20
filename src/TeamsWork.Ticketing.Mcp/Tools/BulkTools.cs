@@ -38,7 +38,16 @@ public sealed partial class BulkTools
 
     // What a preview reads of each ticket. isCustomWorkflow can't be selected (the API fails), and a status change needs it
     // to send a custom workflow's state ID rather than its label, so a preview that changes status reads whole tickets.
-    private const string BulkFields = "id,ticketId,title,status,priority,assignee,tags,expectedDate,lastUpdatedOn,_ts";
+    // The description is read either way, so an edit to it alone is caught; that makes rows big enough to read in the
+    // smaller pages whole tickets use. (Live, a selected description is the same as a read of the ticket's.)
+    private const string BulkFields = "id,ticketId,title,status,priority,assignee,tags,expectedDate,lastUpdatedOn,_ts,description";
+
+    /// <summary>
+    /// How recently a ticket may have changed for a preview to take it. _ts counts whole seconds, so a comment in the same
+    /// second as the preview's read wouldn't move it; a ticket changed that close is left for a preview a moment later.
+    /// This compares the API's clock with this machine's, so the margin also covers a few seconds between them.
+    /// </summary>
+    internal static readonly TimeSpan SettleTime = TimeSpan.FromSeconds(5);
     private const int TitleChars = 60;
 
     private readonly TicketingClient _client;
@@ -93,6 +102,8 @@ public sealed partial class BulkTools
             Change change = await ReadChangeAsync(set, comment, lookup, timezoneOffset);
             System.Text.Json.JsonElement? workflows = await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken);
 
+            // Taken before the tickets are read, so every read is at or after it.
+            DateTimeOffset readFrom = _store.Now;
             (List<Picked> picked, string? pickHint) = filter is not null
                 ? await PickByFilterAsync(filter, workflows, change.Status is not null, timezoneOffset, cancellationToken)
                 : await PickByRefsAsync(tickets!, change.Status is not null, timezoneOffset, cancellationToken);
@@ -104,7 +115,7 @@ public sealed partial class BulkTools
             int blocked = 0;
             foreach ((Ticket t, TicketVersion version) in picked)
             {
-                (BulkItem? item, JsonObject row) = await PlanAsync(t, version, change, workflows, categories, lookup);
+                (BulkItem? item, JsonObject row) = await PlanAsync(t, version, readFrom, change, workflows, categories, lookup);
                 if (row["blocked"] is not null)
                 {
                     blocked++;
@@ -335,14 +346,24 @@ public sealed partial class BulkTools
         result["actedAs"] = TicketViews.Person(actor.Name, actor.Email) ?? actor.Id;
         if (remaining.Count > 0)
         {
-            var rest = new BulkStore.Batch(batch.Owner, _store.Now + BulkStore.Lifetime, batch.BatchId, plan, remaining);
-            result["resumeToken"] = _store.Add(rest, resume: true);
-            result["hint"] = stopped switch
+            string why = stopped switch
             {
-                "quota" => $"The API quota ran out with {remaining.Count} tickets to go. Wait a minute, then call bulk_update with resumeToken as the confirmToken.",
-                "cancelled" => $"The call was interrupted with {remaining.Count} tickets to go. Check the one marked interrupted, then call bulk_update with resumeToken as the confirmToken.",
-                _ => $"Stopped after {TimeBudget.TotalSeconds:0} seconds with {remaining.Count} tickets to go. Call bulk_update with resumeToken as the confirmToken to carry on.",
+                "quota" => $"The API quota ran out with {remaining.Count} tickets to go.",
+                "cancelled" => $"The call was interrupted with {remaining.Count} tickets to go; check the one marked interrupted.",
+                _ => $"Stopped after {TimeBudget.TotalSeconds:0} seconds with {remaining.Count} tickets to go.",
             };
+            var rest = new BulkStore.Batch(batch.Owner, _store.Now + BulkStore.Lifetime, batch.BatchId, plan, remaining);
+            try
+            {
+                result["resumeToken"] = _store.Add(rest, resume: true);
+                result["hint"] = why + (stopped == "quota" ? " Wait a minute, then call" : " Call") + " bulk_update with resumeToken as the confirmToken to carry on.";
+            }
+            catch (McpException ex)
+            {
+                // The store is full: the tickets not reached are named instead, so the work isn't lost.
+                result["notReached"] = new JsonArray(remaining.Select(r => r.TicketNo is int n ? JsonValue.Create(n) : (JsonNode?)JsonValue.Create(r.Id.ToString("D"))).ToArray());
+                result["hint"] = $"{why} No resumeToken could be kept ({ex.Message}), so preview the tickets in notReached again.";
+            }
         }
 
         _logger.LogInformation("Bulk update {BatchId}: {Applied} applied, {Skipped} skipped, {Failed} failed, {Remaining} left for later.",
@@ -356,7 +377,7 @@ public sealed partial class BulkTools
     /// What one ticket would get: its planned change, and its row in the preview (what changes from what, or why it is
     /// blocked). Null when nothing would change on it.
     /// </summary>
-    private static async Task<(BulkItem? Item, JsonObject Row)> PlanAsync(Ticket t, TicketVersion version, Change change, System.Text.Json.JsonElement? workflows, IReadOnlyList<TagCategory> categories, InstanceLookup lookup)
+    private static async Task<(BulkItem? Item, JsonObject Row)> PlanAsync(Ticket t, TicketVersion version, DateTimeOffset readFrom, Change change, System.Text.Json.JsonElement? workflows, IReadOnlyList<TagCategory> categories, InstanceLookup lookup)
     {
         var row = new JsonObject();
         if (t.TicketNo is int no)
@@ -377,6 +398,13 @@ public sealed partial class BulkTools
         {
             // Without it the confirmation couldn't tell whether the ticket changed since, so it would only be skipped then.
             row["blocked"] = "Its version couldn't be read (it may be new, or have changed during the preview). Preview it again.";
+            return (null, row);
+        }
+
+        if (DateTimeOffset.FromUnixTimeSeconds(version.Ts.Value) >= readFrom - SettleTime)
+        {
+            // Changed in the second it was read, or near enough: a comment in that same second wouldn't move _ts.
+            row["blocked"] = "It changed just now, so a reply in the same second couldn't be told from it. Preview it again in a few seconds.";
             return (null, row);
         }
 
@@ -516,7 +544,7 @@ public sealed partial class BulkTools
                 return Guid.TryParse(t.Id, out _) && (titlePattern is null || titlePattern.IsMatch(t.Title ?? "")) && assigneeMatches(t) ? Pick(t, stamps) : null;
             },
             _options.MaxScanTickets,
-            wholeTickets ? WorkloadTools.FullTicketPageSize : TicketScan.MaxApiPageSize,
+            WorkloadTools.FullTicketPageSize,   // descriptions either way
             cancellationToken);
 
         if (scan.Matches.Count > MaxTickets)
@@ -558,7 +586,7 @@ public sealed partial class BulkTools
                 return wanted.Any(w => (w.Id is Guid g && Guid.TryParse(t.Id, out Guid tid) && tid == g) || (w.Number is int n && t.TicketNo == n)) ? Pick(t, stamps) : null;
             },
             _options.MaxScanTickets,
-            wholeTickets ? WorkloadTools.FullTicketPageSize : TicketScan.MaxApiPageSize,
+            WorkloadTools.FullTicketPageSize,   // descriptions either way
             cancellationToken);
 
         var found = new List<Picked>();

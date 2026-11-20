@@ -120,7 +120,8 @@ internal sealed partial class TicketRefs
         }
     }
 
-    [GeneratedRegex(@"^(?:#|(?<prefix>[A-Za-z][A-Za-z0-9]{0,15})-)?\s*(?<n>\d{1,9})$")]
+    // Up to ten ASCII digits; int.TryParse then keeps it within a ticket number's range.
+    [GeneratedRegex(@"^(?:#|(?<prefix>[A-Za-z][A-Za-z0-9]{0,15})-)?\s*(?<n>[0-9]{1,10})$")]
     private static partial Regex NumberForm();
 
     /// <summary>

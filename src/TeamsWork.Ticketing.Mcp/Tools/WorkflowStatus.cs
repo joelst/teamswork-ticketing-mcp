@@ -20,9 +20,11 @@ internal static class WorkflowStatus
     // ---- list_tickets: one exact state -------------------------------------------------------------------------------
 
     /// <summary>
-    /// The value to send as the API's statusId for a state named by ID or label. A custom state's ID wins; otherwise a
-    /// label must name one state (a default one, or one found in the instance's workflow settings). When the instance's
-    /// custom states can't be found, anything that isn't a default label is sent as given, since it may be a custom ID.
+    /// The value to send as the API's statusId for a state named by ID or label. One rule, whatever shape the workflow
+    /// settings take: a state's ID first, a default state's name counting as its ID (it is what that state's tickets
+    /// carry), then a custom state's label, which must name one state. So every state can be chosen: a default one by
+    /// name, a custom one by its ID, or by its label when no other state has it. When the instance's custom states can't
+    /// be found, anything that isn't a default name is sent as given, since it may be a custom ID.
     /// </summary>
     public static string ResolveFilter(string value, JsonElement? instanceWorkflows, string paramName)
     {
@@ -33,8 +35,12 @@ internal static class WorkflowStatus
             return id;
         }
 
-        var byLabel = DefaultStates.Where(d => Same(d, value)).Select(d => (Id: d, Name: $"{d} (default workflow)"))
-            .Concat(custom.Where(s => Same(s.Label, value) && s.Id is not null).Select(s => (Id: s.Id!, Name: $"{s.Label} (state ID {s.Id})")))
+        if (DefaultStates.FirstOrDefault(d => Same(d, value)) is string defaultState)
+        {
+            return defaultState;
+        }
+
+        var byLabel = custom.Where(s => Same(s.Label, value) && s.Id is not null).Select(s => (Id: s.Id!, Name: $"{s.Label} (state ID {s.Id})"))
             .DistinctBy(s => s.Id, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -120,11 +126,17 @@ internal static class WorkflowStatus
             return result;
         }
 
-        // A shape this doesn't know: the state names still help, and nothing else is passed on unchecked.
+        // States in the ticket-workflow shape (id, label, nextSteps), or a shape this doesn't know: the states still help,
+        // with an ID that differs from the label, as above, so a state sharing a label can still be named. Nothing else is
+        // passed on unchecked.
         List<WorkflowState> known = StatesIn(workflows);
         return known.Count == 0
             ? null
-            : new JsonArray(new JsonObject { ["states"] = new JsonArray(known.Select(s => (JsonNode?)JsonValue.Create(s.Label ?? s.Id)).ToArray()) });
+            : new JsonArray(new JsonObject
+            {
+                ["states"] = new JsonArray(known.Select(s => (JsonNode?)JsonValue.Create(
+                    s.Label is null || Same(s.Label, s.Id) ? s.Label ?? s.Id : $"{s.Label} (ID {s.Id})")).ToArray()),
+            });
     }
 
     private static string? Text(JsonElement e, string name) =>
@@ -252,6 +264,21 @@ internal static class WorkflowStatus
         List<List<WorkflowState>> byId = graphs.Where(states => states.Any(s => Same(s.Id, ticket.Status))).ToList();
         List<List<WorkflowState>> candidates = byId.Count > 0 ? byId : graphs.Where(states => Current(states, ticket.Status) is not null).ToList();
         return candidates is [List<WorkflowState> only] ? only : null;
+    }
+
+    /// <summary>
+    /// Whether the ticket's state is one its resolvedStatus lists, which may name it by ID or by label: a custom
+    /// workflow's ticket carries the state's ID as its status. Null when the response has no resolvedStatus.
+    /// </summary>
+    public static bool? IsResolved(Ticket ticket, JsonElement? instanceWorkflows = null)
+    {
+        if (ticket.ResolvedStatus is not { } resolved || string.IsNullOrWhiteSpace(ticket.Status))
+        {
+            return null;
+        }
+
+        string? label = LabelOf(ticket, instanceWorkflows);
+        return resolved.Any(r => Same(r, ticket.Status) || Same(r, label));
     }
 
     /// <summary>The ticket's current state in its workflow, when exactly one state has its status as ID or label.</summary>

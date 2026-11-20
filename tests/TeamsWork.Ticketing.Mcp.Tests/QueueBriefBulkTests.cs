@@ -1352,6 +1352,153 @@ public sealed class QueueBriefBulkTests
         Assert.Equal("s_resolved", WorkflowStatus.CheckTarget(t, "s_resolved", null));
     }
 
+    // ---- Review round 7 ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task A_priority_only_preview_reads_the_description_so_an_edit_to_it_alone_is_caught()
+    {
+        string Row(string description) => $$"""{"id":"{{Id(1)}}","ticketNo":101,"title":"T1","status":"Open","priority":"Low","lastUpdatedOn":"2026-11-18T12:00:00Z","_ts":1,"description":"{{description}}"}""";
+        var store = new BulkStore(Clock);
+        var preview = new Router(r => r.Path.EndsWith("/instance", StringComparison.Ordinal) ? InstanceJson : "{\"items\":[" + Row("before") + "],\"itemCount\":1}");
+        using JsonDocument doc = JsonDocument.Parse(await Bulk(preview, store).PreviewBulkUpdate(
+            filter: new BulkFilter { TitlePattern = "T*" }, set: new BulkChanges { Priority = "Urgent" }, cancellationToken: Ct));
+        var confirm = new Router(_ => "{\"item\":" + Row("after") + "}");   // same _ts and lastUpdatedOn
+
+        using JsonDocument result = JsonDocument.Parse(await Bulk(confirm, store).BulkUpdate(doc.RootElement.GetProperty("confirmToken").GetString()!, Ct));
+
+        Assert.Contains("description", TestFactory.Query(preview.Requests.Single(r => r.Path.EndsWith("/tickets", StringComparison.Ordinal)).Uri)["select"], StringComparison.Ordinal);
+        Assert.Equal("changedSincePreview", result.RootElement.GetProperty("skipped")[0].GetProperty("reason").GetString());
+        Assert.DoesNotContain(confirm.Requests, r => r.Method == HttpMethod.Put);
+    }
+
+    [Fact]
+    public async Task A_ticket_changed_in_the_second_of_the_preview_waits_for_another_preview()
+    {
+        long justNow = Now.ToUnixTimeSeconds(), earlier = Now.AddMinutes(-1).ToUnixTimeSeconds();
+        string tickets = "{\"items\":[" + Bulk(1, "T1", "In Progress", justNow) + "," + Bulk(2, "T2", "In Progress", earlier) + "],\"itemCount\":2}";
+        var preview = new Router(r => r.Path.EndsWith("/instance", StringComparison.Ordinal) ? InstanceJson : tickets);
+
+        using JsonDocument doc = JsonDocument.Parse(await Bulk(preview, new BulkStore(Clock)).PreviewBulkUpdate(
+            filter: new BulkFilter { TitlePattern = "T*" }, set: new BulkChanges { Priority = "Urgent" }, cancellationToken: Ct));
+
+        JsonElement[] items = doc.RootElement.GetProperty("items").EnumerateArray().ToArray();
+        Assert.Contains("just now", items.Single(i => i.GetProperty("ticketNo").GetInt32() == 101).GetProperty("blocked").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, doc.RootElement.GetProperty("count").GetInt32());
+    }
+
+    [Fact]
+    public void A_full_store_refuses_a_preview_without_touching_anyone_elses_tokens()
+    {
+        var store = new BulkStore(Clock, maxPerOwner: 2, max: 3);
+        BulkPlan plan = new(null, null, null, "Urgent", null, null, false, null);
+        BulkStore.Batch Batch(string owner) => new(owner, Now + BulkStore.Lifetime, "b", plan, []);
+        List<string> theirs = [store.Add(Batch("other")), store.Add(Batch("other"))];
+        string mine = store.Add(Batch("me"));
+
+        Assert.Throws<McpException>(() => store.Add(Batch("me")));        // the store is full: refused, not made room in
+        Assert.All(theirs, t => Assert.NotNull(store.Find(t)));
+        Assert.NotNull(store.Find(mine));
+
+        var own = new BulkStore(Clock, maxPerOwner: 2, max: 100);
+        List<string> tokens = Enumerable.Range(0, 3).Select(_ => own.Add(Batch("me"))).ToList();
+        Assert.Null(own.Find(tokens[0]));                                  // over their own cap: their oldest goes
+    }
+
+    [Fact]
+    public void Confirmations_that_make_no_progress_stay_within_the_callers_places()
+    {
+        var store = new BulkStore(Clock, maxPerOwner: 3, max: 100);
+        BulkPlan plan = new(null, null, null, "Urgent", null, null, false, null);
+        BulkStore.Batch Batch() => new("me", Now + BulkStore.Lifetime, "b", plan, []);
+        BulkStore.Batch current = Batch();
+        var tokens = new List<string> { store.Add(current) };
+
+        for (int i = 0; i < 10; i++)
+        {
+            // Out of quota before the first ticket each time: the whole batch comes back as a resume token.
+            Assert.True(current.TryStart());
+            BulkStore.Batch rest = Batch();
+            tokens.Add(store.Add(rest, resume: true));
+            current.Finish(new JsonObject(), Now);
+            current = rest;
+        }
+
+        Assert.True(tokens.Count(t => store.Find(t) is not null) <= 3);
+        Assert.NotNull(store.Find(tokens[^1]));                             // the work still to do is always kept
+    }
+
+    [Fact]
+    public async Task When_no_resume_token_can_be_kept_the_tickets_not_reached_are_named()
+    {
+        var store = new BulkStore(Clock, maxPerOwner: 20, max: 2);
+        var caller = new KeyedCaller("me");
+        string token = await PreviewWeeklyAsync(store, caller);
+        BulkPlan plan = new(null, null, null, "Urgent", null, null, false, null);
+        store.Add(new BulkStore.Batch("someone else", Now + BulkStore.Lifetime, "b", plan, []));   // now full
+
+        var confirm = new Router(r => r.Method == HttpMethod.Get
+            ? "{\"item\":" + Bulk(1, "Weekly check: backups", "In Progress", 1000) + "}"
+            : "{\"item\":" + Bulk(1, "x", "Resolved", 9) + "}");
+        IOptions<TicketingOptions> opts = Microsoft.Extensions.Options.Options.Create(TestFactory.Options(o => o.MaxUpstreamRequestsPerCallerPerMinute = 2));
+        using var quota = new UpstreamQuota(opts);
+        var client = new TicketingClient(new HttpClient(confirm), opts, new TicketingRateLimiter(opts), new TimeZoneOffsetResolver(opts, Clock),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<TicketingClient>.Instance, Clock, quota, caller);
+        var bulk = new BulkTools(client, new FixedActor(Jane), new InstanceCache(opts, new TimeZoneOffsetResolver(opts, Clock), Clock), opts, store, caller);
+
+        using JsonDocument doc = JsonDocument.Parse(await bulk.BulkUpdate(token, Ct));
+
+        Assert.False(doc.RootElement.TryGetProperty("resumeToken", out _));
+        Assert.Equal([102], doc.RootElement.GetProperty("notReached").EnumerateArray().Select(a => a.GetInt32()));
+        Assert.Contains("notReached", doc.RootElement.GetProperty("hint").GetString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{"workflows":[{"id":"c_open","label":"Open","nextSteps":[]},{"id":"c_wait","label":"Waiting","nextSteps":[]},{"id":"c_wait2","label":"Waiting","nextSteps":[]},{"id":"c_vendor","label":"Vendor","nextSteps":[]}]}""")]
+    [InlineData("""{"graphs":[{"nodes":[{"id":"c_open","type":"stateNode","data":{"label":"Open"}},{"id":"c_wait","type":"stateNode","data":{"label":"Waiting"}},{"id":"c_wait2","type":"stateNode","data":{"label":"Waiting"}},{"id":"c_vendor","type":"stateNode","data":{"label":"Vendor"}}],"edges":[]}]}""")]
+    public void Every_state_can_be_chosen_by_one_rule_in_either_settings_shape(string settings)
+    {
+        JsonElement workflows = JsonDocument.Parse(settings).RootElement;
+
+        foreach (WorkflowState s in WorkflowStatus.StatesIn(workflows))
+        {
+            Assert.Equal(s.Id, WorkflowStatus.ResolveFilter(s.Id!, workflows, "status"));   // every custom state by its ID
+        }
+
+        Assert.All(WorkflowStatus.DefaultStates, d => Assert.Equal(d, WorkflowStatus.ResolveFilter(d, workflows, "status")));
+        Assert.Equal("c_vendor", WorkflowStatus.ResolveFilter("vendor", workflows, "status"));        // a label only it has
+        McpException ex = Assert.Throws<McpException>(() => WorkflowStatus.ResolveFilter("Waiting", workflows, "status"));
+        Assert.Contains("c_wait", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("c_wait2", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("Open (ID c_open)", WorkflowStatus.Compact(workflows)!.ToJsonString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_custom_ticket_is_resolved_when_resolved_status_names_its_states_label()
+    {
+        Ticket t = Parse<Ticket>("""
+            {"id":"t","status":"c_done","isCustomWorkflow":true,"resolvedStatus":["Closed"],
+             "workflow":[{"id":"c_done","label":"Closed","nextSteps":[]}]}
+            """);
+
+        Assert.True(TicketViews.Detail(t, includeHtml: false)["isResolved"]!.GetValue<bool>());
+    }
+
+    [Theory]
+    [InlineData("Here are the logs.\nOn startup the logger wrote:\nERROR: VPN configuration missing", false)]
+    [InlineData("Thanks.\nOn Mon, 18 Nov 2026 at 10:00, Pat Example <pat@example.test> wrote:\nold text", true)]
+    [InlineData("Thanks.\r\nOn 18 Nov 2026, at 10:00, Pat <pat@example.test> wrote:\r\n\r\nold text", true)]
+    [InlineData("Thanks.\nOn Monday Pat wrote:\n\n> old text", true)]
+    public void Only_a_wrote_line_with_email_evidence_cuts_the_text(string text, bool cut) =>
+        Assert.Equal(cut, TicketViews.StripQuoted(text).Contains("[quoted reply cut", StringComparison.Ordinal));
+
+    [Theory]
+    [InlineData("2147483647", int.MaxValue)]
+    [InlineData("#1234567890", 1234567890)]
+    [InlineData("2147483648", null)]
+    [InlineData("12345678901", null)]
+    public void Ticket_numbers_take_up_to_ten_digits_within_range(string given, int? expected) =>
+        Assert.Equal(expected, TicketRefs.BareNumber(given));
+
     // ---- Helpers -------------------------------------------------------------------------------------------------
 
     private static async Task<string> PreviewWeeklyAsync(BulkStore store, IUpstreamCaller? caller = null)

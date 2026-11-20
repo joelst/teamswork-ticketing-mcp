@@ -72,12 +72,11 @@ public sealed class UsabilityTests
     }
 
     [Fact]
-    public void A_label_two_states_share_is_refused_with_both()
+    public void A_default_name_a_custom_state_shares_picks_the_default_state_and_the_custom_one_goes_by_its_id()
     {
-        McpException ex = Assert.Throws<McpException>(() => WorkflowStatus.ResolveFilter("open", CustomWorkflows, "status"));
-
-        Assert.Contains("Open (default workflow)", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("state ID s2", ex.Message, StringComparison.Ordinal);
+        // A default state's name is its ID, so it decides; the custom state with that label stays reachable by its own.
+        Assert.Equal("Open", WorkflowStatus.ResolveFilter("open", CustomWorkflows, "status"));
+        Assert.Equal("s2", WorkflowStatus.ResolveFilter("s2", CustomWorkflows, "status"));
     }
 
     [Fact]

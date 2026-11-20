@@ -28,33 +28,46 @@ public sealed class BulkStore
     private readonly ConcurrentDictionary<string, Batch> _batches = new(StringComparer.Ordinal);
     private readonly object _gate = new();
     private readonly TimeProvider _time;
+    private readonly int _maxPerOwner;
+    private readonly int _max;
 
-    public BulkStore(TimeProvider? time = null) => _time = time ?? TimeProvider.System;
+    public BulkStore(TimeProvider? time = null)
+        : this(time, MaxBatchesPerOwner, MaxBatches)
+    {
+    }
+
+    /// <summary>With other caps, for tests.</summary>
+    internal BulkStore(TimeProvider? time, int maxPerOwner, int max)
+    {
+        _time = time ?? TimeProvider.System;
+        _maxPerOwner = maxPerOwner;
+        _max = max;
+    }
 
     internal DateTimeOffset Now => _time.GetUtcNow();
 
     /// <summary>
-    /// Stores a batch and returns its token. Room is made by dropping the oldest unconfirmed batches, the likeliest to have
-    /// been abandoned; a batch being confirmed, or finished with a result still to be had, is kept, so when those fill
-    /// the store a preview is refused. A <paramref name="resume"/> token, for the rest of a batch a confirmation stopped
-    /// part way, is stored regardless: it carries on a batch that held a place already, and refusing it would lose track
-    /// of what is left. Each comes from a confirmation call, so they can't pile up faster than calls are made.
+    /// Stores a batch and returns its token, or refuses with a message saying why. Room is made only from the caller's
+    /// own batches, never anyone else's: their oldest unconfirmed ones, the likeliest to have been abandoned. A batch
+    /// being confirmed, or finished with a result still to be had, is kept, so when those fill the caller's places a
+    /// preview is refused, and so it is when the store as a whole is full. A <paramref name="resume"/> token, for the
+    /// rest of a batch a confirmation stopped part way, may also push out the caller's oldest finished result: a lost
+    /// answer from long ago matters less than the work still to do, and this keeps a confirmation retried without
+    /// progress (out of quota, say) within the caller's places.
     /// </summary>
     internal string Add(Batch batch, bool resume = false)
     {
         lock (_gate)
         {
             Sweep();
-            bool ownerRoom = Evict(_batches.Where(b => b.Value.Owner == batch.Owner).ToList(), MaxBatchesPerOwner);
-            bool room = Evict(_batches.ToList(), MaxBatches);
-            if (!resume && !ownerRoom)
+            if (!Evict(_batches.Where(b => b.Value.Owner == batch.Owner).ToList(), _maxPerOwner, resume))
             {
                 throw new McpException(
-                    $"You have {MaxBatchesPerOwner} bulk updates being applied or finished in the last {Lifetime.TotalMinutes:0} minutes, " +
+                    $"You have {_maxPerOwner} bulk updates being applied or finished in the last {Lifetime.TotalMinutes:0} minutes, " +
                     "and their results are kept for that long. Try again once one has finished or lapsed.");
             }
 
-            if (!resume && !room)
+            if (_batches.Count >= _max)
             {
                 throw new McpException("The server is holding as many bulk updates as it can right now. Try again in a few minutes.");
             }
@@ -75,18 +88,21 @@ public sealed class BulkStore
         }
     }
 
-    /// <summary>Drops the oldest unconfirmed batches until there is room for one more; whether there is.</summary>
-    private bool Evict(List<KeyValuePair<string, Batch>> batches, int max)
+    /// <summary>
+    /// Drops the oldest unconfirmed batches, then, when <paramref name="finishedToo"/>, the oldest finished ones, until
+    /// there is room for one more; whether there is. A batch being confirmed is never dropped.
+    /// </summary>
+    private bool Evict(List<KeyValuePair<string, Batch>> batches, int max, bool finishedToo)
     {
         int over = batches.Count - max + 1;
-        foreach (KeyValuePair<string, Batch> old in batches.OrderBy(b => b.Value.Expires))
+        foreach (KeyValuePair<string, Batch> old in batches.OrderBy(b => b.Value.IsDone).ThenBy(b => b.Value.Expires))
         {
             if (over <= 0)
             {
                 break;
             }
 
-            if (old.Value.TryEvict())
+            if (old.Value.TryEvict(finishedToo))
             {
                 _batches.TryRemove(old.Key, out _);
                 over--;
@@ -158,10 +174,12 @@ public sealed class BulkStore
         public bool TryStart() => Interlocked.CompareExchange(ref _state, Running, Waiting) == Waiting;
 
         /// <summary>
-        /// Claims an unconfirmed batch for eviction; one being confirmed, or done with its result kept, stays. Atomic
-        /// with <see cref="TryStart"/>, so the two can't both win.
+        /// Claims an unconfirmed batch for eviction, or a finished one when <paramref name="finishedToo"/>; one being
+        /// confirmed stays. Atomic with <see cref="TryStart"/>, so the two can't both win.
         /// </summary>
-        public bool TryEvict() => Interlocked.CompareExchange(ref _state, Evicted, Waiting) == Waiting;
+        public bool TryEvict(bool finishedToo = false) =>
+            Interlocked.CompareExchange(ref _state, Evicted, Waiting) == Waiting ||
+            (finishedToo && Interlocked.CompareExchange(ref _state, Evicted, Done) == Done);
 
         public void Finish(JsonObject result, DateTimeOffset now)
         {
