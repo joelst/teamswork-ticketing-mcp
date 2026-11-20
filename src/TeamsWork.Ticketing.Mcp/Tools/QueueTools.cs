@@ -126,8 +126,30 @@ public sealed class QueueTools
                     break;
             }
 
+            // The instance settings (cached), read at most once in this call for the SLA setting, the staff list and the
+            // workflows alike: a failed read isn't cached, so reading them for each would repeat the failure.
+            Instance? instance = null;
+            bool instanceTried = false;
+            async Task<Instance?> InstanceAsync()
+            {
+                if (!instanceTried)
+                {
+                    instanceTried = true;
+                    try
+                    {
+                        instance = await _cache.GetInstanceAsync(_client, timezoneOffset, refresh: false, cancellationToken);
+                    }
+                    catch (TicketingApiException)
+                    {
+                        // They only add to what's known.
+                    }
+                }
+
+                return instance;
+            }
+
             // Two of the SLA flags can't be selected, so asking for SLA state reads whole tickets, unless SLA tracking is off.
-            bool? slaOn = extras.Contains("sla") ? await WorkloadTools.SlaEnabledAsync(_cache, _client, timezoneOffset, cancellationToken) : null;
+            bool? slaOn = extras.Contains("sla") ? WorkloadTools.SlaEnabled((await InstanceAsync())?.Sla) : null;
             bool wholeTickets = extras.Contains("sla") && slaOn != false;
             DateTimeOffset? sinceUtc = sinceDay is DateOnly day
                 ? new DateTimeOffset(day.ToDateTime(TimeOnly.MinValue), TimeSpan.FromHours(_client.TimeZones.ResolveOn(timezoneOffset, day)))
@@ -183,9 +205,7 @@ public sealed class QueueTools
             var attempted = new bool[page.Count];
             var unreadable = new HashSet<Ticket>(ReferenceEqualityComparer.Instance);
             // Cached instance settings: for working out who a ticket waits on, and each row's state by its label.
-            System.Text.Json.JsonElement? workflows = history
-                ? await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken)
-                : await WorkflowStatus.WorkflowsForLabelsAsync(page, _cache, _client, timezoneOffset, cancellationToken);
+            System.Text.Json.JsonElement? workflows = history || WorkflowStatus.NeedLabels(page) ? (await InstanceAsync())?.Workflows : null;
             int read = 0;
             if (history && page.Count > 0)
             {
@@ -199,8 +219,7 @@ public sealed class QueueTools
                     // Only who=me needs the caller, and it asked for them above; here they only help tell replies apart.
                 }
 
-                TicketPeople people = (await TicketPeople.LoadAsync(_cache, _client, _options, timezoneOffset, cancellationToken))
-                    .WithAgents(_cache.Assignees.All.Append(caller));
+                TicketPeople people = TicketPeople.From(await InstanceAsync(), _options).WithAgents(_cache.Assignees.All.Append(caller));
                 read = Math.Min(page.Count, HistoryBudget);
                 using var gate = new SemaphoreSlim(HistoryConcurrency);
                 await Task.WhenAll(Enumerable.Range(0, read).Select(async i =>

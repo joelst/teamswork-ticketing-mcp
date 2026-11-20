@@ -1686,6 +1686,24 @@ public sealed class QueueBriefBulkTests
     }
 
     [Fact]
+    public async Task A_queue_whose_instance_settings_fail_reads_them_once()
+    {
+        // The SLA setting, the staff list and the workflows all come from one read, and a failed read isn't cached.
+        string tickets = Rows(3, _ => ",\"createdOn\":\"2026-11-01T00:00:00Z\"");
+        var handler = new Router(r => r.Path switch
+        {
+            var p when p.EndsWith("/instance", StringComparison.Ordinal) => """{"error":true,"message":"Instance unavailable."}""",
+            var p when p.EndsWith("/tickets", StringComparison.Ordinal) => tickets,
+            _ => """{"items":[]}""",
+        });
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(handler);
+
+        await new QueueTools(client, new FixedActor(Jane), cache, options, Clock).GetQueue("team", include: ["waitingOn", "idleDays", "sla"], cancellationToken: Ct);
+
+        Assert.Single(handler.Requests, r => r.Path.EndsWith("/instance", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task A_ticket_gate_waits_only_as_long_as_it_is_given_and_frees_when_released()
     {
         var store = new BulkStore(Clock);

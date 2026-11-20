@@ -39,22 +39,6 @@ internal sealed class TicketPeople
         return people;
     }
 
-    /// <summary>The help desk's people, from the cached instance settings; just the service account if they can't be read.</summary>
-    public static async Task<TicketPeople> LoadAsync(InstanceCache cache, TicketingClient client, TicketingOptions options, int? timezoneOffset, CancellationToken cancellationToken)
-    {
-        Instance? instance;
-        try
-        {
-            instance = await cache.GetInstanceAsync(client, timezoneOffset, refresh: false, cancellationToken);
-        }
-        catch (TicketingApiException)
-        {
-            instance = null;
-        }
-
-        return From(instance, options);
-    }
-
     /// <summary>Adds people known to be staff: the caller, and assignees seen on tickets.</summary>
     public TicketPeople WithAgents(IEnumerable<TicketUser?> agents)
     {

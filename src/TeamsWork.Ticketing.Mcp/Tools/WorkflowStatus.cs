@@ -249,9 +249,11 @@ internal static class WorkflowStatus
     /// already, so a list of only those reads nothing.
     /// </summary>
     public static Task<JsonElement?> WorkflowsForLabelsAsync(IEnumerable<Ticket> tickets, InstanceCache cache, TicketingClient client, int? timezoneOffset, CancellationToken cancellationToken) =>
-        tickets.Any(t => t.IsCustomWorkflow == true || (!string.IsNullOrWhiteSpace(t.Status) && !DefaultStates.Contains(t.Status.Trim(), StringComparer.OrdinalIgnoreCase)))
-            ? InstanceWorkflowsAsync(cache, client, timezoneOffset, cancellationToken)
-            : Task.FromResult<JsonElement?>(null);
+        NeedLabels(tickets) ? InstanceWorkflowsAsync(cache, client, timezoneOffset, cancellationToken) : Task.FromResult<JsonElement?>(null);
+
+    /// <summary>Whether any of these tickets needs the workflows to show its state's label (see <see cref="WorkflowsForLabelsAsync"/>).</summary>
+    public static bool NeedLabels(IEnumerable<Ticket> tickets) =>
+        tickets.Any(t => t.IsCustomWorkflow == true || (!string.IsNullOrWhiteSpace(t.Status) && !DefaultStates.Contains(t.Status.Trim(), StringComparer.OrdinalIgnoreCase)));
 
     public static async Task<JsonElement?> InstanceWorkflowsAsync(InstanceCache cache, TicketingClient client, int? timezoneOffset, CancellationToken cancellationToken)
     {

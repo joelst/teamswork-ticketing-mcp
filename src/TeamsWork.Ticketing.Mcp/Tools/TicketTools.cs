@@ -207,8 +207,19 @@ public sealed class TicketTools
                 }
             }
 
+            // The ticket exists now, so nothing here may turn its acknowledgement into an error (the agent might create it
+            // again): without the workflows, its state shows as the API gave it.
+            JsonElement? createdWorkflows = null;
+            try
+            {
+                createdWorkflows = await WorkflowStatus.WorkflowsForLabelsAsync([created], _cache, _client, timezoneOffset, CancellationToken.None);
+            }
+            catch (Exception)
+            {
+            }
+
             var state = new JsonObject();
-            TicketViews.Status(state, created, await WorkflowStatus.WorkflowsForLabelsAsync([created], _cache, _client, timezoneOffset, CancellationToken.None));
+            TicketViews.Status(state, created, createdWorkflows);
             return TicketViews.Ack(created, actor, new Dictionary<string, object?>
             {
                 ["status"] = state["status"]?.GetValue<string>(),
@@ -405,8 +416,10 @@ public sealed class TicketTools
         JsonElement? workflows = await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken);
 
         string id = WorkflowStatus.ResolveFilter(state, workflows, "status");
+        // Names may carry an ID ("Open (ID s2)"), so the chosen state is left out by its ID as well as by its name.
         List<string> others = WorkflowStatus.StateNames(workflows)
-            .Where(s => !string.Equals(s, id, StringComparison.OrdinalIgnoreCase) && !string.Equals(s, state, StringComparison.OrdinalIgnoreCase))
+            .Where(s => !string.Equals(s, id, StringComparison.OrdinalIgnoreCase) && !string.Equals(s, state, StringComparison.OrdinalIgnoreCase) &&
+                        !s.EndsWith($"(ID {id})", StringComparison.OrdinalIgnoreCase))
             .ToList();
         return new StateFilter(id,
             $"Only tickets in '{state}'. Other states: {string.Join(", ", others)}. isResolved=false lists every open ticket, true every closed one.");
