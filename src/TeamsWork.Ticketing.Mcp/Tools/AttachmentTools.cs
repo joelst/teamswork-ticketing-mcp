@@ -1,7 +1,10 @@
 using System.ComponentModel;
+using System.Text.Json.Nodes;
+using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
 using TeamsWork.Ticketing.Mcp.Auth;
+using TeamsWork.Ticketing.Mcp.Configuration;
 using TeamsWork.Ticketing.Mcp.Ticketing;
 using TeamsWork.Ticketing.Mcp.Ticketing.Models;
 
@@ -12,46 +15,51 @@ public sealed class AttachmentTools
 {
     private readonly TicketingClient _client;
     private readonly IActingUserProvider _actingUser;
+    private readonly InstanceCache _cache;
+    private readonly TicketingOptions _options;
 
-    public AttachmentTools(TicketingClient client, IActingUserProvider actingUser)
+    public AttachmentTools(TicketingClient client, IActingUserProvider actingUser, InstanceCache cache, IOptions<TicketingOptions> options)
     {
         _client = client;
         _actingUser = actingUser;
+        _cache = cache;
+        _options = options.Value;
     }
 
     [McpServerTool(Name = "list_ticket_attachments", Title = "List ticket attachments", ReadOnly = true, Idempotent = true, OpenWorld = false)]
-    [Description("List the files and links attached to a ticket, with captions and download URLs.")]
+    [Description(
+        "List the files and links attached to a ticket. A link's URL is included; a file's download URL (signed, short-lived) " +
+        "only with includeUrls.")]
     public Task<string> ListTicketAttachments(
-        [Description("Ticket UUID.")] string ticketId,
-        [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
+        [Description(TicketRefs.ParamText)] string ticket,
+        [Description("true to include files' download URLs.")] bool includeUrls = false,
+        [Description(DateFilterText.TimezoneOffset)] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
     {
         return ToolRunner.RunAsync(async () =>
         {
-            Guid id = ToolValidation.RequireGuid(ticketId, "ticketId");
+            Guid id = await new TicketRefs(_client, _cache, _options).ResolveAsync(ticket, timezoneOffset, cancellationToken);
             ListResponse<Attachment> r = await _client.ListTicketAttachmentsAsync(id, timezoneOffset, cancellationToken);
-            IReadOnlyList<Attachment> items = r.Items ?? [];
-            return new PageResult<Attachment>(items, items.Count, null, null, null);
+            List<JsonObject> items = (r.Items ?? []).Select(a => TicketViews.Attachment(a, includeUrls)).ToList();
+            return new PageResult<JsonObject>(items, items.Count, null, null, null);
         });
     }
 
     [McpServerTool(Name = "add_ticket_link_attachments", Title = "Attach links", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description(
-        "Attach one or more hyperlinks (for example a SharePoint document or a web page) to a ticket, with an optional comment. " +
-        "File uploads are not supported through this tool. The response includes an activityId that list_activity_attachments accepts.")]
+        "Attach links (a SharePoint document, a web page, a screenshot's location) to a ticket, with an optional comment. Say " +
+        "whether the requestor sees them with isPrivate. Files can't be uploaded here.")]
     public Task<string> AddTicketLinkAttachments(
-        [Description("Ticket UUID.")] string ticketId,
-        [Description("Links to attach (at least one).")] IReadOnlyList<LinkRef> links,
+        [Description(TicketRefs.ParamText)] string ticket,
+        [Description("Links to attach (1 to 20).")] IReadOnlyList<LinkRef> links,
+        [Description("true: only agents see them. false: the requestor sees them too.")] bool isPrivate,
         [Description("Plain-text comment shown with the links.")] string? comment = null,
-        [Description("HTML comment (formatting, lists, tables, links). Ignored when 'comment' is also supplied. Script, forms, images, and inline styles are removed; use add_ticket_link_attachments for screenshots.")] string? commentHtml = null,
-        [Description("true to make the attachment activity visible only to internal agents.")] bool isPrivate = false,
-        [Description("Return comment_HTML in the created activity.")] bool includeHtml = false,
-        [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
+        [Description("HTML comment, used when 'comment' isn't given. Script, forms, images and styles are removed; for a screenshot, put a link to it in 'links'.")] string? commentHtml = null,
+        [Description(DateFilterText.TimezoneOffset)] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
     {
         return ToolRunner.RunAsync(async () =>
         {
-            Guid id = ToolValidation.RequireGuid(ticketId, "ticketId");
             if (links is null || links.Count == 0)
             {
                 throw new McpException("'links' must contain at least one {url, caption} entry.");
@@ -68,27 +76,13 @@ public sealed class AttachmentTools
             text ??= html is null ? "Links attached." : null;
 
             ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);
-            CommentActivity created = await _client.AddLinkAttachmentsAsync(id, attachmentLinks, text, html, isPrivate, actor.ToTicketUser(), includeHtml, timezoneOffset, cancellationToken);
-            return new WriteResult<CommentActivity>(created, ActedAs.From(actor));
-        });
-    }
-
-    [McpServerTool(Name = "list_activity_attachments", Title = "List activity attachments", ReadOnly = true, Idempotent = true, OpenWorld = false)]
-    [Description(
-        "List the attachments belonging to one attachment activity. IMPORTANT: 'activityId' must be the activityId returned by " +
-        "add_ticket_link_attachments (an attachment activity). IDs from list_ticket_activities for comments or status changes are not " +
-        "valid here. To see everything attached to a ticket, use list_ticket_attachments instead.")]
-    public Task<string> ListActivityAttachments(
-        [Description("ID of an attachment activity (from add_ticket_link_attachments).")] string activityId,
-        [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
-        CancellationToken cancellationToken = default)
-    {
-        return ToolRunner.RunAsync(async () =>
-        {
-            string id = ToolValidation.RequirePathId(activityId, "activityId");
-            ListResponse<Attachment> r = await _client.ListActivityAttachmentsAsync(id, timezoneOffset, cancellationToken);
-            IReadOnlyList<Attachment> items = r.Items ?? [];
-            return new PageResult<Attachment>(items, items.Count, null, null, null);
+            Guid id = await new TicketRefs(_client, _cache, _options).ResolveAsync(ticket, timezoneOffset, cancellationToken);
+            CommentActivity created = await _client.AddLinkAttachmentsAsync(id, attachmentLinks, text, html, isPrivate, actor.ToTicketUser(), includeHtml: false, timezoneOffset, cancellationToken);
+            return TicketViews.Ack(created, actor, new Dictionary<string, object?>
+            {
+                ["links"] = attachmentLinks.Count,
+                ["visibility"] = isPrivate ? "private" : "public",
+            });
         });
     }
 }

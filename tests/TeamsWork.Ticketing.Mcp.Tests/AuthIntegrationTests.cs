@@ -109,12 +109,12 @@ public sealed class AuthIntegrationTests : IClassFixture<McpServerFactory>
 {
     private static readonly string[] ExpectedTools =
     [
-        "list_tickets", "get_ticket", "create_ticket", "update_ticket", "update_ticket_status",
+        "list_tickets", "get_ticket_brief", "create_ticket", "update_ticket", "update_ticket_status",
         "list_ticket_activities", "add_ticket_comment",
-        "list_ticket_attachments", "add_ticket_link_attachments", "list_activity_attachments",
+        "list_ticket_attachments", "add_ticket_link_attachments",
         "get_instance", "list_tag_categories",
-        "find_ticket_by_number", "get_ticket_context", "find_similar_tickets", "assign_ticket",
-        "whoami", "list_my_tickets", "list_sla_risk", "count_tickets",
+        "find_similar_tickets", "assign_ticket", "preview_bulk_update", "bulk_update",
+        "whoami", "get_queue", "list_sla_risk", "count_tickets",
     ];
 
     private readonly McpServerFactory _factory;
@@ -288,13 +288,13 @@ public sealed class AuthIntegrationTests : IClassFixture<McpServerFactory>
         await using McpClient client = await ConnectAsync(McpServerFactory.UserToken());
 
         CallToolResult result = await client.CallToolAsync(
-            "get_ticket",
-            new Dictionary<string, object?> { ["ticketId"] = "1839" },
+            "get_ticket_brief",
+            new Dictionary<string, object?> { ["ticket"] = "not a ticket" },
             cancellationToken: Ct);
 
         Assert.True(result.IsError);
         string text = string.Join(" ", result.Content.OfType<TextContentBlock>().Select(c => c.Text));
-        Assert.Contains("ticketId", text, StringComparison.Ordinal);
+        Assert.Contains("'ticket' must be a ticket number", text, StringComparison.Ordinal);
         Assert.DoesNotContain("integration-test-key", text, StringComparison.Ordinal);
     }
 

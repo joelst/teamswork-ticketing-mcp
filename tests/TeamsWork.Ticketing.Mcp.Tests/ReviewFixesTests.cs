@@ -33,7 +33,7 @@ public sealed class ReviewFixesTests
 
         using JsonDocument doc = JsonDocument.Parse(await new TicketTools(client, new FixedActor(Jane), cache, options).CreateTicket("Hi", priority: "Low", cancellationToken: Ct));
 
-        Assert.Equal(TicketA, doc.RootElement.GetProperty("item").GetProperty("id").GetString());
+        Assert.Equal(77, doc.RootElement.GetProperty("ticketNo").GetInt32());
         string warning = doc.RootElement.GetProperty("warning").GetString()!;
         Assert.Contains("#77 was created", warning, StringComparison.Ordinal);
         Assert.Contains("Don't create it again", warning, StringComparison.Ordinal);
@@ -388,7 +388,7 @@ public sealed class ReviewFixesTests
     {
         var handler = new DelayedHandler();
 
-        McpException ex = await Assert.ThrowsAsync<McpException>(() => Lookup(ClientFor(handler)).GetTicketContext(TicketA, cancellationToken: Ct));
+        McpException ex = await Assert.ThrowsAsync<McpException>(() => Lookup(ClientFor(handler)).GetTicketBrief(TicketA, cancellationToken: Ct));
 
         Assert.Contains("404", ex.Message, StringComparison.Ordinal); // the ticket's failure, not a sibling's cancellation
         Assert.Equal(0, handler.Completed); // the other reads were cancelled (each would otherwise wait 30 seconds)

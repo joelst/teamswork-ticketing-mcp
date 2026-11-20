@@ -2,28 +2,25 @@ namespace TeamsWork.Ticketing.Mcp.Tools;
 
 /// <summary>
 /// The descriptions agents see for the date filters, shared by every tool that has them so they say the same thing.
-/// See TicketDateFilters for how each is sent.
+/// Each is one line, since every tool's schema is sent with every conversation; the caveats that apply to all of them
+/// (whole days, one offset per request, midnight cuts) are in the server instructions once (Caveats). See
+/// TicketDateFilters for how each is sent.
 /// </summary>
 internal static class DateFilterText
 {
-    private const string WholeDays = " The API filters by whole days, so a time of day is refused; returned times are UTC.";
+    public const string CreatedAfter = "Created on or after this day (YYYY-MM-DD).";
+    public const string CreatedBefore = "Created before this day (YYYY-MM-DD). For one day: createdAfter=D, createdBefore=D+1.";
+    public const string LastUpdateAfter = "Last updated on or after this day (YYYY-MM-DD).";
+    public const string LastUpdateBefore = "Last updated before this day (YYYY-MM-DD).";
+    public const string ExpectedDateAfter = "Due on or after this date (YYYY-MM-DD).";
+    public const string ExpectedDateBefore = "Due before this date (YYYY-MM-DD).";
 
-    // Every date filter in a request shares one offset (see TicketDateFilters), which the two caveats below follow from.
-    private const string OneOffset =
-        " Both ends of a range use one offset: without timezoneOffset, the server zone's on the earlier day, so across a " +
-        "daylight-saving change the later end is an hour off.";
+    public const string TimezoneOffset = "Your UTC offset in whole hours (default: the server's zone).";
 
-    // The API's "before" is at or before its cut, which for these is the day's local midnight.
-    private const string AtOrBefore = " The API cuts at or before that local midnight, so a time of exactly midnight is included too.";
-
-    private const string Mixed =
-        " On its own it ignores timezoneOffset; alongside a created or updated filter, a due date set from another time zone " +
-        "can come out a day off. A time of day is refused.";
-
-    public const string CreatedAfter = "Only tickets created on or after this day (YYYY-MM-DD, your local day at timezoneOffset)." + WholeDays;
-    public const string CreatedBefore = "Only tickets created before this day starts (YYYY-MM-DD, your local day at timezoneOffset)." + AtOrBefore + " For one day, give it as createdAfter and the next day here." + OneOffset + WholeDays;
-    public const string LastUpdateAfter = "Only tickets last updated on or after this day (YYYY-MM-DD, your local day at timezoneOffset)." + WholeDays;
-    public const string LastUpdateBefore = "Only tickets last updated before this day starts (YYYY-MM-DD, your local day at timezoneOffset)." + AtOrBefore + OneOffset + WholeDays;
-    public const string ExpectedDateAfter = "Only tickets due on or after this date (YYYY-MM-DD, a calendar date in the server's time zone)." + Mixed;
-    public const string ExpectedDateBefore = "Only tickets due before this date (YYYY-MM-DD, a calendar date in the server's time zone; the date itself isn't included)." + Mixed;
+    /// <summary>What every date filter has in common, for the server instructions.</summary>
+    public const string Caveats =
+        "Date filters take whole days (YYYY-MM-DD; a time of day is refused). Created and updated days are local to " +
+        "timezoneOffset (default: the server's zone); a 'before' day is excluded, though a time of exactly that midnight is " +
+        "included, and all filters in one call share one offset, so across a daylight-saving change the later end can be an " +
+        "hour off. Due dates are calendar dates in the server's zone. Returned times are UTC.";
 }

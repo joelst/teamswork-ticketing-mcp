@@ -11,29 +11,31 @@ namespace TeamsWork.Ticketing.Mcp.Tools;
 internal static class ToolValidation
 {
     public static readonly string[] Priorities = ["Low", "Medium", "Important", "Urgent"];
-    public static readonly string[] LegacyStatuses = ["Open", "Reopened", "In Progress", "Resolved", "Closed"];
     public static readonly string[] Resolutions = ["fixed", "cannotResolve", "cancelled"];
+    // The API names the ticket number ticketId in 'select' and 'orderBy', but every tool parameter called ticketId takes
+    // the UUID, and results show the number as ticketNo. So these lists say ticketNo, ticketId is still accepted, and
+    // the API's name is what's sent (ApiFieldName).
     public static readonly string[] OrderByFields =
     [
-        "status", "ticketId", "title", "requestorName", "requestorEmail", "assigneeName", "assigneeEmail",
+        "status", "ticketNo", "title", "requestorName", "requestorEmail", "assigneeName", "assigneeEmail",
         "expectedDate", "priority", "createdDateTime", "lastInteraction",
     ];
     public static readonly string[] SelectableFields =
     [
-        "id", "ticketId", "title", "description", "status", "requestor", "customFields", "priority", "assignee",
+        "id", "ticketNo", "title", "description", "status", "requestor", "customFields", "priority", "assignee",
         "expectedDate", "resolution", "firstResponseOn", "firstResolutionOn", "lastResolutionOn", "createdOn", "tags",
         "lastUpdatedOn", "isFrtEscalated", "isRtEscalated", "createdBy", "lastUpdatedBy", "lastResolutionComment",
     ];
 
-    public static Guid RequireGuid(string? value, string paramName)
-    {
-        if (!Guid.TryParse(value, out Guid guid) || guid == Guid.Empty)
-        {
-            throw new McpException($"'{paramName}' must be a ticket UUID (for example 3fa85f64-5717-4562-b3fc-2c963f66afa6). Use list_tickets to find it.");
-        }
+    private const string ApiTicketNumberField = "ticketId";
 
-        return guid;
-    }
+    private static string ApiFieldName(string field) => field == "ticketNo" ? ApiTicketNumberField : field;
+
+    /// <summary>Validates a sort field; ticketNo (or the API's own name, ticketId) sorts by ticket number.</summary>
+    public static string? OptionalOrderBy(string? orderBy) =>
+        string.Equals(orderBy?.Trim(), ApiTicketNumberField, StringComparison.OrdinalIgnoreCase)
+            ? ApiTicketNumberField
+            : OptionalEnum(orderBy, "orderBy", OrderByFields) is string field ? ApiFieldName(field) : null;
 
     /// <summary>
     /// Validates an opaque upstream ID that goes into a URL path segment. Escaping doesn't stop "." or "..", which the
@@ -177,13 +179,13 @@ internal static class ToolValidation
         }
 
         var fields = select.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-        var unknown = fields.Where(f => !SelectableFields.Contains(f, StringComparer.Ordinal)).ToList();
+        var unknown = fields.Where(f => f != ApiTicketNumberField && !SelectableFields.Contains(f, StringComparer.Ordinal)).ToList();
         if (unknown.Count > 0)
         {
             throw new McpException($"'select' contains unknown fields: {string.Join(", ", unknown)}. Allowed: {string.Join(", ", SelectableFields)}.");
         }
 
-        return string.Join(',', fields);
+        return string.Join(',', fields.Select(ApiFieldName).Distinct(StringComparer.Ordinal));
     }
 
     /// <summary>

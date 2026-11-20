@@ -90,14 +90,12 @@ public sealed class DateFilterTests
     public void The_filter_descriptions_state_what_one_shared_offset_costs()
     {
         // The two behaviours above that one 'timezone' per request can't avoid are part of the tool contract, so
-        // agents don't rely on more than the server can do.
-        Assert.Contains("daylight-saving change the later end is an hour off", DateFilterText.CreatedBefore, StringComparison.Ordinal);
-        Assert.Contains("daylight-saving change the later end is an hour off", DateFilterText.LastUpdateBefore, StringComparison.Ordinal);
-        Assert.Contains("alongside a created or updated filter", DateFilterText.ExpectedDateAfter, StringComparison.Ordinal);
-        Assert.Contains("alongside a created or updated filter", DateFilterText.ExpectedDateBefore, StringComparison.Ordinal);
+        // agents don't rely on more than the server can do. They are stated once, in the server instructions, rather
+        // than in every filter's description.
+        Assert.Contains("across a daylight-saving change the later end can be an hour off", DateFilterText.Caveats, StringComparison.Ordinal);
+        Assert.Contains("Due dates are calendar dates in the server's zone", DateFilterText.Caveats, StringComparison.Ordinal);
         // And "before" for created and updated days cuts at or before local midnight, not strictly before it.
-        Assert.Contains("a time of exactly midnight is included too", DateFilterText.CreatedBefore, StringComparison.Ordinal);
-        Assert.Contains("a time of exactly midnight is included too", DateFilterText.LastUpdateBefore, StringComparison.Ordinal);
+        Assert.Contains("a time of exactly that midnight is included", DateFilterText.Caveats, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -331,7 +329,7 @@ public sealed class DateFilterTests
              query["expectedDateAfter"], query["expectedDateBefore"]));
     }
 
-    public static TheoryData<string> ScanTools => ["list_my_tickets", "list_sla_risk", "count_tickets"];
+    public static TheoryData<string> ScanTools => ["list_sla_risk", "count_tickets"];
 
     [Theory]
     [MemberData(nameof(ScanTools))]
@@ -346,7 +344,6 @@ public sealed class DateFilterTests
 
         await (tool switch
         {
-            "list_my_tickets" => tools.ListMyTickets(createdAfter: "2026-09-01", createdBefore: "2026-09-08", timezoneOffset: -5, cancellationToken: Ct),
             "list_sla_risk" => tools.ListSlaRisk(createdAfter: "2026-09-01", createdBefore: "2026-09-08", timezoneOffset: -5, cancellationToken: Ct),
             _ => tools.CountTickets(createdAfter: "2026-09-01", createdBefore: "2026-09-08", timezoneOffset: -5, cancellationToken: Ct),
         });

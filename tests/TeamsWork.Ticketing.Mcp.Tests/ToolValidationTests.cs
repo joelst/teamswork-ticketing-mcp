@@ -5,30 +5,11 @@ namespace TeamsWork.Ticketing.Mcp.Tests;
 
 public sealed class ToolValidationTests
 {
-    [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    [InlineData("1839")]
-    [InlineData("not-a-guid")]
-    [InlineData("00000000-0000-0000-0000-000000000000")]
-    public void RequireGuid_rejects_invalid(string? value)
-    {
-        McpException ex = Assert.Throws<McpException>(() => ToolValidation.RequireGuid(value, "ticketId"));
-        Assert.Contains("ticketId", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void RequireGuid_accepts_valid()
-    {
-        Guid g = ToolValidation.RequireGuid("3FA85F64-5717-4562-B3FC-2C963F66AFA6", "ticketId");
-        Assert.Equal(Guid.Parse("3fa85f64-5717-4562-b3fc-2c963f66afa6"), g);
-    }
-
     [Fact]
     public void OptionalEnum_is_case_insensitive_and_canonical()
     {
         Assert.Equal("Urgent", ToolValidation.OptionalEnum("urgent", "priority", ToolValidation.Priorities));
-        Assert.Equal("In Progress", ToolValidation.OptionalEnum("in progress", "status", ToolValidation.LegacyStatuses));
+        Assert.Equal("In Progress", ToolValidation.OptionalEnum("in progress", "status", WorkflowStatus.DefaultStates));
         Assert.Null(ToolValidation.OptionalEnum("  ", "priority", ToolValidation.Priorities));
         Assert.Throws<McpException>(() => ToolValidation.OptionalEnum("Critical", "priority", ToolValidation.Priorities));
     }
@@ -66,8 +47,8 @@ public sealed class ToolValidationTests
     public void OptionalSelect_validates_fields()
     {
         Assert.Equal("id,title,status", ToolValidation.OptionalSelect(" id, title ,status"));
-        McpException ex = Assert.Throws<McpException>(() => ToolValidation.OptionalSelect("id,ticketNo"));
-        Assert.Contains("ticketNo", ex.Message, StringComparison.Ordinal);
+        McpException ex = Assert.Throws<McpException>(() => ToolValidation.OptionalSelect("id,ticketNumber"));
+        Assert.Contains("ticketNumber", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

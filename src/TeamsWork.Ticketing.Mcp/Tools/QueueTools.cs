@@ -1,0 +1,404 @@
+using System.ComponentModel;
+using System.Text.Json.Nodes;
+using Microsoft.Extensions.Options;
+using ModelContextProtocol;
+using ModelContextProtocol.Server;
+using TeamsWork.Ticketing.Mcp.Auth;
+using TeamsWork.Ticketing.Mcp.Configuration;
+using TeamsWork.Ticketing.Mcp.Ticketing;
+using TeamsWork.Ticketing.Mcp.Ticketing.Models;
+
+namespace TeamsWork.Ticketing.Mcp.Tools;
+
+/// <summary>
+/// A queue in one call: someone's tickets (or the team's, or the unassigned ones), ranked, with who each is waiting on.
+/// The API can't filter by person, so tickets are read through <see cref="TicketScan"/> and picked here; who a ticket is
+/// waiting on comes from its latest history, one request per row, so only the rows returned are read that way, and at
+/// most <see cref="HistoryBudget"/> of them.
+/// </summary>
+[McpServerToolType]
+public sealed class QueueTools
+{
+    private const string QueueFields = "id,ticketId,title,status,priority,assignee,requestor,createdOn,lastUpdatedOn";
+    private const int TitleChars = 80;
+    private const int LastPublicChars = 160;
+
+    /// <summary>History reads one call may make, so a default queue stays well inside a caller's share of the quota.</summary>
+    internal const int HistoryBudget = 25;
+
+    private const int HistoryConcurrency = 4;
+
+    private static readonly string[] Roles = ["assignee", "requestor", "either"];
+    private static readonly string[] States = ["open", "resolvedSince"];
+    private static readonly string[] Sorts = ["urgency", "oldest", "idle", "updated"];
+    private static readonly string[] Extras = ["waitingOn", "idleDays", "sla", "lastPublic", "counts"];
+    private static readonly string[] DefaultExtras = ["waitingOn", "idleDays", "sla"];
+
+    private readonly TicketingClient _client;
+    private readonly IActingUserProvider _actingUser;
+    private readonly InstanceCache _cache;
+    private readonly TicketingOptions _options;
+    private readonly TimeProvider _time;
+
+    public QueueTools(TicketingClient client, IActingUserProvider actingUser, InstanceCache cache, IOptions<TicketingOptions> options, TimeProvider? time = null)
+    {
+        _client = client;
+        _actingUser = actingUser;
+        _cache = cache;
+        _options = options.Value;
+        _time = time ?? TimeProvider.System;
+    }
+
+    [McpServerTool(Name = "get_queue", Title = "Get a ticket queue", ReadOnly = true, Idempotent = true, OpenWorld = false)]
+    [Description(
+        "A queue in one call: what's on my plate, someone else's, the team's, or the unassigned tickets, most urgent first, with " +
+        "who each is waiting on (waitingOn), days idle and SLA state. Open tickets by default; state=resolvedSince with 'since' " +
+        "lists what was resolved, for a standup.")]
+    public Task<string> GetQueue(
+        [Description("me (default), a person's email or name, team (everyone's tickets), or unassigned.")] string? who = null,
+        [Description("assignee (default), requestor, or either: the tickets they're assigned or raised.")] string? role = null,
+        [Description("open (default), or resolvedSince with 'since'.")] string? state = null,
+        [Description("With state=resolvedSince: resolved on or after this day (YYYY-MM-DD).")] string? since = null,
+        [Description("Only this priority: Low, Medium, Important, or Urgent.")] string? priority = null,
+        [Description("Per-row extras: waitingOn, idleDays, sla (the default for open tickets; none for resolvedSince), lastPublic (the latest public reply), counts (totals by assignee). waitingOn, idleDays and lastPublic read each row's history: one request per row.")] IReadOnlyList<string>? include = null,
+        [Description("urgency (default: SLA breached, Urgent, Important, then waiting on the assignee longest), oldest, idle, or updated.")] string? sort = null,
+        [Description("Rows (default 20, max 50).")] int? limit = null,
+        [Description(DateFilterText.TimezoneOffset)] int? timezoneOffset = null,
+        CancellationToken cancellationToken = default)
+    {
+        return ToolRunner.RunAsync(async () =>
+        {
+            string whoText = ToolValidation.OptionalText(who, "who", 320) ?? "me";
+            string? givenRole = ToolValidation.OptionalEnum(role, "role", Roles);
+            string which = givenRole ?? "assignee";
+            bool resolvedSince = (ToolValidation.OptionalEnum(state, "state", States) ?? "open") == "resolvedSince";
+            DateOnly? sinceDay = ToolValidation.OptionalDateFilter(since, "since");
+            if (resolvedSince != (sinceDay is not null))
+            {
+                throw new McpException(resolvedSince
+                    ? "state=resolvedSince needs 'since', the first day to include (YYYY-MM-DD)."
+                    : "'since' goes with state=resolvedSince.");
+            }
+
+            ToolValidation.MaxCount(include, "include", Extras.Length);
+            // Resolved tickets wait on nobody and have no SLA left to breach, so a resolvedSince list reads no history by default.
+            HashSet<string> extras = include is null
+                ? new HashSet<string>(resolvedSince ? [] : DefaultExtras, StringComparer.Ordinal)
+                : include.Select(x => ToolValidation.RequireEnum(x, "include", Extras)).ToHashSet(StringComparer.Ordinal);
+            string order = ToolValidation.OptionalEnum(sort, "sort", Sorts) ?? (resolvedSince ? "updated" : "urgency");
+            int max = ToolValidation.ResolvePageSize(limit, _options.DefaultPageSize, 50);
+
+            // Whose queue, and which of their roles. "me" and a person leave out the column that is always them.
+            Func<Ticket, bool> matches;
+            string label;
+            string? whoNote = null;
+            bool hideAssignee = false, hideRequestor = false;
+            switch (whoText.ToLowerInvariant())
+            {
+                case "me":
+                    ActingUser me = await _actingUser.GetActingUserAsync(cancellationToken);
+                    matches = t => HasRole(t, which, u => TicketPeople.IsPerson(u, me.Id, me.Email));
+                    label = TicketViews.Person(me.Name, me.Email) ?? me.Id;
+                    (hideAssignee, hideRequestor) = (which == "assignee", which == "requestor");
+                    whoNote = me.Source == ActingUserSource.DelegatedToken ? null : "No user is signed in, so 'me' is this server's service account.";
+                    break;
+                case "team":
+                    matches = _ => true;
+                    label = "team";
+                    break;
+                case "unassigned":
+                    if (givenRole is not (null or "assignee"))
+                    {
+                        throw new McpException("who=unassigned finds tickets with no assignee, so it takes role 'assignee' only.");
+                    }
+
+                    // The same rule count_tickets uses for its "(unassigned)" group, so the two agree.
+                    matches = t => Blank(t.Assignee?.Email) is null && Blank(t.Assignee?.Id) is null;
+                    label = "unassigned";
+                    hideAssignee = true;
+                    break;
+                default:
+                    TicketUser them = await PersonAsync(whoText, timezoneOffset, cancellationToken);
+                    matches = t => HasRole(t, which, u => TicketPeople.IsPerson(u, them.Id, them.Email));
+                    label = TicketViews.Person(them) ?? them.Email;
+                    (hideAssignee, hideRequestor) = (which == "assignee", which == "requestor");
+                    break;
+            }
+
+            // Two of the SLA flags can't be selected, so asking for SLA state reads whole tickets, unless SLA tracking is off.
+            bool? slaOn = extras.Contains("sla") ? await WorkloadTools.SlaEnabledAsync(_cache, _client, timezoneOffset, cancellationToken) : null;
+            bool wholeTickets = extras.Contains("sla") && slaOn != false;
+            DateTimeOffset? sinceUtc = sinceDay is DateOnly day
+                ? new DateTimeOffset(day.ToDateTime(TimeOnly.MinValue), TimeSpan.FromHours(_client.TimeZones.ResolveOn(timezoneOffset, day)))
+                : null;
+
+            var query = new TicketListQuery
+            {
+                IsResolved = resolvedSince,
+                Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
+                // A ticket resolved since that day was updated since then; its resolution time narrows it below.
+                LastUpdateAfter = sinceDay,
+                Select = wholeTickets ? null : resolvedSince ? QueueFields + ",lastResolutionOn" : QueueFields,
+                TimezoneOffset = timezoneOffset,
+            };
+
+            TicketScan.Result<Ticket> scan = await TicketScan.RunAsync(
+                _client,
+                query,
+                t =>
+                {
+                    _cache.Numbers.Remember(t);
+                    bool inRange = sinceUtc is null || Waiting.Parse(t.LastResolutionOn) is not DateTimeOffset resolvedOn || resolvedOn >= sinceUtc;
+                    return matches(t) && inRange ? t : null;
+                },
+                _options.MaxScanTickets,
+                wholeTickets ? WorkloadTools.FullTicketPageSize : TicketScan.MaxApiPageSize,
+                cancellationToken);
+
+            List<Ticket> page = Coarse(scan.Matches, order).Take(max).ToList();
+            DateTimeOffset now = _time.GetUtcNow();
+
+            // Who each row is waiting on, from its history: the rows returned only, a few at a time, within the budget.
+            bool history = (extras.Contains("waitingOn") && !resolvedSince) || extras.Contains("idleDays") || extras.Contains("lastPublic");
+            var states = new Waiting.State?[page.Count];
+            int read = 0, failed = 0;
+            if (history && page.Count > 0)
+            {
+                ActingUser caller = await _actingUser.GetActingUserAsync(cancellationToken);
+                TicketPeople people = (await TicketPeople.LoadAsync(_cache, _client, _options, timezoneOffset, cancellationToken))
+                    .WithAgents(scan.Matches.Select(t => t.Assignee).Append(caller.ToTicketUser()));
+                read = Math.Min(page.Count, HistoryBudget);
+                using var gate = new SemaphoreSlim(HistoryConcurrency);
+                await Task.WhenAll(Enumerable.Range(0, read).Select(async i =>
+                {
+                    await gate.WaitAsync(cancellationToken);
+                    try
+                    {
+                        if (Guid.TryParse(page[i].Id, out Guid id))
+                        {
+                            ListResponse<Activity> h = await _client.ListActivitiesAsync(id, false, Waiting.HistoryWindow, null, cancellationToken);
+                            states[i] = Waiting.Compute(page[i], h.Items ?? [], people, resolvedSince, h.ContinuationToken is null, now);
+                        }
+                    }
+                    catch (TicketingApiException)
+                    {
+                        Interlocked.Increment(ref failed);
+                    }
+                    finally
+                    {
+                        gate.Release();
+                    }
+                }));
+            }
+
+            List<(Ticket Ticket, Waiting.State? State)> rows = Fine(page.Zip(states).ToList(), order, now);
+
+            var result = new JsonObject { ["who"] = label };
+            if (resolvedSince)
+            {
+                result["resolvedSince"] = sinceDay!.Value.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (extras.Contains("sla") && slaOn == false)
+            {
+                result["slaTracking"] = "off";
+            }
+
+            if (extras.Contains("counts"))
+            {
+                result["counts"] = Counts(scan.Matches);
+            }
+
+            result["items"] = new JsonArray(rows.Select(r => (JsonNode?)Row(r.Ticket, r.State, extras, slaOn != false, hideAssignee, hideRequestor, resolvedSince, now)).ToArray());
+            result["returned"] = rows.Count;
+            result["matched"] = scan.Matches.Count;
+
+            string?[] hints =
+            [
+                whoNote,
+                TicketScan.TruncationHint(scan, query, _client.TimeZones),
+                scan.Matches.Count > rows.Count ? $"{scan.Matches.Count} tickets matched; raise 'limit' (max 50) or add filters to see more." : null,
+                history && page.Count > read ? $"waitingOn and idleDays cover the first {read} rows only, to stay within the API quota." : null,
+                failed > 0 ? $"{failed} rows have no waitingOn: their history couldn't be read (the API quota may be used up for now)." : null,
+            ];
+            if (string.Join(" ", hints.OfType<string>()) is { Length: > 0 } hint)
+            {
+                result["hint"] = hint;
+            }
+
+            return result;
+        });
+    }
+
+    /// <summary>One queue row: the ticket in brief, and the extras asked for.</summary>
+    private static JsonObject Row(Ticket t, Waiting.State? state, HashSet<string> extras, bool slaOn, bool hideAssignee, bool hideRequestor, bool resolvedSince, DateTimeOffset now)
+    {
+        var o = new JsonObject();
+        if (t.TicketNo is int number)
+        {
+            o["ticketNo"] = number;
+        }
+        else
+        {
+            Add(o, "id", t.Id);
+        }
+
+        Add(o, "title", TicketViews.Short(t.Title, TitleChars));
+        Add(o, "status", t.Status);
+        Add(o, "priority", TicketViews.Priority(t.Priority));
+        if (!hideAssignee)
+        {
+            Add(o, "assignee", TicketViews.Person(t.Assignee));
+        }
+
+        if (!hideRequestor)
+        {
+            Add(o, "requestor", TicketViews.Person(t.Requestor));
+        }
+
+        if (Waiting.Parse(t.CreatedOn) is DateTimeOffset created)
+        {
+            o["ageDays"] = Waiting.Days(created, now);
+        }
+
+        if (resolvedSince)
+        {
+            Add(o, "resolvedOn", TicketViews.Time(t.LastResolutionOn));
+        }
+
+        if (extras.Contains("idleDays") && state?.IdleDays is int idle)
+        {
+            o["idleDays"] = idle;
+        }
+
+        // When it started waiting is left to get_ticket_brief: idleDays says how stale it is, in far fewer characters.
+        if (extras.Contains("waitingOn") && state is not null && !resolvedSince)
+        {
+            o["waitingOn"] = state.WaitingOn;
+        }
+
+        if (extras.Contains("sla") && slaOn)
+        {
+            Add(o, "sla", TicketViews.Sla(t));
+        }
+
+        if (extras.Contains("lastPublic") && state?.LastPublic is Waiting.Reply reply)
+        {
+            var last = new JsonObject { ["by"] = reply.By };
+            if (reply.On is DateTimeOffset on)
+            {
+                last["on"] = TicketViews.Time(on);
+            }
+
+            Add(last, "text", reply.Text is null ? null : TicketViews.Clip(TicketViews.StripQuoted(reply.Text), LastPublicChars));
+            o["lastPublic"] = last;
+        }
+
+        return o;
+    }
+
+    /// <summary>
+    /// The order from what every ticket carries, before any history is read: for urgency, SLA breaches, then Urgent, then
+    /// Important, then the longest since an update.
+    /// </summary>
+    private static IEnumerable<Ticket> Coarse(List<Ticket> tickets, string order) => order switch
+    {
+        "oldest" => tickets.OrderBy(t => Waiting.Parse(t.CreatedOn) ?? DateTimeOffset.MaxValue),
+        "idle" => tickets.OrderBy(t => Waiting.Parse(t.LastUpdatedOn) ?? DateTimeOffset.MaxValue),
+        "updated" => tickets.OrderByDescending(t => Waiting.Parse(t.LastResolutionOn) ?? Waiting.Parse(t.LastUpdatedOn) ?? DateTimeOffset.MinValue),
+        _ => tickets
+            .OrderBy(t => Breached(t) ? 0 : 1)
+            .ThenBy(t => PriorityRank(t))
+            .ThenBy(t => Waiting.Parse(t.LastUpdatedOn) ?? DateTimeOffset.MaxValue),
+    };
+
+    /// <summary>
+    /// The returned rows reordered with what their history showed: for urgency, SLA breaches, Urgent and Important first,
+    /// then tickets waiting on their assignee, then the rest, each group idlest first; for idle, by days idle.
+    /// </summary>
+    private static List<(Ticket Ticket, Waiting.State? State)> Fine(List<(Ticket Ticket, Waiting.State? State)> rows, string order, DateTimeOffset now)
+    {
+        double Idle((Ticket Ticket, Waiting.State? State) r) =>
+            r.State?.IdleDays ?? (Waiting.Parse(r.Ticket.LastUpdatedOn) is DateTimeOffset u ? (now - u).TotalDays : 0);
+
+        return order switch
+        {
+            "urgency" => rows
+                .OrderBy(r => Breached(r.Ticket) ? 0 : PriorityRank(r.Ticket) < 2 ? 1 + PriorityRank(r.Ticket) : r.State?.WaitingOn == Waiting.Assignee ? 3 : 4)
+                .ThenByDescending(Idle)
+                .ThenBy(r => Waiting.Parse(r.Ticket.CreatedOn) ?? DateTimeOffset.MaxValue)
+                .ToList(),
+            "idle" => rows.OrderByDescending(Idle).ToList(),
+            _ => rows,
+        };
+    }
+
+    private static bool Breached(Ticket t) => t.IsFrtBreached == true || t.IsRtBreached == true;
+
+    private static int PriorityRank(Ticket t) => TicketViews.Priority(t.Priority) switch
+    {
+        "Urgent" => 0,
+        "Important" => 1,
+        _ => 2,
+    };
+
+    /// <summary>Totals for the whole match, not just the rows returned: by assignee, largest first, and the unassigned.</summary>
+    private static JsonObject Counts(List<Ticket> tickets)
+    {
+        var byAssignee = new JsonObject();
+        foreach (var g in tickets
+                     .Where(t => Blank(t.Assignee?.Email) is not null || Blank(t.Assignee?.Id) is not null)
+                     .GroupBy(t => Blank(t.Assignee?.Email) ?? Blank(t.Assignee?.Id)!, StringComparer.OrdinalIgnoreCase)
+                     .OrderByDescending(g => g.Count()))
+        {
+            byAssignee[TicketViews.Person(g.First().Assignee) ?? g.Key] = g.Count();
+        }
+
+        return new JsonObject
+        {
+            ["total"] = tickets.Count,
+            ["unassigned"] = tickets.Count(t => Blank(t.Assignee?.Email) is null && Blank(t.Assignee?.Id) is null),
+            ["byAssignee"] = byAssignee,
+        };
+    }
+
+    /// <summary>
+    /// The person a 'who' names, by the rules every person argument follows: an email or name is looked up in the
+    /// assignee list, where a name must match one person. An email that isn't in the list is matched as it is, so a
+    /// requestor from outside, or someone since taken off the list, can still be found.
+    /// </summary>
+    private Task<TicketUser> PersonAsync(string who, int? timezoneOffset, CancellationToken cancellationToken) =>
+        FindPersonAsync(_client, _cache, who, "who", timezoneOffset, cancellationToken);
+
+    internal static async Task<TicketUser> FindPersonAsync(TicketingClient client, InstanceCache cache, string who, string paramName, int? timezoneOffset, CancellationToken cancellationToken)
+    {
+        bool email = who.Contains('@', StringComparison.Ordinal);
+        var lookup = new InstanceLookup(client, cache, timezoneOffset, cancellationToken);
+        try
+        {
+            return (await lookup.PersonAsync(email ? new UserRef(Email: who) : new UserRef(Name: who), paramName, assigneeOnly: true))!;
+        }
+        catch (McpException) when (email)
+        {
+            string address = ToolValidation.RequireEmail(who, paramName);
+            return new TicketUser(address, address, address);
+        }
+    }
+
+    private static bool HasRole(Ticket t, string role, Func<TicketUser?, bool> isThem) => role switch
+    {
+        "requestor" => isThem(t.Requestor),
+        "either" => isThem(t.Assignee) || isThem(t.Requestor),
+        _ => isThem(t.Assignee),
+    };
+
+    private static void Add(JsonObject o, string name, string? value)
+    {
+        if (value is not null)
+        {
+            o[name] = value;
+        }
+    }
+
+    private static string? Blank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+}

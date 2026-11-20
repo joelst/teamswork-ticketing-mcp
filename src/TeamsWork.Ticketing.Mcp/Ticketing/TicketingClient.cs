@@ -72,7 +72,6 @@ public sealed class TicketingClient
             new("offset", q.Offset?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
             new("search", q.Search),
             new("title", q.Title),
-            new("status", q.Status),
             new("statusId", q.StatusId),
             new("isResolved", q.IsResolved switch { true => "true", false => "false", null => null }),
             new("priority", q.Priority),

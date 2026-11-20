@@ -30,6 +30,9 @@ foreach ($name in @($psi.Environment.Keys)) {
     }
 }
 $psi.Environment['Ticketing__ApiKey'] = 'placeholder-for-tools-list'
+# Listing tools reads the instance's workflow states when it can; an unresolvable host keeps that read off the network,
+# so the file carries the fixed description.
+$psi.Environment['Ticketing__BaseUrl'] = 'https://ticketing.invalid/v1'
 $psi.Environment['Ticketing__ServiceAccount__Id'] = '00000000-0000-0000-0000-0000000000c1'
 $psi.Environment['Ticketing__ServiceAccount__Name'] = 'Tools List'
 $psi.Environment['Ticketing__ServiceAccount__Email'] = 'tools-list@example.test'

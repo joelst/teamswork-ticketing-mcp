@@ -32,6 +32,9 @@ public sealed class InstanceCache
     /// <summary>How often a refresh is honoured, for the whole cache.</summary>
     public static readonly TimeSpan MinRefreshInterval = TimeSpan.FromSeconds(30);
 
+    /// <summary>Ticket numbers seen so far and their UUIDs, shared like the rest of the cache.</summary>
+    public TicketNumbers Numbers { get; } = new();
+
     private readonly TimeSpan _ttl;
     private readonly TimeProvider _time;
     private readonly TimeZoneOffsetResolver _timeZones;

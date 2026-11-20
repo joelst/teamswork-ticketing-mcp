@@ -211,9 +211,10 @@ already registers the server.
 
 - **File uploads:** `upload_ticket_files` is offered only over stdio, so Cowork can attach links but not files.
   Taking files from Cowork's workspace would need a new server tool with a `contentEncoding: base64` parameter.
-- **Tool call time:** Cowork expects each tool call to finish within 30 seconds. `list_my_tickets`, `list_sla_risk`,
-  `count_tickets` and `find_ticket_by_number` read up to `Ticketing:MaxScanTickets` tickets (default 1000), so time
-  them on your instance.
+- **Tool call time:** Cowork expects each tool call to finish within 30 seconds. `get_queue`,
+  `list_sla_risk`, `count_tickets`, `preview_bulk_update` and ticket-number lookups read up to
+  `Ticketing:MaxScanTickets` tickets (default 1000), and `get_queue` reads up to 25 tickets' histories, so time them
+  on your instance. `bulk_update` stops after 20 seconds and returns a `resumeToken` for the rest.
 - **Confirmation prompts:** every tool declares MCP safety annotations. Cowork's confirmation prompts for
   non-Microsoft servers are still rolling out, which is why the skills themselves ask before each change.
 - **Mobile:** custom plugins don't run in Cowork on mobile.

@@ -70,11 +70,11 @@ public sealed class LocalModeIntegrationTests
 
         IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: Ct);
         // Every tool but upload_ticket_files, which only the stdio transport offers.
-        Assert.Equal(20, tools.Count);
+        Assert.Equal(19, tools.Count);
         Assert.DoesNotContain(tools, t => t.Name == "upload_ticket_files");
 
         // Validation still runs and the configured account is what writes would be attributed to.
-        CallToolResult result = await client.CallToolAsync("get_ticket", new Dictionary<string, object?> { ["ticketId"] = "nope" }, cancellationToken: Ct);
+        CallToolResult result = await client.CallToolAsync("get_ticket_brief", new Dictionary<string, object?> { ["ticket"] = "nope" }, cancellationToken: Ct);
         Assert.True(result.IsError);
     }
 

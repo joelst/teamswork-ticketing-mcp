@@ -1,6 +1,8 @@
 using System.ComponentModel;
+using Microsoft.Extensions.Options;
 using ModelContextProtocol.Server;
 using TeamsWork.Ticketing.Mcp.Auth;
+using TeamsWork.Ticketing.Mcp.Configuration;
 using TeamsWork.Ticketing.Mcp.Ticketing;
 using TeamsWork.Ticketing.Mcp.Ticketing.Models;
 
@@ -17,43 +19,48 @@ public sealed class FileUploadTools
     private readonly TicketingClient _client;
     private readonly IActingUserProvider _actingUser;
     private readonly UploadFolder _folder;
+    private readonly InstanceCache _cache;
+    private readonly TicketingOptions _options;
 
-    public FileUploadTools(TicketingClient client, IActingUserProvider actingUser, UploadFolder folder)
+    public FileUploadTools(TicketingClient client, IActingUserProvider actingUser, UploadFolder folder, InstanceCache cache, IOptions<TicketingOptions> options)
     {
         _client = client;
         _actingUser = actingUser;
         _folder = folder;
+        _cache = cache;
+        _options = options.Value;
     }
 
     // OpenWorld: it sends local files to a third-party service, which clients should treat with more care than a
     // change inside the help desk.
     [McpServerTool(Name = "upload_ticket_files", Title = "Upload files", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = true)]
     [Description(
-        "Upload files (for example screenshots or logs) from the local upload folder to a ticket, with an optional comment. Only files " +
-        "inside the configured upload folder can be sent; relative paths are taken from it. Up to 10 files per call, within the " +
-        "configured total size. Uploads are private (internal agents only) unless isPrivate=false, which also shows them to the " +
-        "requestor. The response includes an activityId that list_activity_attachments accepts.")]
+        "Upload files (screenshots, logs) from the local upload folder to a ticket, with an optional comment. Paths are relative " +
+        "to that folder; up to 10 files within the configured size. Private (agents only) unless isPrivate=false.")]
     public Task<string> UploadTicketFiles(
-        [Description("Ticket UUID.")] string ticketId,
-        [Description("Paths of the files to upload, relative to the upload folder (or absolute paths inside it).")] IReadOnlyList<string> paths,
+        [Description(TicketRefs.ParamText)] string ticket,
+        [Description("Files to upload, relative to the upload folder (or absolute paths inside it).")] IReadOnlyList<string> paths,
         [Description("Plain-text comment shown with the files.")] string? comment = null,
-        [Description("HTML comment (formatting, lists, tables, links). Ignored when 'comment' is also supplied. Script, forms, images, and inline styles are removed.")] string? commentHtml = null,
-        [Description("true (default) to make the upload visible only to internal agents; false also shows it to the requestor.")] bool isPrivate = true,
-        [Description("Return comment_HTML in the created activity.")] bool includeHtml = false,
-        [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
+        [Description("HTML comment, used when 'comment' isn't given. Script, forms, images and styles are removed.")] string? commentHtml = null,
+        [Description("true (default): only agents see them. false: the requestor sees them too.")] bool isPrivate = true,
+        [Description(DateFilterText.TimezoneOffset)] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
     {
         return ToolRunner.RunAsync(async () =>
         {
-            Guid id = ToolValidation.RequireGuid(ticketId, "ticketId");
             string? text = ToolValidation.OptionalText(comment, "comment");
             string? html = text is null ? ToolValidation.OptionalHtml(commentHtml, "commentHtml") : null;
             text ??= html is null ? "Files attached." : null;
             IReadOnlyList<UploadFile> files = _folder.ReadFiles(paths);
 
             ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);
-            CommentActivity created = await _client.UploadFilesAsync(id, files, text, html, isPrivate, actor.ToTicketUser(), includeHtml, timezoneOffset, cancellationToken);
-            return new WriteResult<CommentActivity>(created, ActedAs.From(actor));
+            Guid id = await new TicketRefs(_client, _cache, _options).ResolveAsync(ticket, timezoneOffset, cancellationToken);
+            CommentActivity created = await _client.UploadFilesAsync(id, files, text, html, isPrivate, actor.ToTicketUser(), includeHtml: false, timezoneOffset, cancellationToken);
+            return TicketViews.Ack(created, actor, new Dictionary<string, object?>
+            {
+                ["files"] = files.Select(f => f.FileName).ToList(),
+                ["visibility"] = isPrivate ? "private" : "public",
+            });
         });
     }
 }

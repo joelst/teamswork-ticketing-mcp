@@ -80,7 +80,7 @@ public sealed class NewToolsTests
     [InlineData("area", "NETWORK")]
     public void Tag_category_is_found_by_id_or_name_and_text_is_canonicalised(string category, string text)
     {
-        TicketTag tag = InstanceLookup.MatchTag(new TagRef(category, text), 0, ParseTags());
+        TicketTag tag = InstanceLookup.MatchTag(new TagRef { TagCategoryId = category, Text = text }, 0, ParseTags());
 
         Assert.Equal("cat1", tag.TagCategoryId);
         Assert.Equal("Network", tag.Text);
@@ -91,7 +91,7 @@ public sealed class NewToolsTests
     [InlineData("Area", "Old", "Network")] // deleted tags aren't offered
     public void Unknown_tag_or_category_lists_what_exists(string category, string text, string listed)
     {
-        McpException ex = Assert.Throws<McpException>(() => InstanceLookup.MatchTag(new TagRef(category, text), 0, ParseTags()));
+        McpException ex = Assert.Throws<McpException>(() => InstanceLookup.MatchTag(new TagRef { TagCategoryId = category, Text = text }, 0, ParseTags()));
 
         Assert.Contains(listed, ex.Message, StringComparison.Ordinal);
     }
@@ -238,7 +238,7 @@ public sealed class NewToolsTests
         await tools.CreateTicket(
             "Printer down",
             assignee: new UserRef(Email: "john@example.test"),
-            tags: [new TagRef("Area", "network")],
+            tags: [new TagRef { TagCategoryId = "Area", Text = "network" }],
             customFields: new Dictionary<string, JsonElement> { ["Device"] = JsonSerializer.SerializeToElement(new[] { "Phone" }) },
             cancellationToken: Ct);
 
@@ -265,7 +265,7 @@ public sealed class NewToolsTests
 
         using JsonDocument doc = JsonDocument.Parse(await new TicketTools(client, new FixedActor(Jane), cache, options).CreateTicket("Hi", priority: "low", cancellationToken: Ct));
 
-        Assert.Equal("Low", doc.RootElement.GetProperty("item").GetProperty("priority").GetString());
+        Assert.Equal("Low", doc.RootElement.GetProperty("changed").GetProperty("priority").GetString());
         Assert.Equal(expectedRequests, handler.Requests.Count);
         if (expectedRequests == 2)
         {
@@ -360,7 +360,7 @@ public sealed class NewToolsTests
             """);
         (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
 
-        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), cache, options).ListMyTickets(role, cancellationToken: Ct));
+        using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new FixedActor(Jane), cache, options).GetQueue(role: role, include: [], cancellationToken: Ct));
 
         Assert.Equal(expected, doc.RootElement.GetProperty("matched").GetInt32());
         Dictionary<string, string> q = TestFactory.Query(handler.Requests[0].Uri);
@@ -475,11 +475,11 @@ public sealed class NewToolsTests
     [InlineData(TicketA)]
     public void Ticket_number_must_be_a_positive_number(string value)
     {
-        Assert.Throws<McpException>(() => LookupTools.ParseTicketNumber(value));
+        Assert.Throws<McpException>(() => TicketRefs.ParseNumber(value));
     }
 
     [Fact]
-    public async Task Ticket_context_combines_ticket_activities_and_attachments()
+    public async Task A_brief_combines_ticket_activities_and_attachments()
     {
         var handler = new RoutingHandler(path => path switch
         {
@@ -489,14 +489,14 @@ public sealed class NewToolsTests
         });
         TicketingClient client = ClientFor(handler);
 
-        using JsonDocument doc = JsonDocument.Parse(await Lookup(client).GetTicketContext(TicketA, activityLimit: 5, cancellationToken: Ct));
+        using JsonDocument doc = JsonDocument.Parse(await Lookup(client).GetTicketBrief(TicketA, activities: 5, cancellationToken: Ct));
 
-        Assert.Equal("Ctx", doc.RootElement.GetProperty("ticket").GetProperty("title").GetString());
-        Assert.Equal("hello", doc.RootElement.GetProperty("activities")[0].GetProperty("comment").GetString());
-        Assert.Equal("older", doc.RootElement.GetProperty("activitiesContinuationToken").GetString());
-        Assert.Equal("log", doc.RootElement.GetProperty("attachments")[0].GetProperty("caption").GetString());
-        Assert.Equal(3, handler.Paths.Count);
-        Assert.Contains(handler.Queries, q => q.Contains("limit=5", StringComparison.Ordinal));
+        Assert.Equal("Ctx", doc.RootElement.GetProperty("title").GetString());
+        Assert.Equal("hello", doc.RootElement.GetProperty("activities")[0].GetProperty("text").GetString());
+        Assert.Contains("Older activity", doc.RootElement.GetProperty("hint").GetString(), StringComparison.Ordinal);
+        Assert.Equal("log", doc.RootElement.GetProperty("attachments")[0].GetProperty("name").GetString());
+        Assert.Equal(4, handler.Paths.Count); // the ticket, its history, its attachments, and the help desk's people
+        Assert.Contains(handler.Queries, q => q.Contains("limit=20", StringComparison.Ordinal)); // enough to find the latest reply
     }
 
     [Fact]
@@ -623,8 +623,34 @@ public sealed class NewToolsTests
         public override DateTimeOffset GetUtcNow() => _now;
     }
 
-    internal static LookupTools Lookup(TicketingClient client, TicketingOptions? options = null) =>
-        new(client, Microsoft.Extensions.Options.Options.Create(options ?? TestFactory.Options()));
+    internal static LookupHarness Lookup(TicketingClient client, TicketingOptions? options = null) => new(client, options ?? TestFactory.Options());
+
+    /// <summary>
+    /// The lookup tools with one fresh cache. Finding a ticket by number is get_ticket given the number now, which runs
+    /// the same number lookup (TicketRefs) and then reads the ticket.
+    /// </summary>
+    internal sealed class LookupHarness
+    {
+        private readonly TicketingClient _client;
+        private readonly IOptions<TicketingOptions> _options;
+        private readonly InstanceCache _cache;
+
+        public LookupHarness(TicketingClient client, TicketingOptions options)
+        {
+            _client = client;
+            _options = Microsoft.Extensions.Options.Options.Create(options);
+            _cache = new InstanceCache(_options, new TimeZoneOffsetResolver(_options, Time), Time);
+        }
+
+        public Task<string> FindTicketByNumber(string number, CancellationToken cancellationToken = default) =>
+            new LookupTools(_client, _cache, _options).GetTicketBrief(number, activities: 0, cancellationToken: cancellationToken);
+
+        public Task<string> GetTicketBrief(string ticket, int? activities = null, CancellationToken cancellationToken = default) =>
+            new LookupTools(_client, _cache, _options).GetTicketBrief(ticket, activities, cancellationToken: cancellationToken);
+
+        public Task<string> FindSimilarTickets(string title, CancellationToken cancellationToken = default) =>
+            new LookupTools(_client, _cache, _options).FindSimilarTickets(title, cancellationToken: cancellationToken);
+    }
 
     internal static TicketingClient ClientFor(HttpMessageHandler handler)
     {

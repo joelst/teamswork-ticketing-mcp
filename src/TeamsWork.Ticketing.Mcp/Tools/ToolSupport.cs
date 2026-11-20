@@ -8,16 +8,24 @@ using TeamsWork.Ticketing.Mcp.Ticketing.Models;
 
 namespace TeamsWork.Ticketing.Mcp.Tools;
 
-/// <summary>Serialises tool results compactly (nulls omitted) so responses stay small for the model.</summary>
+/// <summary>
+/// Serialises tool results compactly (nulls omitted) so responses stay small for the model. The text goes to a model,
+/// not into a web page, so only what JSON itself requires is escaped: the default encoder writes &lt; &gt; &amp; ' and
+/// every non-ASCII character as \uXXXX, which makes each "Name &lt;email&gt;" ten characters longer and harder to read.
+/// </summary>
 internal static class ToolJson
 {
     private static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         WriteIndented = false,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
     public static string Serialize<T>(T value) => JsonSerializer.Serialize(value, Options);
+
+    /// <summary>The same JSON as a node, for adding a computed member to an API object without retyping it.</summary>
+    public static System.Text.Json.Nodes.JsonNode? ToNode<T>(T value) => JsonSerializer.SerializeToNode(value, Options);
 }
 
 /// <summary>
@@ -71,68 +79,6 @@ internal sealed record ScanResult<T>(
     [property: JsonPropertyName("truncated")] bool Truncated,
     [property: JsonPropertyName("hint")] string? Hint);
 
-/// <summary>The fields of a ticket that triage needs, so tools that return many tickets stay small.</summary>
-internal sealed record TicketSummary(
-    [property: JsonPropertyName("id")] string? Id,
-    [property: JsonPropertyName("ticketNo")] int? TicketNo,
-    [property: JsonPropertyName("title")] string? Title,
-    [property: JsonPropertyName("status")] string? Status,
-    [property: JsonPropertyName("priority")] string? Priority,
-    [property: JsonPropertyName("assignee")] TicketUser? Assignee,
-    [property: JsonPropertyName("requestor")] TicketUser? Requestor,
-    [property: JsonPropertyName("expectedDate")] string? ExpectedDate,
-    [property: JsonPropertyName("createdOn")] string? CreatedOn,
-    [property: JsonPropertyName("lastUpdatedOn")] string? LastUpdatedOn,
-    [property: JsonPropertyName("isFrtBreached")] bool? IsFrtBreached,
-    [property: JsonPropertyName("isRtBreached")] bool? IsRtBreached,
-    [property: JsonPropertyName("isFrtEscalated")] bool? IsFrtEscalated,
-    [property: JsonPropertyName("isRtEscalated")] bool? IsRtEscalated)
-{
-    public static TicketSummary From(Ticket t) => new(
-        t.Id, TicketNumber(t), t.Title, t.Status, t.Priority, t.Assignee, t.Requestor, t.ExpectedDate, t.CreatedOn,
-        t.LastUpdatedOn, t.IsFrtBreached, t.IsRtBreached, t.IsFrtEscalated, t.IsRtEscalated);
-
-    /// <summary>
-    /// The human ticket number. The API returns it as ticketNo, but a 'select' names the field ticketId, so a selected
-    /// response may carry it under that name instead.
-    /// </summary>
-    public static int? TicketNumber(Ticket t)
-    {
-        if (t.TicketNo is int n)
-        {
-            return n;
-        }
-
-        if (t.Extra?.TryGetValue("ticketId", out JsonElement v) == true)
-        {
-            if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out int number))
-            {
-                return number;
-            }
-
-            if (v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out number))
-            {
-                return number;
-            }
-        }
-
-        return null;
-    }
-}
-
-/// <summary>Envelope for write tools: what changed and who it was attributed to.</summary>
-internal sealed record WriteResult<T>(
-    [property: JsonPropertyName("item")] T Item,
-    [property: JsonPropertyName("actedAs")] ActedAs ActedAs,
-    [property: JsonPropertyName("warning")] string? Warning = null);
-
-internal sealed record ActedAs(
-    [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("email")] string Email,
-    [property: JsonPropertyName("source")] string Source)
-{
-    public static ActedAs From(ActingUser user) => new(user.Name, user.Email, user.Source.ToString());
-}
 
 /// <summary>
 /// A person reference supplied by the agent for requestor / assignee fields. All three fields together are used as
@@ -155,12 +101,20 @@ public sealed record UserRef(
             ToolValidation.RequireEmail(Email, $"{paramName}.email"));
 }
 
-/// <summary>A tag reference supplied by the agent. Resolved against the instance's tag categories.</summary>
-public sealed record TagRef(
-    [property: Description("ID or name of the tag category (from list_tag_categories).")]
-    [property: JsonPropertyName("tagCategoryId")] string TagCategoryId,
-    [property: Description("Tag text as defined in the category (case doesn't matter).")]
-    [property: JsonPropertyName("text")] string Text);
+/// <summary>
+/// A tag reference supplied by the agent. Resolved against the instance's tag categories. Properties rather than a
+/// positional record, so the schema can require the text while leaving the category optional.
+/// </summary>
+public sealed record TagRef
+{
+    [Description("ID or name of the tag category (from list_tag_categories). Can be left out when the tag's text is in one category only.")]
+    [JsonPropertyName("tagCategoryId")]
+    public string? TagCategoryId { get; init; }
+
+    [Description("Tag text as defined in the category (case doesn't matter).")]
+    [JsonPropertyName("text")]
+    public required string Text { get; init; }
+}
 
 /// <summary>A hyperlink attachment supplied by the agent.</summary>
 public sealed record LinkRef(
