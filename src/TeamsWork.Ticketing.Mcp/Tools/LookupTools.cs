@@ -163,9 +163,9 @@ public sealed class LookupTools
                 notes > 0 ? $"{notes} private {(notes == 1 ? "note" : "notes")}" : null,
             ];
             string? leftOut = left.Any(x => x is not null) ? $"Left out: {string.Join(" and ", left.OfType<string>())} (includeAutomation, includePrivate)." : null;
-            string? unknown = state.WaitingOn is null
-                ? $"waitingOn is left out: none of the latest {recent.Count} activities is a public reply; list_ticket_activities has older ones."
-                : null;
+            string? unknown = state.WaitingOn is not null ? null
+                : state.ResolutionUnknown ? "waitingOn is left out: the ticket's workflow doesn't say whether its state is resolved."
+                : $"waitingOn is left out: none of the latest {recent.Count} activities is a public reply; list_ticket_activities has older ones.";
             if (string.Join(" ", new[] { unknown, leftOut, more }.OfType<string>()) is { Length: > 0 } hint)
             {
                 brief["hint"] = hint;

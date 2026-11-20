@@ -14,7 +14,8 @@ namespace TeamsWork.Ticketing.Mcp.Tools;
 /// </summary>
 internal sealed class TicketPeople
 {
-    private readonly HashSet<string> _agentEmails = new(StringComparer.OrdinalIgnoreCase);
+    // Each agent's email, and whether any agent with it is known by email alone (no object ID).
+    private readonly Dictionary<string, bool> _agentEmails = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<Guid> _agentIds = [];
     private readonly IReadOnlySet<string> _system;
 
@@ -61,21 +62,39 @@ internal sealed class TicketPeople
 
     private void AddAgent(string? id, string? email)
     {
-        if (!string.IsNullOrWhiteSpace(email))
-        {
-            _agentEmails.Add(email.Trim());
-        }
-
-        if (Guid.TryParse(id, out Guid oid))
+        bool hasId = Guid.TryParse(id, out Guid oid);
+        if (hasId)
         {
             _agentIds.Add(oid);
         }
+
+        if (!string.IsNullOrWhiteSpace(email))
+        {
+            string key = email.Trim();
+            _agentEmails[key] = !hasId || _agentEmails.GetValueOrDefault(key);
+        }
     }
 
-    public bool IsAgent(TicketUser? user) =>
-        user is not null &&
-        ((!string.IsNullOrWhiteSpace(user.Email) && _agentEmails.Contains(user.Email.Trim())) ||
-         (Guid.TryParse(user.Id, out Guid oid) && _agentIds.Contains(oid)));
+    /// <summary>
+    /// Whether the author is help-desk staff, by the rules of <see cref="IsPerson"/>: an author with an object ID is an
+    /// agent's only by that ID, so someone else writing from a staff member's address isn't taken for them; the email
+    /// decides for an author without one, or for an agent known by email alone.
+    /// </summary>
+    public bool IsAgent(TicketUser? user)
+    {
+        if (user is null)
+        {
+            return false;
+        }
+
+        bool hasId = Guid.TryParse(user.Id, out Guid oid);
+        if (hasId && _agentIds.Contains(oid))
+        {
+            return true;
+        }
+
+        return !string.IsNullOrWhiteSpace(user.Email) && _agentEmails.TryGetValue(user.Email.Trim(), out bool emailOnly) && (!hasId || emailOnly);
+    }
 
     /// <summary>
     /// An author that isn't a person: a configured system account (by address or by the part before the @), or one with
@@ -148,7 +167,11 @@ internal static partial class Waiting
     /// <param name="WaitingSince">When the ticket started waiting, when known: the reply it waits after, or its creation.</param>
     /// <param name="IdleDays">Whole days since a person last did anything on it, of any visibility.</param>
     /// <param name="LastPublic">The latest public reply by a person, if any was read.</param>
-    public sealed record State(string? WaitingOn, DateTimeOffset? WaitingSince, int? IdleDays, Reply? LastPublic);
+    /// <param name="ResolutionUnknown">
+    /// Why <paramref name="WaitingOn"/> is null when it is: true when whether the ticket is resolved isn't known, false
+    /// when the history read doesn't reach back far enough to tell.
+    /// </param>
+    public sealed record State(string? WaitingOn, DateTimeOffset? WaitingSince, int? IdleDays, Reply? LastPublic, bool ResolutionUnknown = false);
 
     /// <param name="By">requestor, agent, or other (someone else on the requestor's side, such as a cc).</param>
     public sealed record Reply(string By, DateTimeOffset? On, string? Text);
@@ -163,8 +186,10 @@ internal static partial class Waiting
     public static State Compute(Ticket t, IReadOnlyList<Activity> history, TicketPeople people, bool? resolved, bool complete, DateTimeOffset now, string? statusLabel = null)
     {
         DateTimeOffset? created = Parse(t.CreatedOn);
+        // From the creation only when no person has done anything since; a latest activity without a time leaves it unknown,
+        // as an older time would make a ticket just handled look idle.
         Activity? lastHuman = history.FirstOrDefault(a => IsByPerson(a, people));
-        int? idle = Parse(lastHuman?.When) is DateTimeOffset at ? Days(at, now)
+        int? idle = lastHuman is not null ? (Parse(lastHuman.When) is DateTimeOffset at ? Days(at, now) : null)
             : complete && created is DateTimeOffset c ? Days(c, now)
             : null;
 
@@ -186,14 +211,15 @@ internal static partial class Waiting
 
         if (isResolved is null)
         {
-            return new State(null, null, idle, reply);
+            return new State(null, null, idle, reply, ResolutionUnknown: true);
         }
 
-        // A state named for waiting says on whom: the help desk itself ("Waiting on assignee", "Pending agent"), someone
-        // outside ("Awaiting vendor"), or otherwise the requestor ("Waiting on customer").
+        // A state named for waiting says on whom: someone outside ("Awaiting vendor support", checked first, as such a
+        // state can name a role too), the help desk itself ("Waiting on assignee", "Pending agent"), or otherwise the
+        // requestor ("Waiting on customer").
         if (Blank(statusLabel ?? t.Status) is string status && WaitingState().IsMatch(status))
         {
-            string on = AssigneeState().IsMatch(status) ? Assignee : ThirdPartyState().IsMatch(status) ? ThirdParty : Requestor;
+            string on = ThirdPartyState().IsMatch(status) ? ThirdParty : AssigneeState().IsMatch(status) ? Assignee : Requestor;
             return new State(on, null, idle, reply);
         }
 

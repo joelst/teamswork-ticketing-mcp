@@ -93,7 +93,7 @@ public sealed partial class BulkTools
             Change change = await ReadChangeAsync(set, comment, lookup, timezoneOffset);
             System.Text.Json.JsonElement? workflows = await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken);
 
-            (List<Ticket> picked, string? pickHint) = filter is not null
+            (List<Picked> picked, string? pickHint) = filter is not null
                 ? await PickByFilterAsync(filter, workflows, change.Status is not null, timezoneOffset, cancellationToken)
                 : await PickByRefsAsync(tickets!, change.Status is not null, timezoneOffset, cancellationToken);
 
@@ -102,9 +102,9 @@ public sealed partial class BulkTools
             var rows = new JsonArray();
             var unchanged = new JsonArray();
             int blocked = 0;
-            foreach (Ticket t in picked)
+            foreach ((Ticket t, TicketVersion version) in picked)
             {
-                (BulkItem? item, JsonObject row) = await PlanAsync(t, change, workflows, categories, lookup);
+                (BulkItem? item, JsonObject row) = await PlanAsync(t, version, change, workflows, categories, lookup);
                 if (row["blocked"] is not null)
                 {
                     blocked++;
@@ -155,7 +155,8 @@ public sealed partial class BulkTools
     [McpServerTool(Name = "bulk_update", Title = "Apply a bulk update", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false)]
     [Description(
         "Apply a change previewed with preview_bulk_update, by its confirmToken alone, once the user has agreed. Tickets changed " +
-        "since the preview are skipped. Confirming the same token again returns the first result without changing anything.")]
+        "since the preview are skipped (each is re-read just before it is written; the API can't make the write itself conditional). " +
+        "Confirming the same token again returns the first result without changing anything.")]
     public Task<string> BulkUpdate(
         [Description("The confirmToken from preview_bulk_update.")] string confirmToken,
         CancellationToken cancellationToken = default)
@@ -189,10 +190,10 @@ public sealed partial class BulkTools
             {
                 result = await ApplyAsync(batch, actor, cancellationToken);
             }
-            catch (Exception ex) when (ex is OperationCanceledException or TicketingApiException or McpException)
+            catch (Exception)
             {
-                // Unexpected here, since ApplyAsync reports each ticket's failure; the batch is spent either way, so a
-                // retry can't apply anything twice.
+                // Unexpected here, since ApplyAsync reports each ticket's failure. Whatever it was, the batch is finished:
+                // left running, no retry could reach it, and none can apply anything twice.
                 batch.Finish(new JsonObject { ["ok"] = false, ["batchId"] = batch.BatchId, ["error"] = "The batch stopped part way. Check the tickets with get_ticket_brief before previewing again." }, _store.Now);
                 throw;
             }
@@ -239,10 +240,11 @@ public sealed partial class BulkTools
                     continue;
                 }
 
+                // The window between this read and the write below can't be closed: the API has no conditional write.
                 TicketVersion current = TicketVersion.Of(now);
                 if (!item.Version.Comparable(current))
                 {
-                    skipped.Add(new JsonObject { ["ticketNo"] = label.DeepClone(), ["reason"] = "can't confirm it's unchanged: the API sent no _ts" });
+                    skipped.Add(new JsonObject { ["ticketNo"] = label.DeepClone(), ["reason"] = "can't confirm it's unchanged: the API sent no _ts for it" });
                     continue;
                 }
 
@@ -334,7 +336,7 @@ public sealed partial class BulkTools
         if (remaining.Count > 0)
         {
             var rest = new BulkStore.Batch(batch.Owner, _store.Now + BulkStore.Lifetime, batch.BatchId, plan, remaining);
-            result["resumeToken"] = _store.Add(rest);
+            result["resumeToken"] = _store.Add(rest, resume: true);
             result["hint"] = stopped switch
             {
                 "quota" => $"The API quota ran out with {remaining.Count} tickets to go. Wait a minute, then call bulk_update with resumeToken as the confirmToken.",
@@ -354,7 +356,7 @@ public sealed partial class BulkTools
     /// What one ticket would get: its planned change, and its row in the preview (what changes from what, or why it is
     /// blocked). Null when nothing would change on it.
     /// </summary>
-    private static async Task<(BulkItem? Item, JsonObject Row)> PlanAsync(Ticket t, Change change, System.Text.Json.JsonElement? workflows, IReadOnlyList<TagCategory> categories, InstanceLookup lookup)
+    private static async Task<(BulkItem? Item, JsonObject Row)> PlanAsync(Ticket t, TicketVersion version, Change change, System.Text.Json.JsonElement? workflows, IReadOnlyList<TagCategory> categories, InstanceLookup lookup)
     {
         var row = new JsonObject();
         if (t.TicketNo is int no)
@@ -369,6 +371,13 @@ public sealed partial class BulkTools
         if (TicketViews.Short(t.Title, TitleChars) is string title)
         {
             row["title"] = title;
+        }
+
+        if (version.Ts is null)
+        {
+            // Without it the confirmation couldn't tell whether the ticket changed since, so it would only be skipped then.
+            row["blocked"] = "Its version couldn't be read (it may be new, or have changed during the preview). Preview it again.";
+            return (null, row);
         }
 
         var from = new JsonObject();
@@ -447,7 +456,7 @@ public sealed partial class BulkTools
             row["from"] = from;
         }
 
-        return (new BulkItem(Guid.Parse(t.Id!), t.TicketNo, TicketVersion.Of(t), statusValue, tags, assignee, priority, due), row);
+        return (new BulkItem(Guid.Parse(t.Id!), t.TicketNo, version, statusValue, tags, assignee, priority, due), row);
     }
 
     private static bool Allows(Ticket t, string target, string comment, System.Text.Json.JsonElement? workflows)
@@ -464,7 +473,7 @@ public sealed partial class BulkTools
     }
 
     /// <summary>The tickets a filter picks, refused when there are more than a batch takes.</summary>
-    private async Task<(List<Ticket> Tickets, string? Hint)> PickByFilterAsync(BulkFilter filter, System.Text.Json.JsonElement? workflows, bool wholeTickets, int? timezoneOffset, CancellationToken cancellationToken)
+    private async Task<(List<Picked> Tickets, string? Hint)> PickByFilterAsync(BulkFilter filter, System.Text.Json.JsonElement? workflows, bool wholeTickets, int? timezoneOffset, CancellationToken cancellationToken)
     {
         Regex? titlePattern = ToolValidation.OptionalText(filter.TitlePattern, "filter.titlePattern", 500) is string pattern ? Glob(pattern) : null;
         string? assigneeText = ToolValidation.OptionalText(filter.Assignee, "filter.assignee", 320);
@@ -497,13 +506,14 @@ public sealed partial class BulkTools
             throw new McpException("'filter' needs at least one condition, so a batch can't take every ticket by accident.");
         }
 
-        TicketScan.Result<Ticket> scan = await TicketScan.RunAsync(
+        Dictionary<string, long>? stamps = wholeTickets ? await StampsAsync(query, cancellationToken) : null;
+        TicketScan.Result<Picked> scan = await TicketScan.RunAsync(
             _client,
             query,
             t =>
             {
                 _cache.Numbers.Remember(t);
-                return Guid.TryParse(t.Id, out _) && (titlePattern is null || titlePattern.IsMatch(t.Title ?? "")) && assigneeMatches(t) ? Slim(t) : null;
+                return Guid.TryParse(t.Id, out _) && (titlePattern is null || titlePattern.IsMatch(t.Title ?? "")) && assigneeMatches(t) ? Pick(t, stamps) : null;
             },
             _options.MaxScanTickets,
             wholeTickets ? WorkloadTools.FullTicketPageSize : TicketScan.MaxApiPageSize,
@@ -522,7 +532,7 @@ public sealed partial class BulkTools
     /// read one at a time when there are only a couple; otherwise one read of the open tickets finds most of them,
     /// numbers included, without a lookup each, and the rest are found and read one at a time.
     /// </summary>
-    private async Task<(List<Ticket> Tickets, string? Hint)> PickByRefsAsync(IReadOnlyList<string> refs, bool wholeTickets, int? timezoneOffset, CancellationToken cancellationToken)
+    private async Task<(List<Picked> Tickets, string? Hint)> PickByRefsAsync(IReadOnlyList<string> refs, bool wholeTickets, int? timezoneOffset, CancellationToken cancellationToken)
     {
         var wanted = new List<(string Given, Guid? Id, int? Number)>();
         foreach (string r in refs)
@@ -537,34 +547,37 @@ public sealed partial class BulkTools
 
         // A scan of the open tickets is one request (or a few on a very large help desk); reading each ticket is one each.
         bool scanPays = wanted.Any(w => w.Id is null) || wanted.Count > 2;
-        TicketScan.Result<Ticket> open = !scanPays ? new TicketScan.Result<Ticket>([], 0, 0, false) : await TicketScan.RunAsync(
+        var openQuery = new TicketListQuery { IsResolved = false, Select = wholeTickets ? null : BulkFields, TimezoneOffset = timezoneOffset };
+        Dictionary<string, long>? stamps = scanPays && wholeTickets ? await StampsAsync(openQuery, cancellationToken) : null;
+        TicketScan.Result<Picked> open = !scanPays ? new TicketScan.Result<Picked>([], 0, 0, false) : await TicketScan.RunAsync(
             _client,
-            new TicketListQuery { IsResolved = false, Select = wholeTickets ? null : BulkFields, TimezoneOffset = timezoneOffset },
+            openQuery,
             t =>
             {
                 _cache.Numbers.Remember(t);
-                return wanted.Any(w => (w.Id is Guid g && Guid.TryParse(t.Id, out Guid tid) && tid == g) || (w.Number is int n && t.TicketNo == n)) ? Slim(t) : null;
+                return wanted.Any(w => (w.Id is Guid g && Guid.TryParse(t.Id, out Guid tid) && tid == g) || (w.Number is int n && t.TicketNo == n)) ? Pick(t, stamps) : null;
             },
             _options.MaxScanTickets,
             wholeTickets ? WorkloadTools.FullTicketPageSize : TicketScan.MaxApiPageSize,
             cancellationToken);
 
-        var found = new List<Ticket>();
+        var found = new List<Picked>();
         var seen = new HashSet<Guid>();
         var refsTool = new TicketRefs(_client, _cache, _options);
         foreach ((string given, Guid? gid, int? number) in wanted)
         {
-            Ticket? t = open.Matches.FirstOrDefault(m => (gid is Guid g && Guid.TryParse(m.Id, out Guid tid) && tid == g) || (number is int n && m.TicketNo == n));
-            if (t is null)
+            Picked? p = open.Matches.FirstOrDefault(m => (gid is Guid g && Guid.TryParse(m.Ticket.Id, out Guid tid) && tid == g) || (number is int n && m.Ticket.TicketNo == n));
+            if (p is null)
             {
                 Guid id = gid ?? await refsTool.ResolveAsync(given, timezoneOffset, cancellationToken, "tickets");
-                t = await _client.GetTicketAsync(id, includeHtml: false, timezoneOffset, cancellationToken);
+                Ticket t = await _client.GetTicketAsync(id, includeHtml: false, timezoneOffset, cancellationToken);
                 _cache.Numbers.Remember(t);
+                p = Pick(t, null);
             }
 
-            if (Guid.TryParse(t.Id, out Guid key) && seen.Add(key))
+            if (Guid.TryParse(p.Ticket.Id, out Guid key) && seen.Add(key))
             {
-                found.Add(t);
+                found.Add(p);
             }
         }
 
@@ -649,6 +662,35 @@ public sealed partial class BulkTools
                 o[name] = value;
             }
         }
+    }
+
+    /// <summary>A picked ticket, slimmed, with how it stood when read.</summary>
+    private sealed record Picked(Ticket Ticket, TicketVersion Version);
+
+    /// <summary>
+    /// A ticket as a preview keeps it. Its version is taken from the whole of what was read, before the description is
+    /// dropped, with _ts from <paramref name="stamps"/> for a whole list row, which doesn't carry it.
+    /// </summary>
+    private static Picked Pick(Ticket t, Dictionary<string, long>? stamps) =>
+        new(Slim(t), TicketVersion.Of(t) with { Ts = t.Ts ?? (t.Id is string id && stamps?.TryGetValue(id, out long ts) == true ? ts : (long?)null) });
+
+    /// <summary>
+    /// Each listed ticket's _ts, for a preview that reads whole tickets: whole list rows don't carry it (a selected row
+    /// and a read of one ticket do), and nothing selects it along with isCustomWorkflow. Read before the whole tickets,
+    /// so a change made between the two reads moves _ts past what is kept, and the ticket is skipped when confirmed.
+    /// </summary>
+    private async Task<Dictionary<string, long>> StampsAsync(TicketListQuery query, CancellationToken cancellationToken)
+    {
+        TicketScan.Result<Ticket> scan = await TicketScan.RunAsync(
+            _client, query with { Select = "id,_ts" }, t => t.Id is not null && t.Ts is not null ? t : null,
+            _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
+        var stamps = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        foreach (Ticket t in scan.Matches)
+        {
+            stamps.TryAdd(t.Id!, t.Ts!.Value);
+        }
+
+        return stamps;
     }
 
     /// <summary>What a preview keeps of a picked ticket: whole tickets would otherwise be held, descriptions and all.</summary>

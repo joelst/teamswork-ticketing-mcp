@@ -339,12 +339,20 @@ internal static class WorkflowStatus
                 $"'{current.Label ?? current.Id}' is a final state in this ticket's workflow: no step leads out of it, so it can't move to '{target}'.");
         }
 
-        var matches = steps
+        // The closest kind of match decides: the target state's ID, then its label, then a transition's label. So the
+        // 'Closed' state isn't ambiguous with another state reached by a transition labelled 'Closed'.
+        var candidates = steps
             .Where(s => !string.IsNullOrWhiteSpace(s.TargetId))
             .Select(s => (Step: s, State: states.FirstOrDefault(w => Same(w.Id, s.TargetId))))
-            .Where(m => Same(m.Step.TargetId, target) || Same(m.State?.Label, target) || Same(m.Step.TransitionLabel, target))
-            .DistinctBy(m => m.Step.TargetId, StringComparer.OrdinalIgnoreCase)
             .ToList();
+        var matches = new Func<(WorkflowTransition Step, WorkflowState? State), bool>[]
+            {
+                m => Same(m.Step.TargetId, target),
+                m => Same(m.State?.Label, target),
+                m => Same(m.Step.TransitionLabel, target),
+            }
+            .Select(tier => candidates.Where(tier).DistinctBy(m => m.Step.TargetId, StringComparer.OrdinalIgnoreCase).ToList())
+            .FirstOrDefault(found => found.Count > 0) ?? [];
 
         IReadOnlyList<NextStatus> allowed = AllowedNext(ticket, instanceWorkflows) ?? [];
         string from = current.Label ?? current.Id ?? ticket.Status!;

@@ -217,7 +217,7 @@ public sealed class CompactOutputTests
 
         JsonElement view = JsonSerializer.SerializeToElement(TicketViews.Activity(activity, includeHtml: false));
 
-        Assert.Equal("Thanks, that fixed it. [quoted reply cut; includeHtml has it]", view.GetProperty("text").GetString());
+        Assert.Equal("Thanks, that fixed it. [quoted reply cut; list_ticket_activities with maxChars=20000 has it]", view.GetProperty("text").GetString());
         Assert.Equal("reply", view.GetProperty("kind").GetString());
         Assert.Equal("Pat Example <pat@example.test>", view.GetProperty("by").GetString());
         Assert.Contains("more characters]", view.GetProperty("changes")[0].GetProperty("from").GetString(), StringComparison.Ordinal);

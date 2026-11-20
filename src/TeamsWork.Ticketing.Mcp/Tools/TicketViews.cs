@@ -71,10 +71,13 @@ internal static partial class TicketViews
     public static string? Resolution(string? resolution) =>
         Blank(resolution) is string r && !Guid.TryParse(r, out _) ? r : null;
 
-    /// <summary>The text, cut to <paramref name="max"/> characters with a note of how much more there was.</summary>
+    /// <summary>
+    /// The text, cut to <paramref name="max"/> characters with a note of how much more there was. Asked for in full
+    /// (<see cref="FullTextChars"/>), it is kept as written, indentation and all; otherwise its ends are trimmed.
+    /// </summary>
     public static string? Clip(string? text, int max)
     {
-        if (Blank(text) is not string t)
+        if ((max >= FullTextChars ? (string.IsNullOrWhiteSpace(text) ? null : text) : Blank(text)) is not string t)
         {
             return null;
         }
@@ -110,7 +113,7 @@ internal static partial class TicketViews
             return text;
         }
 
-        return text[..quote.Index].TrimEnd() + " [quoted reply cut; includeHtml has it]";
+        return text[..quote.Index].TrimEnd() + " [quoted reply cut; list_ticket_activities with maxChars=20000 has it]";
     }
 
     // ---- Tickets ----------------------------------------------------------------------------------------------------
@@ -210,7 +213,7 @@ internal static partial class TicketViews
         Add(o, "id", a.Id);
         Add(o, "on", Time(a.When));
         Add(o, "by", Person(a.Author));
-        string? text = Blank(a.Comment) is string comment ? Clip(maxChars >= FullTextChars ? comment : StripQuoted(comment), maxChars) : null;
+        string? text = string.IsNullOrWhiteSpace(a.Comment) ? null : Clip(maxChars >= FullTextChars ? a.Comment : StripQuoted(a.Comment.Trim()), maxChars);
         bool changes = a.Changes is { Count: > 0 };
         string? action = Blank(a.Action) is string act && act.Length <= 40 ? act : null;
         Add(o, "kind",

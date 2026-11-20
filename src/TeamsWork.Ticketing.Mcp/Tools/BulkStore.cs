@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using ModelContextProtocol;
 using TeamsWork.Ticketing.Mcp.Ticketing.Models;
 
 namespace TeamsWork.Ticketing.Mcp.Tools;
@@ -32,16 +33,31 @@ public sealed class BulkStore
 
     internal DateTimeOffset Now => _time.GetUtcNow();
 
-    /// <summary>Stores a batch and returns its token.</summary>
-    internal string Add(Batch batch)
+    /// <summary>
+    /// Stores a batch and returns its token. Room is made by dropping the oldest unconfirmed batches, the likeliest to have
+    /// been abandoned; a batch being confirmed, or finished with a result still to be had, is kept, so when those fill
+    /// the store a preview is refused. A <paramref name="resume"/> token, for the rest of a batch a confirmation stopped
+    /// part way, is stored regardless: it carries on a batch that held a place already, and refusing it would lose track
+    /// of what is left. Each comes from a confirmation call, so they can't pile up faster than calls are made.
+    /// </summary>
+    internal string Add(Batch batch, bool resume = false)
     {
         lock (_gate)
         {
             Sweep();
+            bool ownerRoom = Evict(_batches.Where(b => b.Value.Owner == batch.Owner).ToList(), MaxBatchesPerOwner);
+            bool room = Evict(_batches.ToList(), MaxBatches);
+            if (!resume && !ownerRoom)
+            {
+                throw new McpException(
+                    $"You have {MaxBatchesPerOwner} bulk updates being applied or finished in the last {Lifetime.TotalMinutes:0} minutes, " +
+                    "and their results are kept for that long. Try again once one has finished or lapsed.");
+            }
 
-            // The oldest go first, as the likeliest to have been abandoned; a batch being applied is never dropped.
-            Evict(_batches.Where(b => b.Value.Owner == batch.Owner).ToList(), MaxBatchesPerOwner);
-            Evict(_batches.ToList(), MaxBatches);
+            if (!resume && !room)
+            {
+                throw new McpException("The server is holding as many bulk updates as it can right now. Try again in a few minutes.");
+            }
 
             string token = NewToken();
             _batches[token] = batch;
@@ -59,17 +75,13 @@ public sealed class BulkStore
         }
     }
 
-    private void Evict(List<KeyValuePair<string, Batch>> batches, int max)
+    /// <summary>Drops the oldest unconfirmed batches until there is room for one more; whether there is.</summary>
+    private bool Evict(List<KeyValuePair<string, Batch>> batches, int max)
     {
         int over = batches.Count - max + 1;
-        if (over <= 0)
-        {
-            return;
-        }
-
         foreach (KeyValuePair<string, Batch> old in batches.OrderBy(b => b.Value.Expires))
         {
-            if (over == 0)
+            if (over <= 0)
             {
                 break;
             }
@@ -80,6 +92,8 @@ public sealed class BulkStore
                 over--;
             }
         }
+
+        return over <= 0;
     }
 
     // Under _gate. An unconfirmed batch past its deadline is claimed before it goes, so one whose confirmation has just
@@ -144,12 +158,10 @@ public sealed class BulkStore
         public bool TryStart() => Interlocked.CompareExchange(ref _state, Running, Waiting) == Waiting;
 
         /// <summary>
-        /// Claims the batch for eviction, unless a confirmation is running it: one waiting or done can go. Atomic with
-        /// <see cref="TryStart"/>, so the two can't both win.
+        /// Claims an unconfirmed batch for eviction; one being confirmed, or done with its result kept, stays. Atomic
+        /// with <see cref="TryStart"/>, so the two can't both win.
         /// </summary>
-        public bool TryEvict() =>
-            Interlocked.CompareExchange(ref _state, Evicted, Waiting) == Waiting ||
-            Interlocked.CompareExchange(ref _state, Evicted, Done) == Done;
+        public bool TryEvict() => Interlocked.CompareExchange(ref _state, Evicted, Waiting) == Waiting;
 
         public void Finish(JsonObject result, DateTimeOffset now)
         {
@@ -194,7 +206,8 @@ internal sealed record BulkItem(
 /// changes (state, assignee, priority, due date, title, the last update to the millisecond, the description when the
 /// read has it, and the tags). Two versions match only when both carry _ts and it is the same, and every field both
 /// carry is the same: _ts counts whole seconds, so the fields catch an edit in the same second as the preview. A
-/// version without _ts can't show that no comment came in between, so it never matches: that ticket is skipped. Tags
+/// version without _ts can't show that no comment came in between, so it never matches: that ticket is skipped (whole
+/// list rows don't carry _ts, so a preview reading them takes it from a selected read made first). Tags
 /// compare as a list, and by category too when both reads carry categories (the API often returns plain texts). A live
 /// check found list and full reads agree on every one of these.
 /// </summary>

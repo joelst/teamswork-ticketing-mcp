@@ -1263,7 +1263,7 @@
     {
       "name": "bulk_update",
       "title": "Apply a bulk update",
-      "description": "Apply a change previewed with preview_bulk_update, by its confirmToken alone, once the user has agreed. Tickets changed since the preview are skipped. Confirming the same token again returns the first result without changing anything.",
+      "description": "Apply a change previewed with preview_bulk_update, by its confirmToken alone, once the user has agreed. Tickets changed since the preview are skipped (each is re-read just before it is written; the API can't make the write itself conditional). Confirming the same token again returns the first result without changing anything.",
       "inputSchema": {
         "type": "object",
         "properties": {

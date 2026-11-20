@@ -71,6 +71,19 @@ internal static class TagEdits
         bool Removes((string Text, string? Category) r, TicketTag t) =>
             Same(r.Text, t.Text) && (r.Category is null || string.Equals(r.Category, t.TagCategoryId, StringComparison.Ordinal));
 
+        // Without a category, a text the ticket has in two categories names two tags; which one is meant isn't guessed.
+        foreach ((string text, _) in removals.Where(r => r.Category is null))
+        {
+            List<string> owners = current.Where(t => Same(text, t.Text))
+                .Select(t => t.TagCategoryId).Distinct(StringComparer.Ordinal).ToList();
+            if (owners.Count > 1)
+            {
+                throw new McpException(
+                    $"The ticket has '{text}' in more than one category ({string.Join(", ", owners.Select(id => categories.FirstOrDefault(c => c.Id == id)?.Text ?? id))}); " +
+                    "pass removeTags with its tagCategoryId to say which.");
+            }
+        }
+
         if (add.FirstOrDefault(a => removals.Any(r => Removes(r, a))) is TicketTag both)
         {
             throw new McpException($"'{both.Text}' is in both addTags and removeTags; pass it in one of them.");

@@ -225,7 +225,8 @@ public sealed class QueueTools
             List<(Ticket Ticket, Waiting.State? State, bool Attempted)> rows = Fine(
                     page.Select((t, i) => (t, states[i], attempted[i])).ToList(), order, now)
                 .Take(max).ToList();
-            int unknown = rows.Count(r => r.State is { WaitingOn: null });
+            int unknown = rows.Count(r => r.State is { WaitingOn: null, ResolutionUnknown: false });
+            int unresolvable = rows.Count(r => r.State is { WaitingOn: null, ResolutionUnknown: true });
             int unread = history ? rows.Count(r => !r.Attempted) : 0;
             string extrasNamed = string.Join(", ", new[] { "waitingOn", "idleDays", "lastPublic" }.Where(extras.Contains));
 
@@ -276,6 +277,9 @@ public sealed class QueueTools
                 failed > 0 ? $"{failed} rows have no waitingOn: their history couldn't be read (the API quota may be used up for now)." : null,
                 unknown > 0 && extras.Contains("waitingOn")
                     ? $"{unknown} rows have no waitingOn: none of their latest {Waiting.HistoryWindow} activities is a public reply, so who they wait on isn't known."
+                    : null,
+                unresolvable > 0 && extras.Contains("waitingOn")
+                    ? $"{unresolvable} rows have no waitingOn: their workflow doesn't say whether their state is resolved."
                     : null,
             ];
             if (string.Join(" ", hints.OfType<string>()) is { Length: > 0 } hint)

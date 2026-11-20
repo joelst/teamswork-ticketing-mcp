@@ -686,20 +686,30 @@ public sealed class QueueBriefBulkTests
     [Fact]
     public async Task A_custom_workflow_status_change_sends_the_state_id_read_from_whole_tickets()
     {
-        // isCustomWorkflow can't be selected, so a preview that changes status reads whole tickets to learn it.
-        string ticket = $$"""
-            {"id":"{{Id(1)}}","ticketNo":101,"title":"Custom","status":"st_7","isCustomWorkflow":true,"_ts":1,
-             "workflow":[{"id":"st_7","label":"Working","nextSteps":[{"targetId":"st_8"}]},{"id":"st_8","label":"Done","nextSteps":[]}]}
+        // isCustomWorkflow can't be selected, so a preview that changes status reads whole tickets to learn it. As on the
+        // live API, whole list rows have no _ts (a selected row and a read of one ticket do), so it is read first.
+        const string Fields = """
+            "ticketNo":101,"title":"Custom","status":"st_7","isCustomWorkflow":true,
+             "workflow":[{"id":"st_7","label":"Working","nextSteps":[{"targetId":"st_8"}]},{"id":"st_8","label":"Done","nextSteps":[]}]
             """;
+        string whole = $$"""{"id":"{{Id(1)}}",{{Fields}} }""";
+        string read = $$"""{"id":"{{Id(1)}}","_ts":1,{{Fields}} }""";
         var store = new BulkStore(Clock);
-        var preview = new Router(r => r.Path.EndsWith("/instance", StringComparison.Ordinal) ? InstanceJson : "{\"items\":[" + ticket + "],\"itemCount\":1}");
+        var preview = new Router(r =>
+            r.Path.EndsWith("/instance", StringComparison.Ordinal) ? InstanceJson
+            : TestFactory.Query(r.Uri).ContainsKey("select") ? $$"""{"items":[{"id":"{{Id(1)}}","_ts":1}],"itemCount":1}"""
+            : "{\"items\":[" + whole + "],\"itemCount\":1}");
         using JsonDocument doc = JsonDocument.Parse(await Bulk(preview, store).PreviewBulkUpdate(
             filter: new BulkFilter { TitlePattern = "Custom" }, set: new BulkChanges { Status = "Done" }, cancellationToken: Ct));
-        var confirm = new Router(r => "{\"item\":" + ticket + "}");
+        var confirm = new Router(r => "{\"item\":" + read + "}");
 
-        await Bulk(confirm, store).BulkUpdate(doc.RootElement.GetProperty("confirmToken").GetString()!, Ct);
+        using JsonDocument result = JsonDocument.Parse(await Bulk(confirm, store).BulkUpdate(doc.RootElement.GetProperty("confirmToken").GetString()!, Ct));
 
-        Assert.False(TestFactory.Query(preview.Requests.Single(r => r.Path.EndsWith("/tickets", StringComparison.Ordinal)).Uri).ContainsKey("select"));
+        List<CapturedRoute> lists = preview.Requests.Where(r => r.Path.EndsWith("/tickets", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, lists.Count);
+        Assert.StartsWith("id,_ts", TestFactory.Query(lists[0].Uri)["select"], StringComparison.Ordinal);   // _ts first
+        Assert.False(TestFactory.Query(lists[1].Uri).ContainsKey("select"));
+        Assert.Equal([101], result.RootElement.GetProperty("applied").EnumerateArray().Select(a => a.GetInt32()));
         Assert.Contains("\"status\":\"st_8\"", confirm.Requests.Single(r => r.Method == HttpMethod.Put).Body, StringComparison.Ordinal);
     }
 
@@ -1203,6 +1213,143 @@ public sealed class QueueBriefBulkTests
         using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new FixedActor(Jane), cache, options, Clock).GetQueue("team", include: ["counts"], cancellationToken: Ct));
 
         Assert.Equal(2, doc.RootElement.GetProperty("counts").GetProperty("byAssignee").EnumerateObject().Sum(p => p.Value.GetInt32()));
+    }
+
+    // ---- Review round 6 ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task A_whole_ticket_preview_blocks_a_ticket_whose_ts_wasnt_read_and_keeps_its_description()
+    {
+        string Whole(int n, string description) => $$"""{"id":"{{Id(n)}}","ticketNo":{{100 + n}},"title":"T{{n}}","status":"Open","description":"{{description}}"}""";
+        var store = new BulkStore(Clock);
+        var preview = new Router(r =>
+            r.Path.EndsWith("/instance", StringComparison.Ordinal) ? InstanceJson
+            : TestFactory.Query(r.Uri).ContainsKey("select") ? $$"""{"items":[{"id":"{{Id(1)}}","_ts":1}],"itemCount":1}"""   // ticket 2 came in after
+            : "{\"items\":[" + Whole(1, "before") + "," + Whole(2, "x") + "],\"itemCount\":2}");
+        using JsonDocument doc = JsonDocument.Parse(await Bulk(preview, store).PreviewBulkUpdate(
+            filter: new BulkFilter { TitlePattern = "T*" }, set: new BulkChanges { Status = "In Progress" }, cancellationToken: Ct));
+
+        JsonElement blocked = doc.RootElement.GetProperty("items").EnumerateArray().Single(i => i.TryGetProperty("blocked", out _));
+        Assert.Equal(102, blocked.GetProperty("ticketNo").GetInt32());
+
+        // The description was edited, in the same second and without moving lastUpdatedOn: the preview kept its hash.
+        var confirm = new Router(r => "{\"item\":" + $$"""{"id":"{{Id(1)}}","ticketNo":101,"title":"T1","status":"Open","description":"after","_ts":1}""" + "}");
+        using JsonDocument result = JsonDocument.Parse(await Bulk(confirm, store).BulkUpdate(doc.RootElement.GetProperty("confirmToken").GetString()!, Ct));
+
+        Assert.Equal("changedSincePreview", result.RootElement.GetProperty("skipped")[0].GetProperty("reason").GetString());
+        Assert.DoesNotContain(confirm.Requests, r => r.Method == HttpMethod.Put);
+    }
+
+    [Fact]
+    public void Finished_batches_keep_their_place_until_their_result_lapses_and_a_full_store_refuses_previews()
+    {
+        var clock = new MovableTime(Now);
+        var store = new BulkStore(clock);
+        BulkPlan plan = new(null, null, null, "Urgent", null, null, false, null);
+        BulkStore.Batch Batch() => new("caller", clock.GetUtcNow() + BulkStore.Lifetime, "b", plan, []);
+        var done = Enumerable.Range(0, BulkStore.MaxBatchesPerOwner).Select(_ => Batch()).ToList();
+        List<string> tokens = done.Select(b => store.Add(b)).ToList();
+        done.ForEach(b => { Assert.True(b.TryStart()); b.Finish(new JsonObject(), clock.GetUtcNow()); });
+
+        Assert.Throws<McpException>(() => store.Add(Batch()));            // no unconfirmed batch to make room with
+        Assert.All(tokens, t => Assert.NotNull(store.Find(t)));            // every result can still be had
+        Assert.NotNull(store.Find(store.Add(Batch(), resume: true)));      // the rest of a confirmed batch is always kept
+
+        clock.Advance(BulkStore.Lifetime + TimeSpan.FromSeconds(1));
+        Assert.NotNull(store.Find(store.Add(Batch())));                    // results lapsed: room again
+    }
+
+    [Fact]
+    public async Task An_unexpected_failure_finishes_the_batch_so_a_retry_isnt_told_it_is_still_running()
+    {
+        var store = new BulkStore(Clock);
+        string token = await PreviewWeeklyAsync(store);
+        var confirm = new Router(_ => throw new InvalidOperationException("unexpected"));
+
+        await Assert.ThrowsAnyAsync<Exception>(() => Bulk(confirm, store).BulkUpdate(token, Ct));
+        using JsonDocument retry = JsonDocument.Parse(await Bulk(confirm, store).BulkUpdate(token, Ct));
+
+        Assert.False(retry.RootElement.GetProperty("ok").GetBoolean());
+    }
+
+    [Fact]
+    public void Removing_a_tag_the_ticket_has_in_two_categories_needs_the_category()
+    {
+        List<TicketTag> current = [new("net", "VPN"), new("prod", "VPN")];
+        List<TagCategory> categories = Parse<ListResponse<TagCategory>>("""{"items":[{"id":"net","text":"Network"},{"id":"prod","text":"Products"}]}""").Items!.ToList();
+
+        McpException ex = Assert.Throws<McpException>(() => TagEdits.Apply(current, [], [new TagRef { Text = "vpn" }], categories));
+        (List<TicketTag> tags, _) = TagEdits.Apply(current, [], [new TagRef { Text = "VPN", TagCategoryId = "Products" }], categories);
+
+        Assert.Contains("Network, Products", ex.Message, StringComparison.Ordinal);
+        Assert.Equal([new TicketTag("net", "VPN")], tags);
+    }
+
+    [Fact]
+    public void Full_text_keeps_its_indentation_and_its_quoted_reply_note_points_where_to_get_it()
+    {
+        Activity a = Parse<Activity>("""{"id":"a","action":"commented","comment":"    indented code\n    more","createdOn":"2026-11-18T12:00:00Z"}""");
+
+        Assert.Equal("    indented code\n    more", TicketViews.Activity(a, includeHtml: false, TicketViews.FullTextChars)["text"]!.GetValue<string>());
+        Assert.Equal("indented code\n    more", TicketViews.Activity(a, includeHtml: false)["text"]!.GetValue<string>());
+        Assert.EndsWith("[quoted reply cut; list_ticket_activities with maxChars=20000 has it]",
+            TicketViews.StripQuoted("Thanks.\r\nFrom: Pat\r\nSent: Monday\r\nTo: Help desk\r\n\r\nOld text"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Someone_writing_from_a_staff_address_with_another_object_id_isnt_staff()
+    {
+        string staff = Guid.NewGuid().ToString(), stranger = Guid.NewGuid().ToString();
+        TicketPeople people = TicketPeople.From(null, TestFactory.Options()).WithAgents([new TicketUser(staff, "Jane", "jane@example.test")]);
+
+        Assert.True(people.IsAgent(new TicketUser(staff.ToUpperInvariant(), "Jane", "other@example.test")));
+        Assert.False(people.IsAgent(new TicketUser(stranger, "Someone", "jane@example.test")));
+        Assert.True(people.IsAgent(new TicketUser("", "Jane", "jane@example.test")));                       // no ID: the email decides
+        Assert.True(TicketPeople.From(null, TestFactory.Options()).WithAgents([new TicketUser("desk@example.test", "Desk", "desk@example.test")])
+            .IsAgent(new TicketUser(stranger, "Someone", "desk@example.test")));                        // an agent known by email alone
+    }
+
+    [Fact]
+    public void A_latest_person_activity_without_a_time_leaves_idle_days_unknown()
+    {
+        List<Activity> history = Parse<List<Activity>>($$"""[{"action":"commented","comment":"hi","user":{{Agent}},"createdOn":""}]""");
+
+        Assert.Null(Waiting.Compute(Ticket("In Progress"), history, People(), resolved: false, complete: true, Now).IdleDays);
+    }
+
+    [Theory]
+    [InlineData("Awaiting vendor support", "thirdParty")]
+    [InlineData("Waiting on external engineer", "thirdParty")]
+    [InlineData("Waiting on support", "assignee")]
+    [InlineData("Pending agent", "assignee")]
+    [InlineData("Waiting on customer", "requestor")]
+    public void Third_party_terms_decide_before_help_desk_ones(string state, string expected) =>
+        Assert.Equal(expected, Waiting.Compute(Ticket(state), [], People(), resolved: false, complete: true, Now).WaitingOn);
+
+    [Fact]
+    public void Unknown_resolution_is_said_as_the_reason_waiting_on_is_missing()
+    {
+        Ticket custom = Parse<Ticket>($$"""{"id":"t","status":"st_1","isCustomWorkflow":true,"requestor":{{Requestor}},"assignee":{{Agent}},"createdOn":"2026-11-10T09:00:00Z"}""");
+        List<Activity> reply = Parse<List<Activity>>($$"""[{"action":"commented","comment":"hi","user":{{Requestor}},"createdOn":"2026-11-18T12:00:00Z"}]""");
+
+        Waiting.State state = Waiting.Compute(custom, reply, People(), resolved: null, complete: true, Now);
+
+        Assert.Null(state.WaitingOn);
+        Assert.True(state.ResolutionUnknown);
+        Assert.False(Waiting.Compute(Ticket("In Progress"), [], People(), resolved: false, complete: false, Now).ResolutionUnknown);
+    }
+
+    [Fact]
+    public void A_state_label_beats_a_transition_with_the_same_label()
+    {
+        Ticket t = Parse<Ticket>("""
+            {"id":"t","status":"s_open","isCustomWorkflow":true,
+             "workflow":[{"id":"s_open","label":"Open","nextSteps":[{"targetId":"s_closed"},{"targetId":"s_resolved","transitionLabel":"Closed"}]},
+                         {"id":"s_closed","label":"Closed","nextSteps":[]},{"id":"s_resolved","label":"Resolved","nextSteps":[]}]}
+            """);
+
+        Assert.Equal("s_closed", WorkflowStatus.CheckTarget(t, "Closed", null));
+        Assert.Equal("s_resolved", WorkflowStatus.CheckTarget(t, "s_resolved", null));
     }
 
     // ---- Helpers -------------------------------------------------------------------------------------------------
