@@ -35,7 +35,7 @@ public sealed class ActivityTools
         [Description("Maximum activities (default 25, max 100).")] int? limit = null,
         [Description("From the previous page, to get older activity.")] string? continuationToken = null,
         [Description("Also return comment_HTML.")] bool includeHtml = false,
-        [Description("Characters of each activity's text to keep (default 600, up to 20000 for the whole text).")] int? maxChars = null,
+        [Description("Characters of each activity's text to keep (default 600; 20000 for the whole text, quoted email replies included).")] int? maxChars = null,
         CancellationToken cancellationToken = default)
     {
         return ToolRunner.RunAsync(async () =>
@@ -75,7 +75,8 @@ public sealed class ActivityTools
             ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);
             Guid id = await new TicketRefs(_client, _cache, _options).ResolveAsync(ticket, null, cancellationToken);
             CommentActivity created = await _client.AddCommentAsync(id, text, html, isPrivate, actor.ToTicketUser(), includeHtml: false, cancellationToken);
-            return TicketViews.Ack(created, actor, new Dictionary<string, object?> { ["comment"] = isPrivate ? "private note" : "public reply" });
+            _cache.Numbers.Remember(created.TicketNo, id);
+            return TicketViews.Ack(created, actor, id, new Dictionary<string, object?> { ["comment"] = isPrivate ? "private note" : "public reply" });
         });
     }
 }

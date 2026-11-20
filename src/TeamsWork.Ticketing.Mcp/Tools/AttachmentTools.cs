@@ -78,7 +78,8 @@ public sealed class AttachmentTools
             ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);
             Guid id = await new TicketRefs(_client, _cache, _options).ResolveAsync(ticket, timezoneOffset, cancellationToken);
             CommentActivity created = await _client.AddLinkAttachmentsAsync(id, attachmentLinks, text, html, isPrivate, actor.ToTicketUser(), includeHtml: false, timezoneOffset, cancellationToken);
-            return TicketViews.Ack(created, actor, new Dictionary<string, object?>
+            _cache.Numbers.Remember(created.TicketNo, id);
+            return TicketViews.Ack(created, actor, id, new Dictionary<string, object?>
             {
                 ["links"] = attachmentLinks.Count,
                 ["visibility"] = isPrivate ? "private" : "public",

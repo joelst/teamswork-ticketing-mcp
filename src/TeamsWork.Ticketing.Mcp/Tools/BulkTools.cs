@@ -193,11 +193,11 @@ public sealed partial class BulkTools
             {
                 // Unexpected here, since ApplyAsync reports each ticket's failure; the batch is spent either way, so a
                 // retry can't apply anything twice.
-                batch.Finish(new JsonObject { ["ok"] = false, ["batchId"] = batch.BatchId, ["error"] = "The batch stopped part way. Check the tickets with get_ticket_brief before previewing again." });
+                batch.Finish(new JsonObject { ["ok"] = false, ["batchId"] = batch.BatchId, ["error"] = "The batch stopped part way. Check the tickets with get_ticket_brief before previewing again." }, _store.Now);
                 throw;
             }
 
-            batch.Finish(result);
+            batch.Finish(result, _store.Now);
             return result;
         });
     }
@@ -239,7 +239,14 @@ public sealed partial class BulkTools
                     continue;
                 }
 
-                if (!item.Version.Matches(TicketVersion.Of(now)))
+                TicketVersion current = TicketVersion.Of(now);
+                if (!item.Version.Comparable(current))
+                {
+                    skipped.Add(new JsonObject { ["ticketNo"] = label.DeepClone(), ["reason"] = "can't confirm it's unchanged: the API sent no _ts" });
+                    continue;
+                }
+
+                if (!item.Version.Matches(current))
                 {
                     skipped.Add(new JsonObject { ["ticketNo"] = label.DeepClone(), ["reason"] = "changedSincePreview" });
                     continue;

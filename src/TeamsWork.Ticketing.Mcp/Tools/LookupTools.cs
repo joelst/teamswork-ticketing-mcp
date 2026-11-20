@@ -51,7 +51,7 @@ public sealed class LookupTools
     public Task<string> GetTicketBrief(
         [Description(TicketRefs.ParamText)] string ticket,
         [Description("Latest activities to include (default 5, max 50; 0 for the details alone).")] int? activities = null,
-        [Description("Characters of text to keep in each activity and the description (defaults 400 and 1000; up to 20000 for the whole text).")] int? maxChars = null,
+        [Description("Characters of text to keep in each activity and the description (defaults 400 and 1000; 20000 for the whole text, quoted email replies included).")] int? maxChars = null,
         [Description("Include private notes (default true).")] bool includePrivate = true,
         [Description("Include what automation rules did (default false).")] bool includeAutomation = false,
         [Description("Also return description_HTML and comment_HTML.")] bool includeHtml = false,

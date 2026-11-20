@@ -677,7 +677,8 @@ public sealed class QueueBriefBulkTests
         Ticket sameSecond = Parse<Ticket>("""{"id":"t","status":"In Progress","priority":"Medium","tags":["VPN"],"lastUpdatedOn":"2026-11-18T12:00:00Z","_ts":5}""");
         Ticket commented = Parse<Ticket>("""{"id":"t","status":"Open","priority":"Medium","tags":["VPN"],"lastUpdatedOn":"2026-11-18T12:00:00Z","_ts":9}""");
 
-        Assert.True(TicketVersion.Of(listed).Matches(TicketVersion.Of(read)));        // only one has _ts: the fields decide
+        Assert.False(TicketVersion.Of(listed).Comparable(TicketVersion.Of(read)));    // one without _ts can't show no comment came in
+        Assert.False(TicketVersion.Of(listed).Matches(TicketVersion.Of(read)));
         Assert.False(TicketVersion.Of(read).Matches(TicketVersion.Of(sameSecond)));   // changed in the same second: _ts alone would miss it
         Assert.False(TicketVersion.Of(read).Matches(TicketVersion.Of(commented)));    // a comment moves _ts only
     }
@@ -853,7 +854,7 @@ public sealed class QueueBriefBulkTests
 
         Assert.False(Of("""["Network,VPN"]""").Matches(Of("""["Network","VPN"]""")));
         Assert.False(Of("""[{"tagCategoryId":"net","text":"VPN"}]""").Matches(Of("""[{"tagCategoryId":"prod","text":"VPN"}]""")));
-        Assert.True(Of("""["VPN"]""").Matches(Of("""[{"tagCategoryId":"net","text":"VPN"}]""")));   // one read without categories: texts decide
+        Assert.True(Of("""["VPN"]""").Matches(Of("""[{"tagCategoryId":"net","text":"VPN"}]""")));   // one read without categories: texts decide (both have _ts)
     }
 
     [Fact]
@@ -1048,6 +1049,160 @@ public sealed class QueueBriefBulkTests
         using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new FixedActor(Jane), cache, options, Clock).GetQueue(include: ["waitingOn"], cancellationToken: Ct));
 
         Assert.Equal([1, 2], doc.RootElement.GetProperty("items").EnumerateArray().Select(i => i.GetProperty("ticketNo").GetInt32()));
+    }
+
+    // ---- Review round 4 ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void A_confirmation_outlives_the_deadline_and_its_result_stays_for_a_while()
+    {
+        var time = new MovableTime(Now);
+        var store = new BulkStore(time);
+        BulkPlan plan = new(null, null, null, "Urgent", null, null, false, null);
+        var running = new BulkStore.Batch("caller", Now + BulkStore.Lifetime, "b", plan, []);
+        var idle = new BulkStore.Batch("caller", Now + BulkStore.Lifetime, "c", plan, []);
+        string runningToken = store.Add(running), idleToken = store.Add(idle);
+        Assert.True(running.TryStart());
+
+        time.Advance(BulkStore.Lifetime + TimeSpan.FromMinutes(1));
+        Assert.Same(running, store.Find(runningToken));   // started before the deadline, still writing after it
+        Assert.Null(store.Find(idleToken));               // never confirmed: gone at the deadline
+        Assert.False(idle.TryStart());
+
+        running.Finish(new JsonObject { ["ok"] = true }, time.GetUtcNow());
+        time.Advance(BulkStore.Lifetime - TimeSpan.FromMinutes(1));
+        Assert.Same(running, store.Find(runningToken));   // its result can still be read
+        time.Advance(TimeSpan.FromMinutes(2));
+        Assert.Null(store.Find(runningToken));
+    }
+
+    [Fact]
+    public async Task Previews_racing_each_other_dont_get_past_the_per_caller_cap()
+    {
+        var store = new BulkStore(Clock);
+        BulkPlan plan = new(null, null, null, "Urgent", null, null, false, null);
+
+        string[] tokens = await Task.WhenAll(Enumerable.Range(0, 200).Select(_ => Task.Run(() =>
+            store.Add(new BulkStore.Batch("caller", Now + BulkStore.Lifetime, "b", plan, [])), Ct)));
+
+        Assert.Equal(BulkStore.MaxBatchesPerOwner, tokens.Count(t => store.Find(t) is not null));
+    }
+
+    [Fact]
+    public void A_same_second_rename_or_new_description_is_a_change()
+    {
+        TicketVersion Of(string extra) => TicketVersion.Of(Parse<Ticket>($$"""{"id":"t","status":"Open","_ts":5,"lastUpdatedOn":"2026-11-18T12:00:00.100Z"{{extra}} }"""));
+
+        Assert.False(Of(""","title":"Weekly check: backups" """).Matches(Of(""","title":"Backups (moved)" """)));
+        Assert.False(Of(""","description":"old" """).Matches(Of(""","description":"new" """)));
+        Assert.True(Of("").Matches(Of(""","description":"only one read has it" """)));   // a list row carries none
+        Assert.False(Of("").Matches(TicketVersion.Of(Parse<Ticket>("""{"id":"t","status":"Open","_ts":5,"lastUpdatedOn":"2026-11-18T12:00:00.900Z"}"""))));
+    }
+
+    [Fact]
+    public void A_note_with_from_and_to_lines_isnt_cut_as_a_quoted_email()
+    {
+        const string Note = "Network route:\nFrom: 10.1.1.1\nTo: 10.2.2.2\nPort: 443";
+
+        Assert.Equal(Note, TicketViews.StripQuoted(Note));
+    }
+
+    [Fact]
+    public void The_whole_text_keeps_the_quoted_reply()
+    {
+        var a = new Activity { Id = "a", Comment = "Thanks.\nFrom: Pat <pat@example.test>\nSent: Monday\nold message" };
+
+        Assert.EndsWith("old message", TicketViews.Activity(a, includeHtml: false, TicketViews.FullTextChars)["text"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Contains("quoted reply cut", TicketViews.Activity(a, includeHtml: false)["text"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_default_ticket_takes_the_graph_with_its_state_id_over_one_that_only_shares_the_label()
+    {
+        JsonElement graphs = Parse<JsonElement>("""
+            {"ticket":[{"nodes":[{"id":"Open","type":"textFieldNode","data":{"label":"Open"}},{"id":"Resolved","type":"textFieldNode","data":{"label":"Resolved"}}],
+                        "edges":[{"id":"e1","source":"Open","target":"Resolved"}]},
+                       {"nodes":[{"id":"c-open","type":"textFieldNode","data":{"label":"Open"}},{"id":"c-done","type":"textFieldNode","data":{"label":"Done"}}],
+                        "edges":[{"id":"e2","source":"c-open","target":"c-done"}]}]}
+            """);
+
+        IReadOnlyList<WorkflowStatus.NextStatus>? next = WorkflowStatus.AllowedNext(Parse<Ticket>("""{"id":"t","status":"Open"}"""), graphs);
+
+        Assert.Equal(["Resolved"], next!.Select(n => n.Status));
+    }
+
+    [Theory]
+    [InlineData("Waiting on assignee", "assignee")]
+    [InlineData("Pending agent", "assignee")]
+    [InlineData("Waiting on customer", "requestor")]
+    public void A_waiting_state_that_names_the_help_desk_waits_on_the_assignee(string status, string waitingOn)
+    {
+        Assert.Equal(waitingOn, Waiting.Compute(Ticket(status), [], People(), resolved: false, complete: true, Now).WaitingOn);
+    }
+
+    [Fact]
+    public void A_custom_state_labelled_closed_doesnt_settle_an_unstated_resolution()
+    {
+        Ticket t = Parse<Ticket>($$"""{"id":"t","status":"st_9","isCustomWorkflow":true,"requestor":{{Requestor}},"assignee":{{Agent}}}""");
+
+        Assert.Null(Waiting.Compute(t, [], People(), resolved: null, complete: true, Now, statusLabel: "Closed").WaitingOn);
+    }
+
+    [Fact]
+    public void A_write_answered_with_only_an_activity_id_still_names_the_ticket()
+    {
+        Guid ticket = Guid.Parse(Id(7));
+
+        TicketViews.WriteAck ack = TicketViews.Ack(new CommentActivity { ActivityId = "act-1" }, Jane, ticket);
+
+        Assert.Equal((Id(7), "act-1"), (ack.Id, ack.ActivityId));
+    }
+
+    [Fact]
+    public async Task Returned_rows_whose_history_wasnt_read_are_said_so()
+    {
+        string tickets = Rows(30, _ => ",\"createdOn\":\"2026-11-01T00:00:00Z\"");
+        var handler = new Router(r => r.Path switch
+        {
+            var p when p.EndsWith("/instance", StringComparison.Ordinal) => InstanceJson,
+            var p when p.EndsWith("/tickets", StringComparison.Ordinal) => tickets,
+            _ => """{"items":[]}""",
+        });
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(handler);
+
+        using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new FixedActor(Jane), cache, options, Clock)
+            .GetQueue(include: ["waitingOn", "idleDays"], sort: "oldest", limit: 30, cancellationToken: Ct));
+
+        Assert.Contains("5 rows have no waitingOn, idleDays", doc.RootElement.GetProperty("hint").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Each_ranking_input_a_lean_include_leaves_out_is_said()
+    {
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(new Router(r =>
+            r.Path.EndsWith("/instance", StringComparison.Ordinal) ? NewToolsTests.SlaOnInstanceJson : Rows(1, _ => "")));
+        var queue = new QueueTools(client, new FixedActor(Jane), cache, options, Clock);
+
+        using JsonDocument idle = JsonDocument.Parse(await queue.GetQueue(include: [], sort: "idle", cancellationToken: Ct));
+        using JsonDocument urgency = JsonDocument.Parse(await queue.GetQueue(include: ["counts"], cancellationToken: Ct));
+
+        Assert.Contains("include idleDays", idle.RootElement.GetProperty("hint").GetString(), StringComparison.Ordinal);
+        string hint = urgency.RootElement.GetProperty("hint").GetString()!;
+        Assert.Contains("include sla", hint, StringComparison.Ordinal);
+        Assert.Contains("include waitingOn", hint, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Two_assignees_with_one_name_and_no_email_are_counted_apart()
+    {
+        string tickets = "{\"items\":[" +
+            $$"""{"id":"{{Id(1)}}","ticketNo":1,"title":"A","assignee":{"id":"x1","name":"Sam","email":""} },""" +
+            $$"""{"id":"{{Id(2)}}","ticketNo":2,"title":"B","assignee":{"id":"x2","name":"Sam","email":""} }""" + "],\"itemCount\":2}";
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(new Router(_ => tickets));
+
+        using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new FixedActor(Jane), cache, options, Clock).GetQueue("team", include: ["counts"], cancellationToken: Ct));
+
+        Assert.Equal(2, doc.RootElement.GetProperty("counts").GetProperty("byAssignee").EnumerateObject().Sum(p => p.Value.GetInt32()));
     }
 
     // ---- Helpers -------------------------------------------------------------------------------------------------

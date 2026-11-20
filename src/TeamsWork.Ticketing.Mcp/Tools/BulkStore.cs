@@ -9,9 +9,11 @@ namespace TeamsWork.Ticketing.Mcp.Tools;
 
 /// <summary>
 /// Previewed bulk changes waiting for confirmation, keyed by an unguessable token. A token belongs to the caller who
-/// previewed it, lasts <see cref="Lifetime"/>, and is used once: confirming it again returns what the first confirmation
-/// did rather than doing it twice. Held in memory, which suits the single replica the server runs as; a restart loses
-/// pending tokens, and the caller previews again.
+/// previewed it, must be confirmed within <see cref="Lifetime"/>, and is used once: confirming it again returns what the
+/// first confirmation did rather than doing it twice. A confirmation under way is kept until it finishes, however late
+/// it started, and its result for <see cref="Lifetime"/> after, so a caller whose answer was lost can still read it.
+/// Held in memory, which suits the single replica the server runs as; a restart loses pending tokens, and the caller
+/// previews again. Adding, evicting and expiring take one lock, so two previews can't both slip under a cap.
 /// </summary>
 public sealed class BulkStore
 {
@@ -23,6 +25,7 @@ public sealed class BulkStore
     private const int MaxBatches = 5000;
 
     private readonly ConcurrentDictionary<string, Batch> _batches = new(StringComparer.Ordinal);
+    private readonly object _gate = new();
     private readonly TimeProvider _time;
 
     public BulkStore(TimeProvider? time = null) => _time = time ?? TimeProvider.System;
@@ -32,22 +35,28 @@ public sealed class BulkStore
     /// <summary>Stores a batch and returns its token.</summary>
     internal string Add(Batch batch)
     {
-        Sweep();
+        lock (_gate)
+        {
+            Sweep();
 
-        // The oldest go first, as the likeliest to have been abandoned; a batch being applied is never dropped.
-        Evict(_batches.Where(b => b.Value.Owner == batch.Owner).ToList(), MaxBatchesPerOwner);
-        Evict(_batches.ToList(), MaxBatches);
+            // The oldest go first, as the likeliest to have been abandoned; a batch being applied is never dropped.
+            Evict(_batches.Where(b => b.Value.Owner == batch.Owner).ToList(), MaxBatchesPerOwner);
+            Evict(_batches.ToList(), MaxBatches);
 
-        string token = NewToken();
-        _batches[token] = batch;
-        return token;
+            string token = NewToken();
+            _batches[token] = batch;
+            return token;
+        }
     }
 
-    /// <summary>The batch for a token, unless it has expired or never existed.</summary>
+    /// <summary>The batch for a token while it can still be confirmed, is being confirmed, or has a result to return.</summary>
     internal Batch? Find(string token)
     {
-        Sweep();
-        return _batches.TryGetValue(token, out Batch? batch) && batch.Expires > Now ? batch : null;
+        lock (_gate)
+        {
+            Sweep();
+            return _batches.TryGetValue(token, out Batch? batch) && batch.IsLive(Now) ? batch : null;
+        }
     }
 
     private void Evict(List<KeyValuePair<string, Batch>> batches, int max)
@@ -73,12 +82,14 @@ public sealed class BulkStore
         }
     }
 
+    // Under _gate. An unconfirmed batch past its deadline is claimed before it goes, so one whose confirmation has just
+    // started stays.
     private void Sweep()
     {
         DateTimeOffset now = Now;
         foreach (KeyValuePair<string, Batch> b in _batches)
         {
-            if (b.Value.Expires <= now)
+            if (!b.Value.IsLive(now) && (b.Value.IsDone || b.Value.IsEvicted || b.Value.TryEvict()))
             {
                 _batches.TryRemove(b.Key, out _);
             }
@@ -111,6 +122,20 @@ public sealed class BulkStore
 
         public JsonObject? Result { get; private set; }
 
+        private DateTimeOffset? _finished;
+
+        /// <summary>
+        /// Whether the token still means something: an unconfirmed batch until its deadline, one being confirmed until
+        /// that finishes, and a finished one's result for <see cref="Lifetime"/> after.
+        /// </summary>
+        public bool IsLive(DateTimeOffset now) => Volatile.Read(ref _state) switch
+        {
+            Waiting => Expires > now,
+            Running => true,
+            Done => _finished is DateTimeOffset at && at + Lifetime > now,
+            _ => false,
+        };
+
         public bool IsDone => Volatile.Read(ref _state) == Done;
 
         public bool IsEvicted => Volatile.Read(ref _state) == Evicted;
@@ -126,9 +151,10 @@ public sealed class BulkStore
             Interlocked.CompareExchange(ref _state, Evicted, Waiting) == Waiting ||
             Interlocked.CompareExchange(ref _state, Evicted, Done) == Done;
 
-        public void Finish(JsonObject result)
+        public void Finish(JsonObject result, DateTimeOffset now)
         {
             Result = result;
+            _finished = now;
             Volatile.Write(ref _state, Done);
         }
     }
@@ -164,26 +190,33 @@ internal sealed record BulkItem(
     bool ChangesExpectedDate);
 
 /// <summary>
-/// How a ticket stood when read: its _ts, which moves with every change and comment, and the fields a batch changes with
-/// the last update time. Two versions match when the fields do and, if both have _ts, it does too: _ts counts whole
-/// seconds, so a change in the same second as the preview keeps it but still changes the fields. (A comment in that same
-/// second changes neither, and would need a finer revision than the API offers.) Tags are compared as a list, and by
-/// category too when both reads carry categories; the API often returns plain tag texts, which compare by text.
+/// How a ticket stood when read: its _ts, which moves with every change and comment, and the fields a batch reads or
+/// changes (state, assignee, priority, due date, title, the last update to the millisecond, the description when the
+/// read has it, and the tags). Two versions match only when both carry _ts and it is the same, and every field both
+/// carry is the same: _ts counts whole seconds, so the fields catch an edit in the same second as the preview. A
+/// version without _ts can't show that no comment came in between, so it never matches: that ticket is skipped. Tags
+/// compare as a list, and by category too when both reads carry categories (the API often returns plain texts). A live
+/// check found list and full reads agree on every one of these.
 /// </summary>
-internal sealed record TicketVersion(long? Ts, string Fields, string TagTexts, string? TagKeys)
+internal sealed record TicketVersion(long? Ts, string Fields, string? Description, string TagTexts, string? TagKeys)
 {
     public static TicketVersion Of(Ticket t)
     {
         List<(string? Category, string Text)> tags = TagsOf(t.Tags);
         return new(
             t.Ts,
-            string.Join('|',
+            JsonSerializer.Serialize(new[]
+            {
                 t.Status?.Trim(),
                 t.Assignee?.Id?.Trim().ToLowerInvariant(),
                 t.Assignee?.Email?.Trim().ToLowerInvariant(),
                 TicketViews.Priority(t.Priority),
                 t.ExpectedDate?.Trim(),
-                TicketViews.Time(t.LastUpdatedOn)),
+                t.Title?.Trim(),
+                Waiting.Parse(t.LastUpdatedOn)?.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? t.LastUpdatedOn,
+            }),
+            // A selected list row has no description; a whole ticket does. Compared when both reads have one.
+            t.Description is string text ? Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text))) : null,
             // Serialized lists, not joined text, so one tag "Network,VPN" isn't two tags "Network" and "VPN".
             JsonSerializer.Serialize(tags.Select(x => x.Text.ToLowerInvariant()).Order(StringComparer.Ordinal)),
             tags.All(x => x.Category is not null)
@@ -191,12 +224,15 @@ internal sealed record TicketVersion(long? Ts, string Fields, string TagTexts, s
                 : null);
     }
 
-    public bool Matches(TicketVersion other) =>
-        string.Equals(Fields, other.Fields, StringComparison.Ordinal) &&
-        string.Equals(TagTexts, other.TagTexts, StringComparison.Ordinal) &&
-        (TagKeys is null || other.TagKeys is null || string.Equals(TagKeys, other.TagKeys, StringComparison.Ordinal)) &&
-        (Ts is not long mine || other.Ts is not long theirs || mine == theirs);
+    /// <summary>Whether both reads carry _ts, without which nothing shows that no comment came in between.</summary>
+    public bool Comparable(TicketVersion other) => Ts is not null && other.Ts is not null;
 
+    public bool Matches(TicketVersion other) =>
+        Comparable(other) && Ts == other.Ts &&
+        string.Equals(Fields, other.Fields, StringComparison.Ordinal) &&
+        (Description is null || other.Description is null || string.Equals(Description, other.Description, StringComparison.Ordinal)) &&
+        string.Equals(TagTexts, other.TagTexts, StringComparison.Ordinal) &&
+        (TagKeys is null || other.TagKeys is null || string.Equals(TagKeys, other.TagKeys, StringComparison.Ordinal));
     /// <summary>A ticket's tags in either shape the API uses: plain texts, or {tagCategoryId, text}.</summary>
     private static List<(string? Category, string Text)> TagsOf(JsonElement? tags)
     {

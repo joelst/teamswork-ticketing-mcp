@@ -26,6 +26,20 @@ public sealed class TicketNumbers
         }
     }
 
+    /// <summary>A number and the UUID it was resolved to, from a write's answer that names the ticket by number only.</summary>
+    public void Remember(int? number, Guid id)
+    {
+        if (number is int n && id != Guid.Empty)
+        {
+            if (_ids.Count >= Capacity)
+            {
+                _ids.Clear();
+            }
+
+            _ids[n] = id;
+        }
+    }
+
     public void Remember(IEnumerable<Ticket>? tickets)
     {
         foreach (Ticket ticket in tickets ?? [])

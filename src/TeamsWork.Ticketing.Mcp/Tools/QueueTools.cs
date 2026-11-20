@@ -179,6 +179,7 @@ public sealed class QueueTools
             int candidates = rankedByHistory ? Math.Max(max, Math.Min(HistoryBudget, scan.Matches.Count)) : max;
             List<Ticket> page = Coarse(scan.Matches, order, resolvedSince).Take(candidates).ToList();
             var states = new Waiting.State?[page.Count];
+            var attempted = new bool[page.Count];
             int read = 0, failed = 0;
             if (history && page.Count > 0)
             {
@@ -200,6 +201,7 @@ public sealed class QueueTools
                 await Task.WhenAll(Enumerable.Range(0, read).Select(async i =>
                 {
                     await gate.WaitAsync(cancellationToken);
+                    attempted[i] = true;
                     try
                     {
                         if (Guid.TryParse(page[i].Id, out Guid id))
@@ -220,8 +222,12 @@ public sealed class QueueTools
                 }));
             }
 
-            List<(Ticket Ticket, Waiting.State? State)> rows = Fine(page.Zip(states).ToList(), order, now).Take(max).ToList();
+            List<(Ticket Ticket, Waiting.State? State, bool Attempted)> rows = Fine(
+                    page.Select((t, i) => (t, states[i], attempted[i])).ToList(), order, now)
+                .Take(max).ToList();
             int unknown = rows.Count(r => r.State is { WaitingOn: null });
+            int unread = history ? rows.Count(r => !r.Attempted) : 0;
+            string extrasNamed = string.Join(", ", new[] { "waitingOn", "idleDays", "lastPublic" }.Where(extras.Contains));
 
             var result = new JsonObject { ["who"] = label };
             if (resolvedSince)
@@ -254,8 +260,18 @@ public sealed class QueueTools
                 rankedByHistory && scan.Matches.Count > read
                     ? $"Ranked with the history of {read} of the {scan.Matches.Count} matches, to stay within the API quota: those were picked by SLA, priority and last update, so a ticket outside them waiting on its assignee can rank too low."
                     : null,
-                order == "urgency" && !rankedByHistory && !resolvedSince
-                    ? "Ranked by " + (wholeTickets ? "SLA, " : "") + "priority and last update only: include waitingOn" + (wholeTickets ? "" : " and sla") + " (the default) to rank tickets waiting on their assignee first."
+                unread > 0
+                    ? $"{unread} rows have no {extrasNamed}: only {HistoryBudget} histories are read per call; lower 'limit' to get them for every row."
+                    : null,
+                // Each input a ranking goes without is said, so a lean 'include' isn't taken for the full order.
+                order == "urgency" && !resolvedSince && !wholeTickets && slaOn != false
+                    ? "SLA breaches aren't ranked first: include sla (a default) for that."
+                    : null,
+                order == "urgency" && !resolvedSince && !rankedByHistory
+                    ? "Tickets waiting on their assignee aren't ranked ahead of the rest: include waitingOn (a default) for that."
+                    : null,
+                order == "idle" && !history
+                    ? "Ranked by the last update, which automation also moves: include idleDays to rank by the last thing a person did."
                     : null,
                 failed > 0 ? $"{failed} rows have no waitingOn: their history couldn't be read (the API quota may be used up for now)." : null,
                 unknown > 0 && extras.Contains("waitingOn")
@@ -362,9 +378,9 @@ public sealed class QueueTools
     /// then tickets waiting on their assignee, longest waiting first (since the reply they wait after, which a private note
     /// doesn't move), then the rest, idlest first; for idle, by days idle.
     /// </summary>
-    private static List<(Ticket Ticket, Waiting.State? State)> Fine(List<(Ticket Ticket, Waiting.State? State)> rows, string order, DateTimeOffset now)
+    private static List<(Ticket Ticket, Waiting.State? State, bool Attempted)> Fine(List<(Ticket Ticket, Waiting.State? State, bool Attempted)> rows, string order, DateTimeOffset now)
     {
-        double Idle((Ticket Ticket, Waiting.State? State) r) =>
+        double Idle((Ticket Ticket, Waiting.State? State, bool Attempted) r) =>
             r.State?.IdleDays ?? (Waiting.Parse(r.Ticket.LastUpdatedOn) is DateTimeOffset u ? (now - u).TotalDays : 0);
 
         return order switch
@@ -422,7 +438,11 @@ public sealed class QueueTools
                      .GroupBy(t => Blank(t.Assignee?.Email) ?? Blank(t.Assignee?.Id)!, StringComparer.OrdinalIgnoreCase)
                      .OrderByDescending(g => g.Count()))
         {
-            byAssignee[TicketViews.Person(g.First().Assignee) ?? g.Key] = g.Count();
+            TicketUser? who = g.First().Assignee;
+            string key = Blank(who?.Email) is not null ? TicketViews.Person(who)!
+                : Blank(who?.Name) is string name ? $"{name} (ID {g.Key})"
+                : g.Key;
+            byAssignee[byAssignee.ContainsKey(key) ? $"{key} (ID {g.Key})" : key] = g.Count();
         }
 
         return new JsonObject

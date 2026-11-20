@@ -245,10 +245,12 @@ internal static class WorkflowStatus
             return null;
         }
 
-        List<List<WorkflowState>> candidates = GraphsIn(root)
-            .Select(GraphStates)
-            .Where(states => Current(states, ticket.Status) is not null)
-            .ToList();
+        // A graph with a state of that ID is the ticket's before one with only a state of that label: a default ticket's
+        // "Open" is the default graph's, even when a custom graph labels one of its states Open. Two exact matches, or
+        // none and two by label, leave it unknown.
+        List<List<WorkflowState>> graphs = GraphsIn(root).Select(GraphStates).ToList();
+        List<List<WorkflowState>> byId = graphs.Where(states => states.Any(s => Same(s.Id, ticket.Status))).ToList();
+        List<List<WorkflowState>> candidates = byId.Count > 0 ? byId : graphs.Where(states => Current(states, ticket.Status) is not null).ToList();
         return candidates is [List<WorkflowState> only] ? only : null;
     }
 

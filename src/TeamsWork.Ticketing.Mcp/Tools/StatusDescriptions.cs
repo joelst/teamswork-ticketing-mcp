@@ -67,6 +67,12 @@ internal static class StatusDescriptions
             // Only the wait ended: the shared read carries on and fills the cache, so the next listing has the states.
             return null;
         }
+        catch (TicketingApiException ex) when (ex.IsRateLimited && !cancellationToken.IsCancellationRequested)
+        {
+            // One caller's used-up share (or a moment's rate limit) isn't the API failing: no back-off, which every caller
+            // would share, so the next listing tries again.
+            return null;
+        }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested && ex is not OutOfMemoryException)
         {
             Interlocked.Exchange(ref _retryAfterTicks, DateTime.UtcNow.Add(RetryAfterFailure).Ticks);

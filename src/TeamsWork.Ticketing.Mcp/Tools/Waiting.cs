@@ -171,12 +171,13 @@ internal static partial class Waiting
         Activity? lastReply = history.FirstOrDefault(a => IsByPerson(a, people) && a.IsPrivate != true && !string.IsNullOrWhiteSpace(a.Comment));
         Reply? reply = lastReply is null ? null : new Reply(Side(lastReply.Author, t, people), Parse(lastReply.When), lastReply.Comment);
 
-        // Unsaid, a default workflow's state still tells (Resolved and Closed are resolved, the others aren't); a custom
-        // state's doesn't, and then who it waits on is left unknown rather than taken for an open ticket's.
-        string? label = Blank(statusLabel ?? t.Status);
-        bool? isResolved = resolved ?? (label is null ? null
-            : DefaultResolved.Contains(label) ? true
-            : WorkflowStatus.DefaultStates.Contains(label, StringComparer.OrdinalIgnoreCase) ? false
+        // Unsaid, a default workflow's state still tells (Resolved and Closed are resolved, the others aren't), by the
+        // ticket's own status; a custom workflow's doesn't, whatever its state is labelled, and then who it waits on is
+        // left unknown rather than taken for an open ticket's.
+        string? raw = t.IsCustomWorkflow == true ? null : Blank(t.Status);
+        bool? isResolved = resolved ?? (raw is null ? null
+            : DefaultResolved.Contains(raw) ? true
+            : WorkflowStatus.DefaultStates.Contains(raw, StringComparer.OrdinalIgnoreCase) ? false
             : null);
         if (isResolved == true)
         {
@@ -188,9 +189,12 @@ internal static partial class Waiting
             return new State(null, null, idle, reply);
         }
 
+        // A state named for waiting says on whom: the help desk itself ("Waiting on assignee", "Pending agent"), someone
+        // outside ("Awaiting vendor"), or otherwise the requestor ("Waiting on customer").
         if (Blank(statusLabel ?? t.Status) is string status && WaitingState().IsMatch(status))
         {
-            return new State(ThirdPartyState().IsMatch(status) ? ThirdParty : Requestor, null, idle, reply);
+            string on = AssigneeState().IsMatch(status) ? Assignee : ThirdPartyState().IsMatch(status) ? ThirdParty : Requestor;
+            return new State(on, null, idle, reply);
         }
 
         if (reply is null)
@@ -229,4 +233,7 @@ internal static partial class Waiting
 
     [GeneratedRegex(@"\b(vendor|supplier|third[- ]?party|partner|external)\b", RegexOptions.IgnoreCase)]
     private static partial Regex ThirdPartyState();
+
+    [GeneratedRegex(@"\b(assignee|agent|technician|engineer|staff|support|internal)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex AssigneeState();
 }
