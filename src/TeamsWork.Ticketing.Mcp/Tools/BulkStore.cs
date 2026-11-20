@@ -1,6 +1,7 @@
 using System.Buffers.Text;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using TeamsWork.Ticketing.Mcp.Ticketing.Models;
 
@@ -52,9 +53,23 @@ public sealed class BulkStore
     private void Evict(List<KeyValuePair<string, Batch>> batches, int max)
     {
         int over = batches.Count - max + 1;
-        foreach (KeyValuePair<string, Batch> old in batches.Where(b => !b.Value.IsRunning).OrderBy(b => b.Value.Expires).Take(Math.Max(0, over)))
+        if (over <= 0)
         {
-            _batches.TryRemove(old.Key, out _);
+            return;
+        }
+
+        foreach (KeyValuePair<string, Batch> old in batches.OrderBy(b => b.Value.Expires))
+        {
+            if (over == 0)
+            {
+                break;
+            }
+
+            if (old.Value.TryEvict())
+            {
+                _batches.TryRemove(old.Key, out _);
+                over--;
+            }
         }
     }
 
@@ -81,7 +96,8 @@ public sealed class BulkStore
     /// </summary>
     internal sealed class Batch(string owner, DateTimeOffset expires, string batchId, BulkPlan plan, IReadOnlyList<BulkItem> items)
     {
-        private int _state; // 0 waiting, 1 running, 2 done
+        private const int Waiting = 0, Running = 1, Done = 2, Evicted = 3;
+        private int _state = Waiting;
 
         public string Owner { get; } = owner;
 
@@ -95,16 +111,25 @@ public sealed class BulkStore
 
         public JsonObject? Result { get; private set; }
 
-        public bool IsDone => Volatile.Read(ref _state) == 2;
+        public bool IsDone => Volatile.Read(ref _state) == Done;
 
-        public bool IsRunning => Volatile.Read(ref _state) == 1;
+        public bool IsEvicted => Volatile.Read(ref _state) == Evicted;
 
-        public bool TryStart() => Interlocked.CompareExchange(ref _state, 1, 0) == 0;
+        /// <summary>Claims the batch for one confirmation; false once another has it, or it has been evicted.</summary>
+        public bool TryStart() => Interlocked.CompareExchange(ref _state, Running, Waiting) == Waiting;
+
+        /// <summary>
+        /// Claims the batch for eviction, unless a confirmation is running it: one waiting or done can go. Atomic with
+        /// <see cref="TryStart"/>, so the two can't both win.
+        /// </summary>
+        public bool TryEvict() =>
+            Interlocked.CompareExchange(ref _state, Evicted, Waiting) == Waiting ||
+            Interlocked.CompareExchange(ref _state, Evicted, Done) == Done;
 
         public void Finish(JsonObject result)
         {
             Result = result;
-            Volatile.Write(ref _state, 2);
+            Volatile.Write(ref _state, Done);
         }
     }
 }
@@ -142,20 +167,61 @@ internal sealed record BulkItem(
 /// How a ticket stood when read: its _ts, which moves with every change and comment, and the fields a batch changes with
 /// the last update time. Two versions match when the fields do and, if both have _ts, it does too: _ts counts whole
 /// seconds, so a change in the same second as the preview keeps it but still changes the fields. (A comment in that same
-/// second changes neither, and would need a finer revision than the API offers.)
+/// second changes neither, and would need a finer revision than the API offers.) Tags are compared as a list, and by
+/// category too when both reads carry categories; the API often returns plain tag texts, which compare by text.
 /// </summary>
-internal sealed record TicketVersion(long? Ts, string Fields)
+internal sealed record TicketVersion(long? Ts, string Fields, string TagTexts, string? TagKeys)
 {
-    public static TicketVersion Of(Ticket t) =>
-        new(t.Ts, string.Join('|',
-            t.Status?.Trim(),
-            t.Assignee?.Id?.Trim().ToLowerInvariant(),
-            t.Assignee?.Email?.Trim().ToLowerInvariant(),
-            TicketViews.Priority(t.Priority),
-            t.ExpectedDate?.Trim(),
-            string.Join(',', (TicketViews.Tags(t.Tags) ?? []).Select(x => x?.GetValue<string>().ToLowerInvariant()).Order(StringComparer.Ordinal)),
-            TicketViews.Time(t.LastUpdatedOn)));
+    public static TicketVersion Of(Ticket t)
+    {
+        List<(string? Category, string Text)> tags = TagsOf(t.Tags);
+        return new(
+            t.Ts,
+            string.Join('|',
+                t.Status?.Trim(),
+                t.Assignee?.Id?.Trim().ToLowerInvariant(),
+                t.Assignee?.Email?.Trim().ToLowerInvariant(),
+                TicketViews.Priority(t.Priority),
+                t.ExpectedDate?.Trim(),
+                TicketViews.Time(t.LastUpdatedOn)),
+            // Serialized lists, not joined text, so one tag "Network,VPN" isn't two tags "Network" and "VPN".
+            JsonSerializer.Serialize(tags.Select(x => x.Text.ToLowerInvariant()).Order(StringComparer.Ordinal)),
+            tags.All(x => x.Category is not null)
+                ? JsonSerializer.Serialize(tags.Select(x => $"{x.Category!.ToLowerInvariant()}\u001f{x.Text.ToLowerInvariant()}").Order(StringComparer.Ordinal))
+                : null);
+    }
 
     public bool Matches(TicketVersion other) =>
-        string.Equals(Fields, other.Fields, StringComparison.Ordinal) && (Ts is not long mine || other.Ts is not long theirs || mine == theirs);
+        string.Equals(Fields, other.Fields, StringComparison.Ordinal) &&
+        string.Equals(TagTexts, other.TagTexts, StringComparison.Ordinal) &&
+        (TagKeys is null || other.TagKeys is null || string.Equals(TagKeys, other.TagKeys, StringComparison.Ordinal)) &&
+        (Ts is not long mine || other.Ts is not long theirs || mine == theirs);
+
+    /// <summary>A ticket's tags in either shape the API uses: plain texts, or {tagCategoryId, text}.</summary>
+    private static List<(string? Category, string Text)> TagsOf(JsonElement? tags)
+    {
+        var list = new List<(string?, string)>();
+        if (tags is not { ValueKind: JsonValueKind.Array } array)
+        {
+            return list;
+        }
+
+        foreach (JsonElement tag in array.EnumerateArray())
+        {
+            if (tag.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(tag.GetString()))
+            {
+                list.Add((null, tag.GetString()!.Trim()));
+            }
+            else if (tag.ValueKind == JsonValueKind.Object && tag.TryGetProperty("text", out JsonElement text) && text.ValueKind == JsonValueKind.String &&
+                     !string.IsNullOrWhiteSpace(text.GetString()))
+            {
+                string? category = tag.TryGetProperty("tagCategoryId", out JsonElement c) && c.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(c.GetString())
+                    ? c.GetString()!.Trim()
+                    : null;
+                list.Add((category, text.GetString()!.Trim()));
+            }
+        }
+
+        return list;
+    }
 }

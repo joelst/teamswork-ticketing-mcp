@@ -51,7 +51,7 @@ public sealed class LookupTools
     public Task<string> GetTicketBrief(
         [Description(TicketRefs.ParamText)] string ticket,
         [Description("Latest activities to include (default 5, max 50; 0 for the details alone).")] int? activities = null,
-        [Description("Characters of each activity's text to keep (default 400, 100 to 4000).")] int? maxChars = null,
+        [Description("Characters of text to keep in each activity and the description (defaults 400 and 1000; up to 20000 for the whole text).")] int? maxChars = null,
         [Description("Include private notes (default true).")] bool includePrivate = true,
         [Description("Include what automation rules did (default false).")] bool includeAutomation = false,
         [Description("Also return description_HTML and comment_HTML.")] bool includeHtml = false,
@@ -61,14 +61,15 @@ public sealed class LookupTools
         return ToolRunner.RunAsync(async () =>
         {
             int shown = activities is null ? 5 : activities < 0 ? throw new McpException("'activities' must be 0 or more.") : Math.Min(activities.Value, 50);
-            int chars = maxChars is null ? BriefTextChars : Math.Clamp(maxChars.Value, 100, 4000);
+            int chars = maxChars is null ? BriefTextChars : Math.Clamp(maxChars.Value, 100, TicketViews.FullTextChars);
+            int detailChars = maxChars is null ? TicketViews.DetailTextChars : chars;
             Guid id = await new TicketRefs(_client, _cache, _options).ResolveAsync(ticket, timezoneOffset, cancellationToken);
 
             if (shown == 0)
             {
                 Ticket alone = await _client.GetTicketAsync(id, includeHtml, timezoneOffset, cancellationToken);
                 _cache.Numbers.Remember(alone);
-                return TicketViews.Detail(alone, includeHtml, await WorkflowStatus.WorkflowsForAsync(alone, _cache, _client, timezoneOffset, cancellationToken));
+                return TicketViews.Detail(alone, includeHtml, await WorkflowStatus.WorkflowsForAsync(alone, _cache, _client, timezoneOffset, cancellationToken), detailChars);
             }
 
             // The three reads run together; the first to fail cancels the others (no point spending quota on the history of a
@@ -99,7 +100,7 @@ public sealed class LookupTools
             ListResponse<Activity> h = await history;
             IReadOnlyList<Activity> recent = h.Items ?? [];
             System.Text.Json.JsonElement? workflows = await WorkflowStatus.WorkflowsForAsync(t, _cache, _client, timezoneOffset, cancellationToken);
-            JsonObject brief = TicketViews.Detail(t, includeHtml, workflows);
+            JsonObject brief = TicketViews.Detail(t, includeHtml, workflows, detailChars);
 
             // The caller counts as staff, as in get_queue, so their own replies aren't taken for the requestor's.
             TicketPeople people = await TicketPeople.LoadAsync(_cache, _client, _options, timezoneOffset, cancellationToken);
@@ -109,7 +110,7 @@ public sealed class LookupTools
             }
 
             DateTimeOffset now = _time.GetUtcNow();
-            bool resolved = brief["isResolved"]?.GetValue<bool>() == true;
+            bool? resolved = brief["isResolved"]?.GetValue<bool>();
             Waiting.State state = Waiting.Compute(t, recent, people, resolved, complete: h.ContinuationToken is null, now,
                 WorkflowStatus.LabelOf(t, workflows ?? await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken)));
             if (Waiting.Parse(t.CreatedOn) is DateTimeOffset created)

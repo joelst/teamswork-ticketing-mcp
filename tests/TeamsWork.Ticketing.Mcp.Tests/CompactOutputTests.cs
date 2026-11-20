@@ -261,7 +261,9 @@ public sealed class CompactOutputTests
 
     private const string GraphInstance = """
         {"item":{"id":"i","displayName":"IT","code":"ITH",
-          "customFields":[{"id":"f1","title":"Site"}],"customFieldsLeft":[{"id":"f1","title":"Site"}],"customFieldsRight":[],
+          "customFields":[{"id":"11111111-1111-1111-1111-111111111111","title":"Site"}],
+          "customFieldsLeft":[{"id":"11111111-1111-1111-1111-111111111111","type":{"key":"list"},"isMultiple":false,"options":[{"key":"o1","text":"HQ"}]}],
+          "customFieldsRight":[{"id":"22222222-2222-2222-2222-222222222222","title":"Old","status":"hidden"}],
           "assignees":{"type":"specific","peoples":[{"id":"u1","name":"Jane Doe","email":"jane@example.test"}]},
           "workflows":{"ticket":[{"nodes":[
               {"id":"Ticket Creation","type":"startNode","position":{"x":1,"y":2},"data":{"label":""}},
@@ -287,7 +289,11 @@ public sealed class CompactOutputTests
         JsonElement step = Assert.Single(workflow.GetProperty("steps").EnumerateArray());
         Assert.Equal("Resolve Ticket", step.GetProperty("action").GetString());
         Assert.True(step.GetProperty("needsComment").GetBoolean());
-        Assert.Single(doc.RootElement.GetProperty("customFields").EnumerateArray()); // the layout copies are merged
+        JsonElement[] fields = doc.RootElement.GetProperty("customFields").EnumerateArray().ToArray();
+        Assert.Equal(2, fields.Length); // the layout copies are merged into one field each
+        Assert.Equal(("Site", "list", "HQ"), (fields[0].GetProperty("title").GetString(), fields[0].GetProperty("type").GetProperty("key").GetString(),
+            fields[0].GetProperty("options")[0].GetProperty("text").GetString())); // the type and options only the left copy states
+        Assert.Equal("hidden", fields[1].GetProperty("unusable").GetString());
         Assert.Equal("Jane Doe <jane@example.test>", doc.RootElement.GetProperty("assignees").GetProperty("people")[0].GetString());
         foreach (string hidden in (string[])["someone@example.test", "position", "#fff", "customFieldsLeft", "transitionAutomation"])
         {

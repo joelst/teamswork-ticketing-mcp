@@ -40,10 +40,9 @@ public sealed class InstanceTools
             return new InstanceSection(instance.Id, instance.DisplayName ?? instance.InstanceName)
             {
                 Code = all ? instance.Code : null,
-                // The API repeats every custom field in the form's left and right column lists; one copy each is enough.
-                CustomFields = all || part == "customFields"
-                    ? DistinctFields((instance.CustomFields ?? []).Concat(instance.CustomFieldsLeft ?? []).Concat(instance.CustomFieldsRight ?? []))
-                    : null,
+                // The API repeats every custom field in the form's left and right column lists, and the copies can each state
+                // different attributes; they are merged as writes merge them, so what is shown is what a write checks against.
+                CustomFields = all || part == "customFields" ? CustomFieldViews(instance) : null,
                 OptionalFields = all || part == "customFields"
                     ? DistinctFields((instance.OptionalFieldsLeft ?? []).Concat(instance.OptionalFieldsRight ?? []))
                     : null,
@@ -73,6 +72,30 @@ public sealed class InstanceTools
                 .ToList();
             return new PageResult<TagCategoryView>(items, items.Count, null, null, null);
         });
+    }
+
+    /// <summary>
+    /// Each custom field once, with every attribute any copy states, and, where it matters, that a copy marks it unusable
+    /// (hidden, deleted...) or that the copies disagree on what it is, so a write would refuse a value for it.
+    /// </summary>
+    private static List<JsonObject>? CustomFieldViews(Instance instance)
+    {
+        List<JsonObject> views = InstanceLookup.CustomFieldsOf(instance).Select(f =>
+        {
+            JsonObject o = ToolJson.ToNode(f.Field) as JsonObject ?? new JsonObject();
+            if (f.UnusableStatus is string status)
+            {
+                o["unusable"] = status;
+            }
+
+            if (f.Conflicting)
+            {
+                o["conflicting"] = true;
+            }
+
+            return o;
+        }).ToList();
+        return views.Count > 0 ? views : null;
     }
 
     private static List<CustomField>? DistinctFields(IEnumerable<CustomField> fields)
@@ -113,7 +136,7 @@ public sealed class InstanceTools
         [property: JsonPropertyName("displayName")] string? DisplayName)
     {
         [JsonPropertyName("code")] public string? Code { get; init; }
-        [JsonPropertyName("customFields")] public IReadOnlyList<CustomField>? CustomFields { get; init; }
+        [JsonPropertyName("customFields")] public IReadOnlyList<JsonObject>? CustomFields { get; init; }
         [JsonPropertyName("optionalFields")] public IReadOnlyList<CustomField>? OptionalFields { get; init; }
         [JsonPropertyName("assignees")] public JsonObject? Assignees { get; init; }
         [JsonPropertyName("isAutomaticAssignTickets")] public bool? IsAutomaticAssignTickets { get; init; }

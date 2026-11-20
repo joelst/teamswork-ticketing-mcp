@@ -22,6 +22,7 @@ public sealed class QueueTools
     private const string QueueFields = "id,ticketId,title,status,priority,assignee,requestor,createdOn,lastUpdatedOn";
     private const int TitleChars = 80;
     private const int LastPublicChars = 160;
+    private const int MaxRows = 50;
 
     /// <summary>History reads one call may make, so a default queue stays well inside a caller's share of the quota.</summary>
     internal const int HistoryBudget = 25;
@@ -86,7 +87,7 @@ public sealed class QueueTools
                 ? new HashSet<string>(resolvedSince ? [] : DefaultExtras, StringComparer.Ordinal)
                 : include.Select(x => ToolValidation.RequireEnum(x, "include", Extras)).ToHashSet(StringComparer.Ordinal);
             string order = ToolValidation.OptionalEnum(sort, "sort", Sorts) ?? (resolvedSince ? "updated" : "urgency");
-            int max = ToolValidation.ResolvePageSize(limit, _options.DefaultPageSize, 50);
+            int max = ToolValidation.ResolvePageSize(limit, Math.Min(_options.DefaultPageSize, MaxRows), MaxRows);
 
             // Whose queue, and which of their roles. "me" and a person leave out the column that is always them.
             Func<Ticket, bool> matches;
@@ -142,14 +143,27 @@ public sealed class QueueTools
                 TimezoneOffset = timezoneOffset,
             };
 
+            // Since a day, only tickets whose resolution time shows they were resolved in the period: one updated since (a
+            // comment on an old resolved ticket, say) without a resolution time to show it is left out, and counted.
+            int undated = 0;
             TicketScan.Result<Ticket> scan = await TicketScan.RunAsync(
                 _client,
                 query,
                 t =>
                 {
                     _cache.Numbers.Remember(t);
-                    bool inRange = sinceUtc is null || Waiting.Parse(t.LastResolutionOn) is not DateTimeOffset resolvedOn || resolvedOn >= sinceUtc;
-                    return matches(t) && inRange ? Slim(t) : null;
+                    if (!matches(t))
+                    {
+                        return null;
+                    }
+
+                    if (sinceUtc is not null && Waiting.Parse(t.LastResolutionOn) is not DateTimeOffset resolvedOn)
+                    {
+                        undated++;
+                        return null;
+                    }
+
+                    return sinceUtc is null || Waiting.Parse(t.LastResolutionOn) >= sinceUtc ? Slim(t) : null;
                 },
                 _options.MaxScanTickets,
                 wholeTickets ? WorkloadTools.FullTicketPageSize : TicketScan.MaxApiPageSize,
@@ -163,14 +177,23 @@ public sealed class QueueTools
             bool history = (extras.Contains("waitingOn") && !resolvedSince) || extras.Contains("idleDays") || extras.Contains("lastPublic");
             bool rankedByHistory = history && order is "urgency" or "idle";
             int candidates = rankedByHistory ? Math.Max(max, Math.Min(HistoryBudget, scan.Matches.Count)) : max;
-            List<Ticket> page = Coarse(scan.Matches, order).Take(candidates).ToList();
+            List<Ticket> page = Coarse(scan.Matches, order, resolvedSince).Take(candidates).ToList();
             var states = new Waiting.State?[page.Count];
             int read = 0, failed = 0;
             if (history && page.Count > 0)
             {
-                ActingUser caller = await _actingUser.GetActingUserAsync(cancellationToken);
+                TicketUser? caller = null;
+                try
+                {
+                    caller = (await _actingUser.GetActingUserAsync(cancellationToken)).ToTicketUser();
+                }
+                catch (ActingUserException)
+                {
+                    // Only who=me needs the caller, and it asked for them above; here they only help tell replies apart.
+                }
+
                 TicketPeople people = (await TicketPeople.LoadAsync(_cache, _client, _options, timezoneOffset, cancellationToken))
-                    .WithAgents(scan.Matches.Select(t => t.Assignee).Append(caller.ToTicketUser()));
+                    .WithAgents(scan.Matches.Select(t => t.Assignee).Append(caller));
                 System.Text.Json.JsonElement? workflows = await WorkflowStatus.InstanceWorkflowsAsync(_cache, _client, timezoneOffset, cancellationToken);
                 read = Math.Min(page.Count, HistoryBudget);
                 using var gate = new SemaphoreSlim(HistoryConcurrency);
@@ -224,11 +247,15 @@ public sealed class QueueTools
             [
                 whoNote,
                 scan.Truncated
-                    ? $"Only the newest {scan.Scanned} tickets were read (Ticketing:MaxScanTickets), so older ones aren't in this queue; narrow it with 'priority' or 'role'."
+                    ? $"Only the newest {scan.Scanned} tickets were read (Ticketing:MaxScanTickets), so older ones aren't in this queue; 'priority' narrows what is read."
                     : null,
-                scan.Matches.Count > rows.Count ? $"{scan.Matches.Count} tickets matched; raise 'limit' (max 50) or add filters to see more." : null,
-                history && page.Count > read
-                    ? $"waitingOn and idleDays come from the history of the first {read} candidates only, to stay within the API quota; the rest are ranked by their last update."
+                undated > 0 ? $"{undated} resolved tickets updated since then have no resolution time to show when they were resolved, so they're left out." : null,
+                scan.Matches.Count > rows.Count ? $"{scan.Matches.Count} tickets matched; raise 'limit' (max {MaxRows}) or add filters to see more." : null,
+                rankedByHistory && scan.Matches.Count > read
+                    ? $"Ranked with the history of {read} of the {scan.Matches.Count} matches, to stay within the API quota: those were picked by SLA, priority and last update, so a ticket outside them waiting on its assignee can rank too low."
+                    : null,
+                order == "urgency" && !rankedByHistory && !resolvedSince
+                    ? "Ranked by " + (wholeTickets ? "SLA, " : "") + "priority and last update only: include waitingOn" + (wholeTickets ? "" : " and sla") + " (the default) to rank tickets waiting on their assignee first."
                     : null,
                 failed > 0 ? $"{failed} rows have no waitingOn: their history couldn't be read (the API quota may be used up for now)." : null,
                 unknown > 0 && extras.Contains("waitingOn")
@@ -315,11 +342,15 @@ public sealed class QueueTools
     /// The order from what every ticket carries, before any history is read: for urgency, SLA breaches, then Urgent, then
     /// Important, then the longest since an update.
     /// </summary>
-    private static IEnumerable<Ticket> Coarse(List<Ticket> tickets, string order) => order switch
+    private static IEnumerable<Ticket> Coarse(List<Ticket> tickets, string order, bool resolvedSince) => order switch
     {
         "oldest" => tickets.OrderBy(t => Waiting.Parse(t.CreatedOn) ?? DateTimeOffset.MaxValue),
         "idle" => tickets.OrderBy(t => Waiting.Parse(t.LastUpdatedOn) ?? DateTimeOffset.MaxValue),
-        "updated" => tickets.OrderByDescending(t => Waiting.Parse(t.LastResolutionOn) ?? Waiting.Parse(t.LastUpdatedOn) ?? DateTimeOffset.MinValue),
+        // A reopened ticket keeps its old resolution time, so open queues go by the last update; what was resolved since a
+        // day goes by when it was resolved.
+        "updated" => resolvedSince
+            ? tickets.OrderByDescending(t => Waiting.Parse(t.LastResolutionOn) ?? Waiting.Parse(t.LastUpdatedOn) ?? DateTimeOffset.MinValue)
+            : tickets.OrderByDescending(t => Waiting.Parse(t.LastUpdatedOn) ?? Waiting.Parse(t.LastResolutionOn) ?? DateTimeOffset.MinValue),
         _ => tickets
             .OrderBy(t => Breached(t) ? 0 : 1)
             .ThenBy(t => PriorityRank(t))
@@ -328,7 +359,8 @@ public sealed class QueueTools
 
     /// <summary>
     /// The returned rows reordered with what their history showed: for urgency, SLA breaches, Urgent and Important first,
-    /// then tickets waiting on their assignee, then the rest, each group idlest first; for idle, by days idle.
+    /// then tickets waiting on their assignee, longest waiting first (since the reply they wait after, which a private note
+    /// doesn't move), then the rest, idlest first; for idle, by days idle.
     /// </summary>
     private static List<(Ticket Ticket, Waiting.State? State)> Fine(List<(Ticket Ticket, Waiting.State? State)> rows, string order, DateTimeOffset now)
     {
@@ -339,6 +371,7 @@ public sealed class QueueTools
         {
             "urgency" => rows
                 .OrderBy(r => Breached(r.Ticket) ? 0 : PriorityRank(r.Ticket) < 2 ? 1 + PriorityRank(r.Ticket) : r.State?.WaitingOn == Waiting.Assignee ? 3 : 4)
+                .ThenBy(r => r.State is { WaitingOn: Waiting.Assignee, WaitingSince: DateTimeOffset since } ? since : DateTimeOffset.MaxValue)
                 .ThenByDescending(Idle)
                 .ThenBy(r => Waiting.Parse(r.Ticket.CreatedOn) ?? DateTimeOffset.MaxValue)
                 .ToList(),

@@ -76,6 +76,10 @@ internal static class WorkflowStatus
 
             var states = new JsonArray(labels.Select(kv => (JsonNode?)JsonValue.Create(
                 string.Equals(kv.Key, kv.Value, StringComparison.Ordinal) ? kv.Value : $"{kv.Value} (ID {kv.Key})")).ToArray());
+
+            // A step names its states by label, which is shorter, unless two states share it: then by label and ID, as above.
+            var shared = labels.Values.GroupBy(l => l, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            string Endpoint(string id, string label) => shared.Contains(label) && !string.Equals(id, label, StringComparison.Ordinal) ? $"{label} (ID {id})" : label;
             var steps = new JsonArray();
             foreach (JsonElement edge in graph.GetProperty("edges").EnumerateArray())
             {
@@ -86,7 +90,7 @@ internal static class WorkflowStatus
                     continue;
                 }
 
-                var step = new JsonObject { ["from"] = fromLabel, ["to"] = toLabel };
+                var step = new JsonObject { ["from"] = Endpoint(from, fromLabel), ["to"] = Endpoint(to, toLabel) };
                 if (Text(edge, "label") is string action)
                 {
                     step["action"] = action;
@@ -315,10 +319,22 @@ internal static class WorkflowStatus
     /// </summary>
     public static string CheckTarget(Ticket ticket, string target, string? comment, JsonElement? instanceWorkflows = null)
     {
-        if (StatesOf(ticket, instanceWorkflows) is not { } states ||
-            Current(states, ticket.Status) is not { NextSteps: { Count: > 0 } steps } current)
+        if (StatesOf(ticket, instanceWorkflows) is not { } states || Current(states, ticket.Status) is not { } current)
         {
             return target;
+        }
+
+        if (current.NextSteps is not { Count: > 0 } steps)
+        {
+            // The instance's graph lists every edge, so a state with none there is final. A ticket's own workflow list
+            // may leave steps out, so there the API decides.
+            if (ticket.Workflow is { Count: > 0 } || current.NextSteps is null)
+            {
+                return target;
+            }
+
+            throw new McpException(
+                $"'{current.Label ?? current.Id}' is a final state in this ticket's workflow: no step leads out of it, so it can't move to '{target}'.");
         }
 
         var matches = steps

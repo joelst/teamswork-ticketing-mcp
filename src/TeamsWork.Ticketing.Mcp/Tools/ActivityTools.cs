@@ -35,16 +35,18 @@ public sealed class ActivityTools
         [Description("Maximum activities (default 25, max 100).")] int? limit = null,
         [Description("From the previous page, to get older activity.")] string? continuationToken = null,
         [Description("Also return comment_HTML.")] bool includeHtml = false,
+        [Description("Characters of each activity's text to keep (default 600, up to 20000 for the whole text).")] int? maxChars = null,
         CancellationToken cancellationToken = default)
     {
         return ToolRunner.RunAsync(async () =>
         {
             int pageSize = ToolValidation.ResolvePageSize(limit, 25, 100);
+            int chars = maxChars is null ? TicketViews.ActivityTextChars : Math.Clamp(maxChars.Value, 100, TicketViews.FullTextChars);
             string? token = ToolValidation.OptionalToken(continuationToken, "continuationToken");
             Guid id = await new TicketRefs(_client, _cache, _options).ResolveAsync(ticket, null, cancellationToken);
 
             ListResponse<Activity> r = await _client.ListActivitiesAsync(id, includeHtml, pageSize, token, cancellationToken);
-            List<JsonObject> items = (r.Items ?? []).Select(a => TicketViews.Activity(a, includeHtml)).ToList();
+            List<JsonObject> items = (r.Items ?? []).Select(a => TicketViews.Activity(a, includeHtml, chars)).ToList();
             string? hint = r.ContinuationToken is null ? null : "Older activities exist: call again with this continuationToken.";
             return new PageResult<JsonObject>(items, items.Count, null, r.ContinuationToken, hint);
         });

@@ -159,7 +159,8 @@ internal static partial class Waiting
     /// The ticket's state as its workflow labels it (see <see cref="WorkflowStatus.LabelOf"/>): a custom workflow's ticket
     /// carries a state ID as its status, which says nothing about waiting.
     /// </param>
-    public static State Compute(Ticket t, IReadOnlyList<Activity> history, TicketPeople people, bool resolved, bool complete, DateTimeOffset now, string? statusLabel = null)
+    /// <param name="resolved">Whether the ticket is resolved; null when the response didn't say (no resolvedStatus).</param>
+    public static State Compute(Ticket t, IReadOnlyList<Activity> history, TicketPeople people, bool? resolved, bool complete, DateTimeOffset now, string? statusLabel = null)
     {
         DateTimeOffset? created = Parse(t.CreatedOn);
         Activity? lastHuman = history.FirstOrDefault(a => IsByPerson(a, people));
@@ -170,9 +171,21 @@ internal static partial class Waiting
         Activity? lastReply = history.FirstOrDefault(a => IsByPerson(a, people) && a.IsPrivate != true && !string.IsNullOrWhiteSpace(a.Comment));
         Reply? reply = lastReply is null ? null : new Reply(Side(lastReply.Author, t, people), Parse(lastReply.When), lastReply.Comment);
 
-        if (resolved)
+        // Unsaid, a default workflow's state still tells (Resolved and Closed are resolved, the others aren't); a custom
+        // state's doesn't, and then who it waits on is left unknown rather than taken for an open ticket's.
+        string? label = Blank(statusLabel ?? t.Status);
+        bool? isResolved = resolved ?? (label is null ? null
+            : DefaultResolved.Contains(label) ? true
+            : WorkflowStatus.DefaultStates.Contains(label, StringComparer.OrdinalIgnoreCase) ? false
+            : null);
+        if (isResolved == true)
         {
             return new State(None, null, idle, reply);
+        }
+
+        if (isResolved is null)
+        {
+            return new State(null, null, idle, reply);
         }
 
         if (Blank(statusLabel ?? t.Status) is string status && WaitingState().IsMatch(status))
@@ -205,6 +218,8 @@ internal static partial class Waiting
         DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset t)
             ? t.ToUniversalTime()
             : null;
+
+    private static readonly HashSet<string> DefaultResolved = new(StringComparer.OrdinalIgnoreCase) { "Resolved", "Closed" };
 
     private static string? Blank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 

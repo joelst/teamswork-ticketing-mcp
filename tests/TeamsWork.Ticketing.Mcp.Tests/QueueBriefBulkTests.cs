@@ -225,7 +225,7 @@ public sealed class QueueBriefBulkTests
             .GetQueue(include: ["waitingOn"], limit: 30, cancellationToken: Ct));
 
         Assert.Equal(QueueTools.HistoryBudget, handler.Requests.Count(r => r.Path.EndsWith("/activities", StringComparison.Ordinal)));
-        Assert.Contains($"first {QueueTools.HistoryBudget} candidates", doc.RootElement.GetProperty("hint").GetString(), StringComparison.Ordinal);
+        Assert.Contains($"history of {QueueTools.HistoryBudget} of the 30 matches", doc.RootElement.GetProperty("hint").GetString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -824,6 +824,230 @@ public sealed class QueueBriefBulkTests
 
         Assert.Equal(2, doc.RootElement.GetProperty("count").GetInt32());
         Assert.DoesNotContain(handler.Requests, r => r.Path.EndsWith("/tickets", StringComparison.Ordinal));
+    }
+
+    // ---- Review round 3 ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void A_batch_being_confirmed_is_never_evicted_and_an_evicted_one_never_starts()
+    {
+        var store = new BulkStore(Clock);
+        BulkPlan plan = new(null, null, null, "Urgent", null, null, false, null);
+        BulkStore.Batch Batch() => new("caller", Now + BulkStore.Lifetime, "b", plan, []);
+        BulkStore.Batch running = Batch();
+        string token = store.Add(running);
+        Assert.True(running.TryStart());
+
+        List<BulkStore.Batch> later = Enumerable.Range(0, BulkStore.MaxBatchesPerOwner + 3).Select(_ => Batch()).ToList();
+        later.ForEach(b => store.Add(b));
+
+        Assert.Same(running, store.Find(token));                       // running: kept although it is the oldest
+        BulkStore.Batch evicted = Assert.Single(later.Where(b => b.IsEvicted).Take(1));
+        Assert.False(evicted.TryStart());                               // and an evicted one can't then be confirmed
+    }
+
+    [Fact]
+    public void Tag_versions_tell_one_tag_from_two_and_compare_categories_when_both_have_them()
+    {
+        TicketVersion Of(string tags) => TicketVersion.Of(Parse<Ticket>($$"""{"id":"t","status":"Open","_ts":5,"tags":{{tags}} }"""));
+
+        Assert.False(Of("""["Network,VPN"]""").Matches(Of("""["Network","VPN"]""")));
+        Assert.False(Of("""[{"tagCategoryId":"net","text":"VPN"}]""").Matches(Of("""[{"tagCategoryId":"prod","text":"VPN"}]""")));
+        Assert.True(Of("""["VPN"]""").Matches(Of("""[{"tagCategoryId":"net","text":"VPN"}]""")));   // one read without categories: texts decide
+    }
+
+    [Fact]
+    public async Task An_interrupted_confirmation_keeps_what_it_did_for_the_retry()
+    {
+        var store = new BulkStore(Clock);
+        string token = await PreviewWeeklyAsync(store);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var confirm = new Router(r =>
+        {
+            if (r.Method == HttpMethod.Put)
+            {
+                cts.Cancel();   // the client gives up while the first ticket's change is out
+                throw new OperationCanceledException(cts.Token);
+            }
+
+            return "{\"item\":" + (r.Path.EndsWith(Id(1), StringComparison.Ordinal) ? Bulk(1, "Weekly check: backups", "In Progress", 1000) : Bulk(2, "Weekly check: patching", "In Progress", 2000)) + "}";
+        });
+        BulkTools bulk = Bulk(confirm, store);
+
+        try
+        {
+            await bulk.BulkUpdate(token, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // How the cancelled call ends doesn't matter: the retry below is what the caller sees.
+        }
+
+        using JsonDocument doc = JsonDocument.Parse(await bulk.BulkUpdate(token, Ct));
+
+        Assert.Contains("Interrupted", Assert.Single(doc.RootElement.GetProperty("failed").EnumerateArray()).GetProperty("error").GetString(), StringComparison.Ordinal);
+        Assert.NotNull(store.Find(doc.RootElement.GetProperty("resumeToken").GetString()!));   // ticket 102, not reached
+    }
+
+    private const string FinalStateGraph = """
+        {"ticket":[{"nodes":[{"id":"Open","type":"textFieldNode","data":{"label":"Open"}},{"id":"Closed","type":"textFieldNode","data":{"label":"Closed"}}],
+                    "edges":[{"id":"e1","label":"Close","source":"Open","target":"Closed"}]}]}
+        """;
+
+    [Fact]
+    public void A_final_state_in_the_instance_graph_has_no_way_out()
+    {
+        Ticket closed = Parse<Ticket>("""{"id":"t","status":"Closed"}""");
+
+        McpException ex = Assert.Throws<McpException>(() => WorkflowStatus.CheckTarget(closed, "Open", null, Parse<JsonElement>(FinalStateGraph)));
+
+        Assert.Contains("final state", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Steps_name_states_that_share_a_label_by_id()
+    {
+        JsonElement graph = Parse<JsonElement>("""
+            {"ticket":[{"nodes":[{"id":"a1","type":"textFieldNode","data":{"label":"Review"}},{"id":"a2","type":"textFieldNode","data":{"label":"Review"}},
+                                 {"id":"Done","type":"textFieldNode","data":{"label":"Done"}}],
+                        "edges":[{"id":"e1","source":"a1","target":"Done"},{"id":"e2","source":"a2","target":"Done"}]}]}
+            """);
+
+        JsonNode step = WorkflowStatus.Compact(graph)![0]!["steps"]![0]!;
+
+        Assert.Equal(("Review (ID a1)", "Done"), (step["from"]!.GetValue<string>(), step["to"]!.GetValue<string>()));
+    }
+
+    [Theory]
+    [InlineData("""{"isFrtBreached":false}""", null)]
+    [InlineData("""{"isFrtBreached":false,"isRtBreached":false,"isFrtEscalated":false,"isRtEscalated":false}""", "ok")]
+    [InlineData("""{"isRtBreached":true}""", "rtBreached")]
+    public void Sla_is_ok_only_when_all_four_flags_say_so(string flags, string? expected)
+    {
+        Assert.Equal(expected, TicketViews.Sla(Parse<Ticket>(flags)));
+    }
+
+    [Fact]
+    public void An_unseen_counter_that_isnt_a_number_is_ignored()
+    {
+        JsonObject detail = TicketViews.Detail(Parse<Ticket>("""{"id":"t","title":"T","requestorUnseenEventCnt":"many"}"""), includeHtml: false);
+
+        Assert.False(detail.ContainsKey("requestorUnseenUpdates"));
+    }
+
+    [Theory]
+    [InlineData("Closed", "none")]
+    [InlineData("In Progress", "assignee")]
+    [InlineData("Escalated to L3", null)]   // a custom state: resolved or not isn't known
+    public void An_unstated_resolution_is_read_from_a_default_state_or_left_unknown(string status, string? waitingOn)
+    {
+        string history = $$"""[{"action":"commented","comment":"Help","user":{{Requestor}},"createdOn":"2026-11-18T12:00:00Z"}]""";
+
+        Assert.Equal(waitingOn, Waiting.Compute(Ticket(status), Parse<List<Activity>>(history), People(), resolved: null, complete: true, Now).WaitingOn);
+    }
+
+    [Fact]
+    public async Task MaxChars_returns_the_whole_description_and_activity_text()
+    {
+        string text = new string('x', 1500);
+        var handler = new Router(r => r.Path switch
+        {
+            var p when p.EndsWith("/activities", StringComparison.Ordinal) =>
+                $$"""{"items":[{"id":"a","action":"commented","comment":"{{text}}","user":{{Requestor}},"createdOn":"2026-11-18T12:00:00Z"}]}""",
+            var p when p.EndsWith("/attachments", StringComparison.Ordinal) => """{"items":[]}""",
+            var p when p.EndsWith("/instance", StringComparison.Ordinal) => InstanceJson,
+            _ => $$"""{"item":{"id":"{{Id(1)}}","ticketNo":1,"title":"T","status":"Open","description":"{{text}}","requestor":{{Requestor}} } }""",
+        });
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(handler);
+
+        using JsonDocument brief = JsonDocument.Parse(await new LookupTools(client, cache, options, Clock).GetTicketBrief(Id(1), maxChars: 20000, cancellationToken: Ct));
+        using JsonDocument page = JsonDocument.Parse(await new ActivityTools(client, new FixedActor(Jane), cache, options).ListTicketActivities(Id(1), maxChars: 20000, cancellationToken: Ct));
+
+        Assert.Equal(text, brief.RootElement.GetProperty("description").GetString());
+        Assert.Equal(text, brief.RootElement.GetProperty("activities")[0].GetProperty("text").GetString());
+        Assert.Equal(text, page.RootElement.GetProperty("items")[0].GetProperty("text").GetString());
+    }
+
+    private static string Rows(int count, Func<int, string> extra) =>
+        "{\"items\":[" + string.Join(",", Enumerable.Range(1, count).Select(i =>
+            $$"""{"id":"{{Id(i)}}","ticketNo":{{i}},"title":"T{{i}}","status":"Open","assignee":{{Agent}}{{extra(i)}} }""")) + "],\"itemCount\":" + count + "}";
+
+    [Fact]
+    public async Task A_large_configured_page_size_doesnt_lift_the_queues_cap()
+    {
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(new Router(_ => Rows(60, _ => "")), o => (o.DefaultPageSize, o.MaxPageSize) = (100, 100));
+
+        using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new FixedActor(Jane), cache, options, Clock).GetQueue(include: [], sort: "oldest", cancellationToken: Ct));
+
+        Assert.Equal(50, doc.RootElement.GetProperty("returned").GetInt32());
+    }
+
+    [Fact]
+    public async Task A_resolved_ticket_without_a_resolution_time_isnt_counted_as_resolved_since()
+    {
+        string tickets = Rows(2, i => i == 1 ? ",\"lastResolutionOn\":\"2026-11-18T15:00:00Z\"" : "");
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(new Router(_ => tickets));
+
+        using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new FixedActor(Jane), cache, options, Clock)
+            .GetQueue(state: "resolvedSince", since: "2026-11-18", cancellationToken: Ct));
+
+        Assert.Equal([1], doc.RootElement.GetProperty("items").EnumerateArray().Select(i => i.GetProperty("ticketNo").GetInt32()));
+        Assert.Contains("1 resolved tickets updated since then have no resolution time", doc.RootElement.GetProperty("hint").GetString(), StringComparison.Ordinal);
+    }
+
+    private sealed class NoCaller : IActingUserProvider
+    {
+        public ValueTask<ActingUser> GetActingUserAsync(CancellationToken cancellationToken) => throw new ActingUserException("No user and no service account.");
+    }
+
+    [Fact]
+    public async Task An_app_only_caller_without_a_service_account_can_read_the_team_queue()
+    {
+        var handler = new Router(r => r.Path switch
+        {
+            var p when p.EndsWith("/instance", StringComparison.Ordinal) => InstanceJson,
+            var p when p.EndsWith("/tickets", StringComparison.Ordinal) => Rows(1, _ => ",\"createdOn\":\"2026-11-10T00:00:00Z\""),
+            _ => $$"""{"items":[{"action":"commented","comment":"Help","user":{{Requestor}},"createdOn":"2026-11-18T12:00:00Z"}]}""",
+        });
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(handler);
+
+        using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new NoCaller(), cache, options, Clock).GetQueue("team", include: ["waitingOn"], cancellationToken: Ct));
+
+        Assert.Equal("assignee", doc.RootElement.GetProperty("items")[0].GetProperty("waitingOn").GetString());
+    }
+
+    [Fact]
+    public async Task An_open_queue_sorted_by_update_goes_by_the_last_update_not_an_old_resolution()
+    {
+        string tickets = Rows(2, i => i == 1
+            ? ",\"lastUpdatedOn\":\"2026-11-19T10:00:00Z\",\"lastResolutionOn\":\"2026-10-01T00:00:00Z\""   // reopened today
+            : ",\"lastUpdatedOn\":\"2026-11-18T10:00:00Z\"");
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(new Router(_ => tickets));
+
+        using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new FixedActor(Jane), cache, options, Clock).GetQueue(include: [], sort: "updated", cancellationToken: Ct));
+
+        Assert.Equal([1, 2], doc.RootElement.GetProperty("items").EnumerateArray().Select(i => i.GetProperty("ticketNo").GetInt32()));
+    }
+
+    [Fact]
+    public async Task Tickets_waiting_on_the_assignee_rank_by_how_long_they_have_waited()
+    {
+        // Both wait on me. Ticket 1 waited since the 9th but has a note today; ticket 2 waited since the 17th, untouched.
+        var handler = new Router(r => r.Path switch
+        {
+            var p when p.EndsWith("/instance", StringComparison.Ordinal) => InstanceJson,
+            var p when p.EndsWith("/tickets", StringComparison.Ordinal) => Rows(2, i => ",\"priority\":\"2_Medium\",\"requestor\":" + Requestor + ",\"lastUpdatedOn\":\"2026-11-19T10:00:00Z\""),
+            var p when p.Contains(Id(1), StringComparison.Ordinal) => $$"""
+                {"items":[{"action":"commented","comment":"note","isPrivate":true,"user":{{Agent}},"createdOn":"2026-11-19T10:00:00Z"},
+                          {"action":"commented","comment":"Help","user":{{Requestor}},"createdOn":"2026-11-09T10:00:00Z"}]}
+                """,
+            _ => $$"""{"items":[{"action":"commented","comment":"Help","user":{{Requestor}},"createdOn":"2026-11-17T10:00:00Z"}]}""",
+        });
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(handler);
+
+        using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new FixedActor(Jane), cache, options, Clock).GetQueue(include: ["waitingOn"], cancellationToken: Ct));
+
+        Assert.Equal([1, 2], doc.RootElement.GetProperty("items").EnumerateArray().Select(i => i.GetProperty("ticketNo").GetInt32()));
     }
 
     // ---- Helpers -------------------------------------------------------------------------------------------------

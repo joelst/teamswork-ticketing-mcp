@@ -460,7 +460,7 @@ internal sealed partial class InstanceLookup
     /// optional fields are left out: they are the form's built-in ones (Requestor, Priority, Expected Date, Tags) with
     /// non-GUID IDs, set through their own parameters.
     /// </summary>
-    private static List<FieldDefinition> CustomFieldsOf(Instance instance) =>
+    internal static List<FieldDefinition> CustomFieldsOf(Instance instance) =>
         new[] { instance.CustomFields, instance.CustomFieldsLeft, instance.CustomFieldsRight }
             .SelectMany(list => list ?? [])
             .Where(f => Guid.TryParse(f.Id, out _))
@@ -502,7 +502,7 @@ internal sealed partial class InstanceLookup
         };
     }
 
-    private sealed record FieldDefinition(CustomField Field, string? UnusableStatus, bool Conflicting);
+    internal sealed record FieldDefinition(CustomField Field, string? UnusableStatus, bool Conflicting);
 
     // Matches the limit on descriptions and comments.
     private const int MaxTextLength = 20_000;

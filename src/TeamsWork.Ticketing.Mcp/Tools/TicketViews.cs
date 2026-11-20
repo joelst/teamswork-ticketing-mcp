@@ -25,6 +25,9 @@ internal static partial class TicketViews
     /// <summary>One activity's text.</summary>
     public const int ActivityTextChars = 600;
 
+    /// <summary>The most a caller can ask to keep of a text (maxChars): enough for the whole of any comment or description.</summary>
+    public const int FullTextChars = 20_000;
+
     /// <summary>One side of a field change, which can be a whole old or new description.</summary>
     public const int ChangeValueChars = 120;
 
@@ -84,15 +87,15 @@ internal static partial class TicketViews
         Blank(text) is not string t ? null : t.Length <= max ? t : t[..max].TrimEnd() + "…";
 
     /// <summary>
-    /// A ticket's SLA state in one word, worst first (rtBreached, frtBreached, rtEscalated, frtEscalated, ok), or null
-    /// when the ticket carries no SLA flags.
+    /// A ticket's SLA state in one word, worst first (rtBreached, frtBreached, rtEscalated, frtEscalated), ok only when all
+    /// four flags are there and false, and null when that isn't known: a missing flag could be a breach.
     /// </summary>
     public static string? Sla(Ticket t) =>
         t.IsRtBreached == true ? "rtBreached"
         : t.IsFrtBreached == true ? "frtBreached"
         : t.IsRtEscalated == true ? "rtEscalated"
         : t.IsFrtEscalated == true ? "frtEscalated"
-        : WorkloadTools.HasSlaFlags(t) ? "ok"
+        : t is { IsRtBreached: false, IsFrtBreached: false, IsRtEscalated: false, IsFrtEscalated: false } ? "ok"
         : null;
 
     /// <summary>
@@ -153,7 +156,7 @@ internal static partial class TicketViews
     /// One ticket in full, for acting on it: everything a row has, its description and resolution, whether it is
     /// resolved, and where it can go next. Its UUID is included, in case its number can't be looked up.
     /// </summary>
-    public static JsonObject Detail(Ticket t, bool includeHtml, JsonElement? instanceWorkflows = null)
+    public static JsonObject Detail(Ticket t, bool includeHtml, JsonElement? instanceWorkflows = null, int textChars = DetailTextChars)
     {
         JsonObject o = Row(t, content: true);
         o.Remove("description");
@@ -164,17 +167,18 @@ internal static partial class TicketViews
             o["isResolved"] = resolved.Any(s => string.Equals(s?.Trim(), status, StringComparison.OrdinalIgnoreCase));
         }
 
-        Add(o, "description", Clip(t.Description, DetailTextChars));
+        Add(o, "description", Clip(t.Description, textChars));
         if (includeHtml)
         {
             Add(o, "description_HTML", t.DescriptionHtml);
         }
 
-        Add(o, "lastResolutionComment", Clip(t.LastResolutionComment, DetailTextChars));
+        Add(o, "lastResolutionComment", Clip(t.LastResolutionComment, textChars));
         Add(o, "origin", t.Origin);
 
         // Updates the requestor hasn't opened: many means they probably aren't getting the ticket's notifications.
-        if (t.Extra?.TryGetValue("requestorUnseenEventCnt", out JsonElement unseen) == true && unseen.TryGetInt32(out int count))
+        if (t.Extra?.TryGetValue("requestorUnseenEventCnt", out JsonElement unseen) == true &&
+            unseen.ValueKind == JsonValueKind.Number && unseen.TryGetInt32(out int count))
         {
             o["requestorUnseenUpdates"] = count;
             if (count > UnseenWarningThreshold)

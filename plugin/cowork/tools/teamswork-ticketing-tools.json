@@ -706,7 +706,7 @@
             "default": null
           },
           "maxChars": {
-            "description": "Characters of each activity's text to keep (default 400, 100 to 4000).",
+            "description": "Characters of text to keep in each activity and the description (defaults 400 and 1000; up to 20000 for the whole text).",
             "type": [
               "integer",
               "null"
@@ -1315,6 +1315,14 @@
             "description": "Also return comment_HTML.",
             "type": "boolean",
             "default": false
+          },
+          "maxChars": {
+            "description": "Characters of each activity's text to keep (default 600, up to 20000 for the whole text).",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": null
           }
         },
         "required": [

@@ -214,7 +214,11 @@ already registers the server.
 - **Tool call time:** Cowork expects each tool call to finish within 30 seconds. `get_queue`,
   `list_sla_risk`, `count_tickets`, `preview_bulk_update` and ticket-number lookups read up to
   `Ticketing:MaxScanTickets` tickets (default 1000), and `get_queue` reads up to 25 tickets' histories, so time them
-  on your instance. `bulk_update` stops after 20 seconds and returns a `resumeToken` for the rest.
+  on your instance. `bulk_update` starts no new ticket after 20 seconds and returns a `resumeToken` for the rest, but a
+  request already out can still take up to `Ticketing:RequestTimeoutSeconds` (default 30), so a slow API can run a
+  call past Cowork's limit. If that happens, confirm the same `confirmToken` again: it returns what was applied, marks
+  the ticket that was interrupted (check it with `get_ticket_brief`), and gives a `resumeToken` for the tickets not
+  reached.
 - **Confirmation prompts:** every tool declares MCP safety annotations. Cowork's confirmation prompts for
   non-Microsoft servers are still rolling out, which is why the skills themselves ask before each change.
 - **Mobile:** custom plugins don't run in Cowork on mobile.

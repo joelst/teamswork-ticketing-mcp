@@ -31,8 +31,10 @@ foreach ($name in @($psi.Environment.Keys)) {
 }
 $psi.Environment['Ticketing__ApiKey'] = 'placeholder-for-tools-list'
 # Listing tools reads the instance's workflow states when it can; an unresolvable host keeps that read off the network,
-# so the file carries the fixed description.
+# so the file carries the fixed description. A region saved in user secrets (which stdio also loads) would name another
+# endpoint than this URL and stop the server, so it is cleared too.
 $psi.Environment['Ticketing__BaseUrl'] = 'https://ticketing.invalid/v1'
+$psi.Environment['Ticketing__Region'] = ''
 $psi.Environment['Ticketing__ServiceAccount__Id'] = '00000000-0000-0000-0000-0000000000c1'
 $psi.Environment['Ticketing__ServiceAccount__Name'] = 'Tools List'
 $psi.Environment['Ticketing__ServiceAccount__Email'] = 'tools-list@example.test'

@@ -178,7 +178,10 @@ public sealed partial class BulkTools
 
             if (!batch.TryStart())
             {
-                throw new McpException("That batch is being applied by another call right now; wait for it to finish.");
+                // Another call has it, or it was finished or dropped between the lookup and here.
+                throw batch.IsDone ? new McpException("That batch has just been applied; call bulk_update with the same confirmToken to see the result.")
+                    : batch.IsEvicted ? new McpException("That confirmToken has expired. Preview the change again with preview_bulk_update.")
+                    : new McpException("That batch is being applied by another call right now; wait for it to finish.");
             }
 
             JsonObject result;
@@ -291,6 +294,17 @@ public sealed partial class BulkTools
                 string partly = done.Count > 0 ? $" ({string.Join(", ", done)} changed first)" : "";
                 failed.Add(new JsonObject { ["ticketNo"] = label.DeepClone(), ["error"] = ex.Message + partly });
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // The caller gave up (a client's time limit, say) with a request out: whether it was carried out isn't
+                // known. What was done is kept with the batch, so confirming the token again returns it, with a token for
+                // the tickets not reached.
+                string so = done.Count > 0 ? $"{string.Join(", ", done)} changed; the next change may or may not have been" : "it may or may not have been changed";
+                failed.Add(new JsonObject { ["ticketNo"] = label.DeepClone(), ["error"] = $"Interrupted: {so}. Check it with get_ticket_brief." });
+                remaining.AddRange(batch.Items.Skip(i + 1));
+                stopped = "cancelled";
+                break;
+            }
         }
 
         var result = new JsonObject
@@ -314,9 +328,12 @@ public sealed partial class BulkTools
         {
             var rest = new BulkStore.Batch(batch.Owner, _store.Now + BulkStore.Lifetime, batch.BatchId, plan, remaining);
             result["resumeToken"] = _store.Add(rest);
-            result["hint"] = stopped == "quota"
-                ? $"The API quota ran out with {remaining.Count} tickets to go. Wait a minute, then call bulk_update with resumeToken as the confirmToken."
-                : $"Stopped after {TimeBudget.TotalSeconds:0} seconds with {remaining.Count} tickets to go. Call bulk_update with resumeToken as the confirmToken to carry on.";
+            result["hint"] = stopped switch
+            {
+                "quota" => $"The API quota ran out with {remaining.Count} tickets to go. Wait a minute, then call bulk_update with resumeToken as the confirmToken.",
+                "cancelled" => $"The call was interrupted with {remaining.Count} tickets to go. Check the one marked interrupted, then call bulk_update with resumeToken as the confirmToken.",
+                _ => $"Stopped after {TimeBudget.TotalSeconds:0} seconds with {remaining.Count} tickets to go. Call bulk_update with resumeToken as the confirmToken to carry on.",
+            };
         }
 
         _logger.LogInformation("Bulk update {BatchId}: {Applied} applied, {Skipped} skipped, {Failed} failed, {Remaining} left for later.",
