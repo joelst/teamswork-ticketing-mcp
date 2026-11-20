@@ -494,6 +494,11 @@ secrets/
 # Vendor API spec: third-party documentation, obtain it from TeamsWork
 docs/openapi/
 
+# Each organization's own Cowork plugin app ID, created by scripts/Build-CoworkPackage.ps1
+plugin/cowork/app-id.txt
+# Each organization's own Cowork build values (app ID, endpoint, publisher), from Build-CoworkPackage.ps1 -SaveSettings
+plugin/cowork/cowork.local.json
+
 
 # Local publish output (see README)
 publish/

@@ -4,7 +4,7 @@
 $ErrorActionPreference = 'Stop'
 $script = Join-Path $PSScriptRoot '../Build-CoworkPackage.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script), [ref]$null, [ref]$null)
-foreach ($name in 'Read-SkillFrontMatter', 'Test-CoworkPluginSource', 'Expand-ManifestTemplate') {
+foreach ($name in 'Read-SkillFrontMatter', 'Test-CoworkPluginSource', 'Expand-ManifestTemplate', 'Resolve-AppId') {
     $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     if (-not $definition) { throw "Build-CoworkPackage.ps1 has no function $name" }
     . ([scriptblock]::Create($definition.Extent.Text))
@@ -38,7 +38,7 @@ function Test-Caught([string] $what, [string] $pattern) {
 try {
     New-Copy
     $skill = Join-Path $tmp 'skills/ticket-triage/SKILL.md'
-    (Get-Content -Raw $skill) -replace '(?m)^name: ticket-triage$', 'name: TicketTriage' | Set-Content -Encoding UTF8 $skill
+    (Get-Content -Raw $skill) -replace '(?m)^name: ticket-triage(?=\r?$)', 'name: TicketTriage' | Set-Content -Encoding UTF8 $skill
     Test-Caught 'a name that differs from its folder is caught' 'ASKILL-P006'
     Test-Caught 'a name that is not kebab-case is caught' 'ASKILL-P007'
 
@@ -69,6 +69,10 @@ try {
     New-Copy
     Set-Manifest { param($m) $m.agentConnectors[0].toolSource.remoteMcpServer.authorization.referenceId = '' }
     Test-Caught 'an OAuth connector without a referenceId is caught' 'referenceId'
+
+    New-Copy
+    Set-Manifest { param($m) $m.id = [guid]::NewGuid().ToString() }
+    Test-Caught 'an app ID committed in the template is caught' 'APP_ID'
 
     New-Copy
     Set-Manifest { param($m) $m.version = '0.1.0' }
@@ -119,12 +123,34 @@ Check 'a placeholder with an unsupported name is refused' $threw
 $threw = $false; try { Expand-ManifestTemplate '{"a":"{{BROKEN"}' @{} } catch { $threw = $true }
 Check 'a malformed placeholder is refused' $threw
 
+# ---- Resolve-AppId ---------------------------------------------------------------------------------------------------
+$idFile = Join-Path ([IO.Path]::GetTempPath()) "cowork-app-id-$([guid]::NewGuid().ToString('N')).txt"
+try {
+    $first = Resolve-AppId '' $idFile 6>&1 | Select-Object -Last 1
+    Check 'the first build creates an app ID and saves it' ((Test-Path $idFile) -and ($first -as [guid]) -and (Get-Content -Raw $idFile).Trim() -eq $first)
+    Check 'a later build reuses the saved app ID' ((Resolve-AppId '' $idFile) -eq $first)
+    $given = [guid]::NewGuid().ToString()
+    Check 'an explicit -AppId is used' ((Resolve-AppId $given $idFile) -eq $given)
+    Check 'an explicit -AppId does not replace the saved one' ((Get-Content -Raw $idFile).Trim() -eq $first)
+    $threw = $false; try { Resolve-AppId 'not-a-guid' $idFile } catch { $threw = $true }
+    Check 'an -AppId that is not a GUID is refused' $threw
+    $threw = $false; try { Resolve-AppId ([guid]::Empty.ToString()) $idFile } catch { $threw = $true }
+    Check 'the empty GUID is refused' $threw
+    Set-Content -LiteralPath $idFile -Value 'garbage'
+    $threw = $false; try { Resolve-AppId '' $idFile } catch { $threw = $true }
+    Check 'a saved app ID that is not a GUID is refused' $threw
+}
+finally { if (Test-Path $idFile) { Remove-Item $idFile } }
+
 # ---- A built package -------------------------------------------------------------------------------------------------
 $out = Join-Path ([IO.Path]::GetTempPath()) "cowork-build-$([guid]::NewGuid().ToString('N'))"
+$testAppId = '11111111-2222-3333-4444-555555555555'
+# A settings file of the test's own, so the organization's plugin/cowork/cowork.local.json is never read or written.
+$settings = Join-Path $out 'cowork.local.json'
 try {
-    & $script -McpServerUrl 'https://taasmcp-test-app.example.test/mcp' -OAuthReferenceId 'test-auth-config-id' `
+    & $script -McpServerUrl 'https://taasmcp-test-app.example.test/mcp' -OAuthReferenceId 'test-auth-config-id' -AppId $testAppId `
         -DeveloperName 'Example Org' -WebsiteUrl 'https://example.test' -PrivacyUrl 'https://example.test/privacy' `
-        -TermsUrl 'https://example.test/terms' -OutputPath $out 6>&1 | Out-Null
+        -TermsUrl 'https://example.test/terms' -OutputPath $out -SettingsPath $settings 6>&1 | Out-Null
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $out 'teamswork-ticketing-cowork.zip'))
     try {
@@ -140,11 +166,51 @@ try {
     Check 'no placeholder is left in the packaged manifest' ($manifestText -notmatch '\{\{')
     Check 'the endpoint and auth config ID are filled in' ($manifest.agentConnectors[0].toolSource.remoteMcpServer.mcpServerUrl -eq 'https://taasmcp-test-app.example.test/mcp' -and
         $manifest.agentConnectors[0].toolSource.remoteMcpServer.authorization.referenceId -eq 'test-auth-config-id')
+    Check 'the app ID is filled in' ($manifest.id -eq $testAppId)
 
     $threw = $false
-    try { & $script -McpServerUrl 'http://insecure.example.test/mcp' -OAuthReferenceId 'x' -DeveloperName 'x' -WebsiteUrl 'https://x.test' -PrivacyUrl 'https://x.test' -TermsUrl 'https://x.test' -OutputPath $out 6>&1 | Out-Null }
+    try { & $script -McpServerUrl 'http://insecure.example.test/mcp' -OAuthReferenceId 'x' -AppId $testAppId -DeveloperName 'x' -WebsiteUrl 'https://x.test' -PrivacyUrl 'https://x.test' -TermsUrl 'https://x.test' -OutputPath $out -SettingsPath $settings 6>&1 | Out-Null }
     catch { $threw = $true }
     Check 'a plain http endpoint is refused' $threw
+    Check 'a build without -SaveSettings writes no settings file' (-not (Test-Path $settings))
+
+    # ---- Local settings: saved once, read by later builds ----------------------------------------------------------
+    $message = ''
+    try { & $script -OutputPath $out -SettingsPath $settings 6>&1 | Out-Null } catch { $message = $_.Exception.Message }
+    Check 'a build with nothing passed or saved names what is missing' ($message -match 'McpServerUrl' -and $message -match 'SaveSettings')
+
+    & $script -McpServerUrl 'https://taasmcp-test-app.example.test/mcp' -OAuthReferenceId 'test-auth-config-id' -AppId $testAppId `
+        -DeveloperName 'Example Org' -WebsiteUrl 'https://example.test' -PrivacyUrl 'https://example.test/privacy' `
+        -TermsUrl 'https://example.test/terms' -OutputPath $out -SettingsPath $settings -SaveSettings 6>&1 | Out-Null
+    $saved = Get-Content -Raw $settings | ConvertFrom-Json
+    Check '-SaveSettings writes every value, the app ID included' ($saved.AppId -eq $testAppId -and $saved.DeveloperName -eq 'Example Org' -and $saved.TermsUrl -eq 'https://example.test/terms')
+
+    & $script -DeveloperName 'Another Org' -OutputPath $out -SettingsPath $settings 6>&1 | Out-Null
+    $zip = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $out 'teamswork-ticketing-cowork.zip'))
+    try {
+        $reader = [IO.StreamReader]::new(($zip.Entries | Where-Object FullName -eq 'manifest.json').Open())
+        try { $rebuilt = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+    }
+    finally { $zip.Dispose() }
+    Check 'a later build reads the saved values' ($rebuilt.id -eq $testAppId -and $rebuilt.agentConnectors[0].toolSource.remoteMcpServer.authorization.referenceId -eq 'test-auth-config-id')
+    Check 'a value passed wins over the saved one' ($rebuilt.developer.name -eq 'Another Org')
+    $message = ''
+    try { & $script -McpServerUrl '' -OutputPath $out -SettingsPath $settings 6>&1 | Out-Null } catch { $message = $_.Exception.Message }
+    Check 'a value passed empty is refused, not taken from the settings file' ($message -match 'McpServerUrl was passed empty')
+    Check 'a build without -SaveSettings leaves the saved values alone' ((Get-Content -Raw $settings | ConvertFrom-Json).DeveloperName -eq 'Example Org')
+
+    # Relative paths are PowerShell's, so a build run after Set-Location saves and writes where its next build looks.
+    $nested = Join-Path $out 'nested'
+    New-Item -ItemType Directory -Force $nested | Out-Null
+    Push-Location $nested
+    try {
+        & $script -McpServerUrl 'https://taasmcp-test-app.example.test/mcp' -OAuthReferenceId 'test-auth-config-id' -AppId $testAppId `
+            -DeveloperName 'Example Org' -WebsiteUrl 'https://example.test' -PrivacyUrl 'https://example.test/privacy' `
+            -TermsUrl 'https://example.test/terms' -OutputPath 'relative-out' -SettingsPath 'relative.local.json' -SaveSettings 6>&1 | Out-Null
+    }
+    finally { Pop-Location }
+    Check 'relative paths resolve from the current PowerShell location' ((Test-Path (Join-Path $nested 'relative.local.json')) -and
+        (Test-Path (Join-Path $nested 'relative-out/teamswork-ticketing-cowork.zip')))
 }
 finally { if (Test-Path $out) { Remove-Item -Recurse -Force $out } }
 
