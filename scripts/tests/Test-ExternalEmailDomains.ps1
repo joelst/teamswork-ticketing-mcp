@@ -25,6 +25,9 @@ foreach ($value in '', ' ', ',', '@ ;', 'contoso.com, *', '*.contoso.com', 'cont
 Check 'a Kelvin sign (U+212A) for K is refused' (-not (Accepts "$([char]0x212A)ontoso.com"))
 Check 'a newline before the dot is refused' (-not (Accepts "contoso`
 .com"))
+# PowerShell's -eq ignores zero-width characters; the server's ordinal comparison doesn't.
+Check 'a zero-width space after * is refused' (-not (Accepts "*$([char]0x200B)"))
+Check 'a byte order mark after * is refused' (-not (Accepts "*$([char]0xFEFF)"))
 
 $message = try { & $check -Value ','; '' } catch { $_.Exception.Message }
 Check 'the refusal says what to set' ($message -match 'names no domain' -and $message -match 'contoso\.com')

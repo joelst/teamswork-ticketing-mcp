@@ -34,7 +34,9 @@ function Test-HostName([string] $Domain) {
     return $true
 }
 
-if ($entries.Count -eq 1 -and $entries[0] -eq '*') { return }
+# Ordinal, as the server compares: -eq ignores zero-width characters, so "*" followed by U+200B would pass here and then
+# stop the server starting.
+if ($entries.Count -eq 1 -and [string]::Equals($entries[0], '*', [StringComparison]::Ordinal)) { return }
 
 $invalid = @($entries | Where-Object { -not (Test-HostName $_) })
 if ($entries.Count -eq 0 -or $invalid.Count -gt 0) {
