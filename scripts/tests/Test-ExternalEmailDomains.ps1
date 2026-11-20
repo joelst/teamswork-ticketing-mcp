@@ -21,6 +21,11 @@ foreach ($value in '', ' ', ',', '@ ;', 'contoso.com, *', '*.contoso.com', 'cont
     Check "'$value' is refused" (-not (Accepts $value))
 }
 
+# Two the server refuses that a case-insensitive or $-anchored match would let through.
+Check 'a Kelvin sign (U+212A) for K is refused' (-not (Accepts "$([char]0x212A)ontoso.com"))
+Check 'a newline before the dot is refused' (-not (Accepts "contoso`
+.com"))
+
 $message = try { & $check -Value ','; '' } catch { $_.Exception.Message }
 Check 'the refusal says what to set' ($message -match 'names no domain' -and $message -match 'contoso\.com')
 

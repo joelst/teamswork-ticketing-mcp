@@ -50,9 +50,20 @@ Cloud Application Administrator (see Microsoft's
 ```powershell
 $cli    = az ad sp show --id 04b07795-8ddb-461a-bbee-02f9e1bf7b46 --query id -o tsv   # the Azure CLI
 $server = az ad sp show --id <serverClientId> --query id -o tsv
-$grants = az rest --method GET --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$cli' and resourceId eq '$server'" | ConvertFrom-Json
-$grants.value | Format-Table id, consentType, principalId, scope
-$grants.value | ForEach-Object { az rest --method DELETE --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($_.id)" }
+# Every page: each user's consent is a grant of its own, so there can be more than Graph returns at once.
+$url = "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$cli' and resourceId eq '$server'"
+$grants = @()
+while ($url) {
+    $page = az rest --method GET --url $url | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw 'Listing the grants failed, so none was revoked.' }
+    $grants += $page.value
+    $url = $page.'@odata.nextLink'
+}
+$grants | Format-Table id, consentType, principalId, scope
+foreach ($grant in $grants) {
+    az rest --method DELETE --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($grant.id)"
+    if ($LASTEXITCODE -ne 0) { throw "Revoking grant $($grant.id) failed; run this again to finish." }
+}
 ```
 
 Tokens already issued stay valid until they expire.
@@ -105,7 +116,8 @@ az account get-access-token --resource api://<serverClientId> --query accessToke
 
 The Azure CLI needs consent for the scope first. On a test tenant, a registration made with `-PreAuthorizeAzureCli`
 gives it without a prompt. Otherwise a user (where users may consent) or an admin grants it, for example by signing in
-with `az login --scope api://<serverClientId>/.default`; until then Entra refuses with *consent required*
+with `az login --scope api://<serverClientId>/access_as_user` (the Azure CLI has no static permission on the server, so
+`/.default` can't ask for it); until then Entra refuses with *consent required*
 (AADSTS65001). If `Entra:AcceptedClientApplicationIds` is set, the server also refuses the token unless the Azure CLI's
 client ID, `04b07795-8ddb-461a-bbee-02f9e1bf7b46`, is in that list.
 

@@ -21,14 +21,15 @@ param(
 
 $entries = @("$Value" -split '[,; ]' | ForEach-Object { $_.Trim().TrimStart('@') } | Where-Object { $_ })
 
-# The server's host-name rule (ToolValidation.IsHostName): two or more labels of letters, digits and hyphens, none
-# starting or ending with a hyphen, and a last label that isn't all digits.
+# The server's host-name rule (ToolValidation.IsHostName): two or more labels of ASCII letters, digits and hyphens,
+# none starting or ending with a hyphen, and a last label that isn't all digits. The matches are case-sensitive and
+# anchored with \A and \z: a case-insensitive [A-Za-z] also matches the Kelvin sign (U+212A), and $ allows a newline.
 function Test-HostName([string] $Domain) {
     if ($Domain.Length -lt 1 -or $Domain.Length -gt 253) { return $false }
     $labels = $Domain.Split('.')
-    if ($labels.Count -lt 2 -or $labels[-1] -match '^[0-9]+$') { return $false }
+    if ($labels.Count -lt 2 -or $labels[-1] -cmatch '\A[0-9]+\z') { return $false }
     foreach ($label in $labels) {
-        if ($label -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$') { return $false }
+        if ($label -cnotmatch '\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\z') { return $false }
     }
     return $true
 }
