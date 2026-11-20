@@ -22,6 +22,8 @@ param serviceAccountId = readEnvironmentVariable('TAAS_SERVICE_ACCOUNT_ID', '')
 param serviceAccountName = readEnvironmentVariable('TAAS_SERVICE_ACCOUNT_NAME', '')
 param serviceAccountEmail = readEnvironmentVariable('TAAS_SERVICE_ACCOUNT_EMAIL', '')
 // No fallback: a deployment must say which outside domains may be requestors (your own, such as contoso.com, or *).
+// Bicep can only check it isn't empty, and a value the server refuses (",", "contoso") deploys a revision that never
+// starts, so check it first: ./infra/scripts/Test-ExternalEmailDomains.ps1 -Value $env:TAAS_EXTERNAL_EMAIL_DOMAINS
 param externalEmailDomains = readEnvironmentVariable('TAAS_EXTERNAL_EMAIL_DOMAINS')
 param acceptedClientApplicationIds = readEnvironmentVariable('TAAS_ACCEPTED_CLIENT_APPLICATION_IDS', '')
 param blockedClientApplicationIds = readEnvironmentVariable('TAAS_BLOCKED_CLIENT_APPLICATION_IDS', '')
