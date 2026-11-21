@@ -64,7 +64,7 @@ public sealed class ReviewRound5Tests
 
         using JsonDocument doc = JsonDocument.Parse(await new TicketTools(client, new FixedActor(Jane), cache, options).CreateTicket("Hi", priority: "Low", cancellationToken: caller.Token));
 
-        Assert.Equal("Low", doc.RootElement.GetProperty("item").GetProperty("priority").GetString());
+        Assert.Equal("Low", doc.RootElement.GetProperty("changed").GetProperty("priority").GetString());
         Assert.Equal(2, handler.Requests.Count);
     }
 }

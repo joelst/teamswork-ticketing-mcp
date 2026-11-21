@@ -355,7 +355,7 @@ public sealed class ReviewRound3Tests
             """);
         (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
 
-        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), cache, options).ListMyTickets(cancellationToken: Ct));
+        using JsonDocument doc = JsonDocument.Parse(await new QueueTools(client, new FixedActor(Jane), cache, options).GetQueue(include: [], cancellationToken: Ct));
 
         Assert.Equal(["b", "c"], doc.RootElement.GetProperty("items").EnumerateArray().Select(t => t.GetProperty("id").GetString()));
     }

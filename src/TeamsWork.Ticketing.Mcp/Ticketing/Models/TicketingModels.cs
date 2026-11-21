@@ -30,10 +30,18 @@ public sealed record WorkflowState(
 /// Ticket as returned by the API. Known fields are typed; anything the vendor adds later is preserved in
 /// <see cref="Extra"/> so tool output never silently drops data.
 /// </summary>
-public sealed class Ticket
+public sealed class Ticket : IJsonOnDeserialized
 {
+    private int? _ticketNo;
+
     [JsonPropertyName("id")] public string? Id { get; init; }
-    [JsonPropertyName("ticketNo")] public int? TicketNo { get; init; }
+
+    /// <summary>
+    /// The human ticket number. The API returns it as ticketNo, but a 'select' names the field ticketId, so a selected
+    /// row carries it under that name; it is moved here when the response is read, so tools always show it as ticketNo
+    /// and ticketId only ever means the UUID.
+    /// </summary>
+    [JsonPropertyName("ticketNo")] public int? TicketNo { get => _ticketNo; init => _ticketNo = value; }
     [JsonPropertyName("title")] public string? Title { get; init; }
     [JsonPropertyName("status")] public string? Status { get; init; }
     [JsonPropertyName("requestor")] public TicketUser? Requestor { get; init; }
@@ -65,7 +73,33 @@ public sealed class Ticket
     [JsonPropertyName("isRtEscalated")] public bool? IsRtEscalated { get; init; }
     [JsonPropertyName("origin")] public string? Origin { get; init; }
 
+    /// <summary>
+    /// When the stored ticket last changed, in Unix seconds. Unlike lastUpdatedOn it moves with every comment too, so it
+    /// tells whether a ticket changed between two reads.
+    /// </summary>
+    [JsonPropertyName("_ts")] public long? Ts { get; init; }
+
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        if (Extra?.TryGetValue("ticketId", out JsonElement value) != true)
+        {
+            return;
+        }
+
+        int? number = value.ValueKind switch
+        {
+            JsonValueKind.Number when value.TryGetInt32(out int n) => n,
+            JsonValueKind.String when int.TryParse(value.GetString(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int n) => n,
+            _ => null,
+        };
+        if (number is int ticketNo)
+        {
+            _ticketNo ??= ticketNo;
+            Extra.Remove("ticketId");
+        }
+    }
 }
 
 /// <summary>Writable subset of a ticket used for create and update. Null members are omitted from the request.</summary>
@@ -100,6 +134,11 @@ public sealed class Attachment
     [JsonPropertyName("filename")] public string? Filename { get; init; }
 }
 
+/// <summary>
+/// One entry in a ticket's history. The vendor's spec names the author createdBy and the time createdDateTime, but the
+/// live API sends user and createdOn (and leaves the others out), so both are read and <see cref="Author"/> and
+/// <see cref="When"/> take whichever is there.
+/// </summary>
 public sealed class Activity
 {
     [JsonPropertyName("id")] public string? Id { get; init; }
@@ -108,11 +147,30 @@ public sealed class Activity
     [JsonPropertyName("comment_HTML")] public string? CommentHtml { get; init; }
     [JsonPropertyName("isPrivate")] public bool? IsPrivate { get; init; }
     [JsonPropertyName("createdDateTime")] public string? CreatedDateTime { get; init; }
+    [JsonPropertyName("createdOn")] public string? CreatedOn { get; init; }
     [JsonPropertyName("createdBy")] public TicketUser? CreatedBy { get; init; }
+    [JsonPropertyName("user")] public TicketUser? User { get; init; }
+
+    /// <summary>What happened: created, started, assigned, commented, resolved, closed, reopened, automation_..., and so on.</summary>
+    [JsonPropertyName("action")] public string? Action { get; init; }
+
+    /// <summary>Present when an automation rule did this: the rule and what it changed.</summary>
+    [JsonPropertyName("automation")] public JsonElement? Automation { get; init; }
+
     [JsonPropertyName("attachments")] public IReadOnlyList<Attachment>? Attachments { get; init; }
     [JsonPropertyName("changes")] public IReadOnlyList<ActivityChange>? Changes { get; init; }
 
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
+
+    [JsonIgnore] public TicketUser? Author => User ?? CreatedBy;
+
+    [JsonIgnore] public string? When => CreatedOn ?? CreatedDateTime;
+
+    /// <summary>Done by an automation rule rather than a person.</summary>
+    [JsonIgnore]
+    public bool IsAutomation =>
+        Automation is { ValueKind: JsonValueKind.Object } ||
+        Action?.StartsWith("automation", StringComparison.OrdinalIgnoreCase) == true;
 }
 
 public sealed class CommentActivity
@@ -254,7 +312,6 @@ public sealed record TicketListQuery
 {
     public string? Search { get; init; }
     public string? Title { get; init; }
-    public string? Status { get; init; }
     public string? StatusId { get; init; }
     public bool? IsResolved { get; init; }
     public string? Priority { get; init; }

@@ -51,7 +51,7 @@ public sealed class TicketingRateLimiter : IDisposable
         if (!lease.IsAcquired)
         {
             lease.Dispose();
-            throw new TicketingApiException(null, "The server is busy with other Ticketing API requests. Wait a few seconds and retry.");
+            throw new TicketingApiException(null, "The server is busy with other Ticketing API requests. Wait a few seconds and retry.") { Throttled = true };
         }
 
         return lease;
@@ -66,7 +66,7 @@ public sealed class TicketingRateLimiter : IDisposable
             lease.Dispose();
             throw new TicketingApiException(
                 "The Ticketing API rate limit (100 requests per 60 seconds) has been reached. Wait a minute and retry, " +
-                "or request fewer / larger pages.");
+                "or request fewer / larger pages.") { Throttled = true };
         }
 
         return lease;

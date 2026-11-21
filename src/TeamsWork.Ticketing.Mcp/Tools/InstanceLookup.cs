@@ -48,7 +48,7 @@ internal sealed partial class InstanceLookup
         return await WithInstanceAsync(instance => ResolvePerson(person, paramName, instance, assigneeOnly, _externalDomains));
     }
 
-    public async Task<List<TicketTag>?> TagsAsync(IReadOnlyList<TagRef>? tags)
+    public async Task<List<TicketTag>?> TagsAsync(IReadOnlyList<TagRef>? tags, string paramName = "tags")
     {
         if (tags is null)
         {
@@ -63,15 +63,54 @@ internal sealed partial class InstanceLookup
         IReadOnlyList<TagCategory> categories = await _cache.GetTagCategoriesAsync(_client, refresh: false, _cancellationToken);
         try
         {
-            return tags.Select((t, i) => MatchTag(t, i, categories)).ToList();
+            return tags.Select((t, i) => MatchTag(t, i, categories, paramName)).ToList();
         }
         catch (McpException ex) when (IsMiss(ex))
         {
             // A tag added since the cache was filled isn't in it yet: read the tags once more before giving up.
             categories = await _cache.GetTagCategoriesAsync(_client, refresh: true, _cancellationToken);
-            return tags.Select((t, i) => MatchTag(t, i, categories)).ToList();
+            return tags.Select((t, i) => MatchTag(t, i, categories, paramName)).ToList();
         }
     }
+
+    /// <summary>
+    /// The tags a ticket has now, each with its category, for adding or removing one while keeping the rest (see
+    /// <see cref="TagEdits"/>). Read once more if one isn't found, in case it was added since the cache was filled.
+    /// Deleted categories count too: a ticket keeps a tag from one, and a text that a deleted category and an active one
+    /// both have is refused as ambiguous rather than read as the active one's.
+    /// </summary>
+    public async Task<List<TicketTag>> CurrentTagsAsync(JsonElement? ticketTags)
+    {
+        IReadOnlyList<TagCategory> categories = await _cache.GetTagCategoriesAsync(_client, refresh: false, _cancellationToken, includeDeleted: true);
+        try
+        {
+            return TagEdits.Current(ticketTags, categories);
+        }
+        catch (McpException ex) when (IsMiss(ex))
+        {
+            categories = await _cache.GetTagCategoriesAsync(_client, refresh: true, _cancellationToken, includeDeleted: true);
+            return TagEdits.Current(ticketTags, categories);
+        }
+    }
+
+    /// <summary>
+    /// The instance's tag categories (cached), for resolving the categories <paramref name="remove"/> names. Read once more
+    /// if one of them isn't found, in case it was added or renamed since the cache was filled, as with added tags. Deleted
+    /// categories are included, after the active ones, since a ticket can still have a tag from one.
+    /// </summary>
+    public async Task<IReadOnlyList<TagCategory>> TagCategoriesAsync(IReadOnlyList<TagRef> remove)
+    {
+        IReadOnlyList<TagCategory> categories = await _cache.GetTagCategoriesAsync(_client, refresh: false, _cancellationToken, includeDeleted: true);
+        bool missing = remove.Any(r => !string.IsNullOrWhiteSpace(r.TagCategoryId) && TagEdits.FindCategory(r.TagCategoryId.Trim(), categories) is null);
+        if (missing)
+        {
+            categories = await _cache.GetTagCategoriesAsync(_client, refresh: true, _cancellationToken, includeDeleted: true);
+        }
+
+        return categories.OrderBy(c => c.Deleted == true).ToList();
+    }
+
+    internal static McpException TagMiss(string message) => Miss(message);
 
     public async Task<JsonElement?> CustomFieldsAsync(Dictionary<string, JsonElement>? customFields)
     {
@@ -150,7 +189,7 @@ internal sealed partial class InstanceLookup
         {
             throw new McpException(
                 $"'{paramName}' mixes the ID and email of different people ({(byId ?? byEmail)!.Name} is in the assignee list with other " +
-                "details). Use the id, name, and email exactly as get_instance lists them, or just the email.");
+                "details). Give just the listed person's email (get_instance shows each assignee as name and email).");
         }
 
         if (assigneeOnly)
@@ -339,18 +378,38 @@ internal sealed partial class InstanceLookup
         name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
         name.Split([' ', '-', '.', ','], StringSplitOptions.RemoveEmptyEntries).Any(w => w.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Accepts a category ID or name, and a tag's text in any case; returns the canonical ID and text.</summary>
-    internal static TicketTag MatchTag(TagRef tag, int index, IReadOnlyList<TagCategory> categories)
+    /// <summary>
+    /// Accepts a category ID or name, and a tag's text in any case; returns the canonical ID and text. The category may be
+    /// left out when exactly one category has a tag with that text.
+    /// </summary>
+    internal static TicketTag MatchTag(TagRef tag, int index, IReadOnlyList<TagCategory> categories, string paramName = "tags")
     {
-        string category = ToolValidation.RequireText(tag.TagCategoryId, $"tags[{index}].tagCategoryId", 256);
-        string text = ToolValidation.RequireText(tag.Text, $"tags[{index}].text", 256);
+        string text = ToolValidation.RequireText(tag.Text, $"{paramName}[{index}].text", 256);
+        if (Blank(tag.TagCategoryId) is null)
+        {
+            // Deleted categories are left out here as well as by the cache, so no caller can make a tag look ambiguous with one.
+            var owners = categories
+                .Where(c => c.Id is not null && c.Deleted != true && (c.Tags ?? []).Any(t => t.Deleted != true && Same(t.Text, text)))
+                .ToList();
+            return owners.Count switch
+            {
+                1 => MatchTag(tag with { TagCategoryId = owners[0].Id }, index, categories, paramName),
+                0 => throw Miss($"'{paramName}[{index}].text' '{text}' isn't a tag in any category. list_tag_categories lists them."),
+                _ => throw new McpException(
+                    $"'{paramName}[{index}].text' '{text}' is a tag in more than one category ({string.Join(", ", owners.Select(c => c.Text ?? c.Id))}); " +
+                    "pass tagCategoryId too."),
+            };
+        }
 
-        TagCategory? match = categories.FirstOrDefault(c => string.Equals(c.Id, category, StringComparison.Ordinal))
-                             ?? categories.FirstOrDefault(c => Same(c.Text, category));
+        string category = ToolValidation.RequireText(tag.TagCategoryId, $"{paramName}[{index}].tagCategoryId", 256);
+
+        IEnumerable<TagCategory> active = categories.Where(c => c.Deleted != true);
+        TagCategory? match = active.FirstOrDefault(c => string.Equals(c.Id, category, StringComparison.Ordinal))
+                             ?? active.FirstOrDefault(c => Same(c.Text, category));
         if (match?.Id is null)
         {
             throw Miss(
-                $"'tags[{index}].tagCategoryId' '{category}' is not a tag category ID or name. Categories: " +
+                $"'{paramName}[{index}].tagCategoryId' '{category}' is not a tag category ID or name. Categories: " +
                 (categories.Count == 0 ? "(none defined)" : string.Join(", ", categories.Select(c => c.Text).Where(t => t is not null))) + ".");
         }
 
@@ -360,7 +419,7 @@ internal sealed partial class InstanceLookup
         return canonical is not null
             ? new TicketTag(match.Id, canonical)
             : throw Miss(
-                $"'tags[{index}].text' '{text}' is not a tag in category '{match.Text}'. Tags there: " +
+                $"'{paramName}[{index}].text' '{text}' is not a tag in category '{match.Text}'. Tags there: " +
                 (tagTexts.Count == 0 ? "(none)" : string.Join(", ", tagTexts.Take(30)) + (tagTexts.Count > 30 ? ", ..." : "")) + ".");
     }
 
@@ -416,7 +475,7 @@ internal sealed partial class InstanceLookup
     /// optional fields are left out: they are the form's built-in ones (Requestor, Priority, Expected Date, Tags) with
     /// non-GUID IDs, set through their own parameters.
     /// </summary>
-    private static List<FieldDefinition> CustomFieldsOf(Instance instance) =>
+    internal static List<FieldDefinition> CustomFieldsOf(Instance instance) =>
         new[] { instance.CustomFields, instance.CustomFieldsLeft, instance.CustomFieldsRight }
             .SelectMany(list => list ?? [])
             .Where(f => Guid.TryParse(f.Id, out _))
@@ -458,7 +517,7 @@ internal sealed partial class InstanceLookup
         };
     }
 
-    private sealed record FieldDefinition(CustomField Field, string? UnusableStatus, bool Conflicting);
+    internal sealed record FieldDefinition(CustomField Field, string? UnusableStatus, bool Conflicting);
 
     // Matches the limit on descriptions and comments.
     private const int MaxTextLength = 20_000;

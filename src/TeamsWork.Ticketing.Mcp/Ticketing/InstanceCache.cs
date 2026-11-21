@@ -32,6 +32,27 @@ public sealed class InstanceCache
     /// <summary>How often a refresh is honoured, for the whole cache.</summary>
     public static readonly TimeSpan MinRefreshInterval = TimeSpan.FromSeconds(30);
 
+    /// <summary>Ticket numbers seen so far and their UUIDs, shared like the rest of the cache.</summary>
+    public TicketNumbers Numbers { get; } = new();
+
+    /// <summary>Everyone seen as a ticket's assignee, who counts as staff in every tool alike.</summary>
+    public SeenAssignees Assignees { get; } = new();
+
+    /// <summary>Notes what a ticket read from the API shows: its number, and its assignee as staff.</summary>
+    public void Seen(Ticket? ticket)
+    {
+        Numbers.Remember(ticket);
+        Assignees.Remember(ticket?.Assignee);
+    }
+
+    public void Seen(IEnumerable<Ticket>? tickets)
+    {
+        foreach (Ticket ticket in tickets ?? [])
+        {
+            Seen(ticket);
+        }
+    }
+
     private readonly TimeSpan _ttl;
     private readonly TimeProvider _time;
     private readonly TimeZoneOffsetResolver _timeZones;
@@ -108,8 +129,28 @@ public sealed class InstanceCache
             cancellationToken);
     }
 
-    /// <summary>Tag categories that haven't been deleted. <paramref name="refresh"/> works as for the instance.</summary>
-    public Task<IReadOnlyList<TagCategory>> GetTagCategoriesAsync(TicketingClient client, bool refresh, CancellationToken cancellationToken)
+    /// <summary>The instance settings when a current copy is cached for this offset, without reading them.</summary>
+    public Instance? CachedInstance(int? timezoneOffset)
+    {
+        int offset = _timeZones.Resolve(timezoneOffset);
+        lock (_lock)
+        {
+            return Usable(_instances.GetValueOrDefault(offset), refresh: false);
+        }
+    }
+
+    /// <summary>
+    /// Tag categories that haven't been deleted, or every one with <paramref name="includeDeleted"/>: a ticket can still
+    /// have a tag from a deleted category, and reading it as another category's would rewrite it. <paramref name="refresh"/>
+    /// works as for the instance.
+    /// </summary>
+    public async Task<IReadOnlyList<TagCategory>> GetTagCategoriesAsync(TicketingClient client, bool refresh, CancellationToken cancellationToken, bool includeDeleted = false)
+    {
+        IReadOnlyList<TagCategory> all = await AllTagCategoriesAsync(client, refresh, cancellationToken);
+        return includeDeleted ? all : all.Where(c => c.Deleted != true).ToList();
+    }
+
+    private Task<IReadOnlyList<TagCategory>> AllTagCategoriesAsync(TicketingClient client, bool refresh, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return GetAsync(
@@ -124,7 +165,7 @@ public sealed class InstanceCache
             async () =>
             {
                 ListResponse<TagCategory> r = await client.ListTagCategoriesAsync(CancellationToken.None, shared: true);
-                return (IReadOnlyList<TagCategory>)(r.Items ?? []).Where(c => c.Deleted != true).ToList();
+                return (IReadOnlyList<TagCategory>)(r.Items ?? []).ToList();
             },
             (categories, honoured, generation) =>
             {

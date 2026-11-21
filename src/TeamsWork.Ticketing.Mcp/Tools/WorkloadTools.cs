@@ -1,7 +1,9 @@
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 using TeamsWork.Ticketing.Mcp.Auth;
 using TeamsWork.Ticketing.Mcp.Configuration;
@@ -11,18 +13,15 @@ using TeamsWork.Ticketing.Mcp.Ticketing.Models;
 namespace TeamsWork.Ticketing.Mcp.Tools;
 
 /// <summary>
-/// Questions about who has what: the caller's own tickets, SLA risk, and counts. The API can't filter on assignee,
-/// requestor, or SLA state, so these tools read tickets through <see cref="TicketScan"/> and filter them here.
+/// Who the server acts as, SLA risk, and counts. The API can't filter on assignee or SLA state, so these tools read
+/// tickets through <see cref="TicketScan"/> and filter them here. Queues are <see cref="QueueTools"/>.
 /// </summary>
 [McpServerToolType]
 public sealed class WorkloadTools
 {
-    private const string SummaryFields = "id,ticketId,title,status,priority,assignee,requestor,expectedDate,createdOn,lastUpdatedOn";
-
     // SLA flags aren't all selectable, so an SLA scan reads whole tickets, in smaller pages to keep responses modest.
-    private const int FullTicketPageSize = 200;
+    internal const int FullTicketPageSize = 200;
 
-    private static readonly string[] Roles = ["assignee", "requestor", "either"];
     private static readonly string[] SlaKinds = ["any", "breached", "escalated"];
     private static readonly string[] GroupBys = ["status", "priority", "assignee"];
 
@@ -42,7 +41,7 @@ public sealed class WorkloadTools
     [McpServerTool(Name = "whoami", Title = "Who am I", ReadOnly = true, Idempotent = true, OpenWorld = false)]
     [Description(
         "Show the account this server acts as: the signed-in user, or the configured service account for app-only callers and local " +
-        "(stdio) use. Ticket changes are attributed to it, and list_my_tickets matches tickets against it.")]
+        "(stdio) use. Ticket changes are attributed to it, and get_queue's 'me' is it.")]
     public Task<string> WhoAmI(CancellationToken cancellationToken = default)
     {
         return ToolRunner.RunAsync(async () =>
@@ -55,46 +54,23 @@ public sealed class WorkloadTools
         });
     }
 
-    [McpServerTool(Name = "list_my_tickets", Title = "List my tickets", ReadOnly = true, Idempotent = true, OpenWorld = false)]
-    [Description(
-        "List tickets assigned to or requested by the caller (see whoami), newest first, unresolved only by default. Answers " +
-        "'what's on my plate' in one call; the API has no assignee filter, so list_tickets can't. Returns ticket summaries.")]
-    public Task<string> ListMyTickets(
-        [Description("assignee (default): tickets assigned to me; requestor: tickets I raised; either: both.")] string? role = null,
-        [Description("true to include resolved and closed tickets.")] bool includeResolved = false,
-        [Description("Only this priority: Low, Medium, Important, or Urgent.")] string? priority = null,
-        [Description(DateFilterText.CreatedAfter)] string? createdAfter = null,
-        [Description(DateFilterText.CreatedBefore)] string? createdBefore = null,
-        [Description("Maximum tickets to return (default 20, max 100).")] int? limit = null,
-        [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
-        CancellationToken cancellationToken = default)
+    internal static bool HasSlaFlags(Ticket t) =>
+        t.IsFrtBreached is not null || t.IsRtBreached is not null || t.IsFrtEscalated is not null || t.IsRtEscalated is not null;
+
+    /// <summary>Whether the instance tracks SLAs (see <see cref="SlaEnabled"/>); null when its settings can't be read.</summary>
+    private Task<bool?> SlaEnabledAsync(int? timezoneOffset, CancellationToken cancellationToken) =>
+        SlaEnabledAsync(_cache, _client, timezoneOffset, cancellationToken);
+
+    internal static async Task<bool?> SlaEnabledAsync(InstanceCache cache, TicketingClient client, int? timezoneOffset, CancellationToken cancellationToken)
     {
-        return ToolRunner.RunAsync(async () =>
+        try
         {
-            string which = ToolValidation.OptionalEnum(role, "role", Roles) ?? "assignee";
-            int max = ToolValidation.ResolvePageSize(limit, _options.DefaultPageSize, _options.MaxPageSize);
-            var query = new TicketListQuery
-            {
-                IsResolved = includeResolved ? null : false,
-                Priority = ToolValidation.OptionalEnum(priority, "priority", ToolValidation.Priorities),
-                CreatedAfter = ToolValidation.OptionalDateFilter(createdAfter, "createdAfter"),
-                CreatedBefore = ToolValidation.OptionalDateFilter(createdBefore, "createdBefore"),
-                Select = SummaryFields,
-                TimezoneOffset = timezoneOffset,
-            };
-            ActingUser me = await _actingUser.GetActingUserAsync(cancellationToken);
-
-            bool Mine(Ticket t) => which switch
-            {
-                "requestor" => IsPerson(t.Requestor, me),
-                "either" => IsPerson(t.Assignee, me) || IsPerson(t.Requestor, me),
-                _ => IsPerson(t.Assignee, me),
-            };
-
-            TicketScan.Result<TicketSummary> scan = await TicketScan.RunAsync(
-                _client, query, t => Mine(t) ? TicketSummary.From(t) : null, _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
-            return Summaries(scan, max, query);
-        });
+            return SlaEnabled((await cache.GetInstanceAsync(client, timezoneOffset, refresh: false, cancellationToken)).Sla);
+        }
+        catch (TicketingApiException)
+        {
+            return null;
+        }
     }
 
     [McpServerTool(Name = "list_sla_risk", Title = "List SLA risks", ReadOnly = true, Idempotent = true, OpenWorld = false)]
@@ -108,7 +84,7 @@ public sealed class WorkloadTools
         [Description(DateFilterText.CreatedAfter)] string? createdAfter = null,
         [Description(DateFilterText.CreatedBefore)] string? createdBefore = null,
         [Description("Maximum tickets to return (default 20, max 100).")] int? limit = null,
-        [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
+        [Description(DateFilterText.TimezoneOffset)] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
     {
         return ToolRunner.RunAsync(async () =>
@@ -127,23 +103,27 @@ public sealed class WorkloadTools
             // With every SLA rule off, the API reports no SLA flags at all, so a scan would find nothing and look like
             // "nothing at risk". Say what is actually true, and save the requests.
             // The settings only save a scan; if they can't be read, scan anyway rather than fail.
-            bool? slaEnabled;
+            Instance? instance;
             try
             {
-                slaEnabled = SlaEnabled((await _cache.GetInstanceAsync(_client, timezoneOffset, refresh: false, cancellationToken)).Sla);
+                instance = await _cache.GetInstanceAsync(_client, timezoneOffset, refresh: false, cancellationToken);
             }
             catch (TicketingApiException)
             {
-                slaEnabled = null;
+                instance = null;
             }
 
+            bool? slaEnabled = instance is null ? null : SlaEnabled(instance.Sla);
             if (slaEnabled == false)
             {
-                return new ScanResult<TicketSummary>([], 0, 0, 0, null, false,
+                return new ScanResult<JsonObject>([], 0, 0, 0, null, false,
                     "SLA tracking is turned off on this instance (no first-response or resolution rule is enabled), so no ticket can breach " +
                     "or escalate an SLA. A Ticketing administrator can turn it on in the instance's SLA settings.");
             }
 
+            // For each row's state label, the settings that read returned (cached or not); if it failed, rows show the raw
+            // status rather than try again.
+            System.Text.Json.JsonElement? workflows = instance?.Workflows;
             bool AtRisk(Ticket t)
             {
                 bool breached = t.IsFrtBreached == true || t.IsRtBreached == true;
@@ -158,19 +138,20 @@ public sealed class WorkloadTools
 
             // Every mode reads whole tickets, so every result carries all four flags.
             bool anyFlags = false;
-            TicketScan.Result<TicketSummary> scan = await TicketScan.RunAsync(
+            TicketScan.Result<JsonObject> scan = await TicketScan.RunAsync(
                 _client,
                 query,
                 t =>
                 {
-                    anyFlags |= t.IsFrtBreached is not null || t.IsRtBreached is not null || t.IsFrtEscalated is not null || t.IsRtEscalated is not null;
-                    return AtRisk(t) ? TicketSummary.From(t) : null;
+                    anyFlags |= HasSlaFlags(t);
+                    _cache.Seen(t);
+                    return AtRisk(t) ? TicketViews.Row(t, workflows: workflows) : null;
                 },
                 _options.MaxScanTickets,
                 FullTicketPageSize,
                 cancellationToken);
 
-            ScanResult<TicketSummary> result = Summaries(scan, max, query);
+            ScanResult<JsonObject> result = Summaries(scan, max, query);
             return scan.Scanned > 0 && !anyFlags
                 ? result with
                 {
@@ -240,7 +221,7 @@ public sealed class WorkloadTools
         [Description("Comma-separated tag filter in the form tagCategoryId_tagText (IDs from list_tag_categories).")] string? tags = null,
         [Description(DateFilterText.CreatedAfter)] string? createdAfter = null,
         [Description(DateFilterText.CreatedBefore)] string? createdBefore = null,
-        [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
+        [Description(DateFilterText.TimezoneOffset)] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
     {
         return ToolRunner.RunAsync(async () =>
@@ -261,11 +242,15 @@ public sealed class WorkloadTools
             // Only each ticket's group is kept. A person is grouped by email (or ID when there is none), so one
             // person under two display names is one group, and shown with the first name seen.
             TicketScan.Result<GroupKey> scan = await TicketScan.RunAsync(
-                _client, query, t => GroupOf(t, by), _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
+                _client, query, t => { _cache.Seen(t); return GroupOf(t, by); }, _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
 
+            // A custom state is counted by its ID and shown by its label, with the ID beside it, as the other tools show it.
+            System.Text.Json.JsonElement? workflows = by == "status"
+                ? await WorkflowStatus.WorkflowsForLabelsAsync(scan.Matches.Select(k => new Ticket { Status = k.Identity }).ToList(), _cache, _client, timezoneOffset, cancellationToken)
+                : null;
             List<CountGroup> groups = scan.Matches
                 .GroupBy(k => k.Identity, StringComparer.OrdinalIgnoreCase)
-                .Select(g => new CountGroup(g.First().Label, g.Count()))
+                .Select(g => StatusGroup(g.First(), g.Count(), workflows))
                 .OrderByDescending(g => g.Count)
                 .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -284,49 +269,32 @@ public sealed class WorkloadTools
                 : new GroupKey(identity, Blank(t.Assignee?.Email) is string email ? $"{Blank(t.Assignee?.Name) ?? email} <{email}>" : Blank(t.Assignee?.Name) ?? identity);
         }
 
-        string? value = Blank(by == "priority" ? t.Priority : t.Status);
+        // A priority by the words the other tools show (Medium, not 2_Medium), so both forms count as one.
+        string? value = Blank(by == "priority" ? TicketViews.Priority(t.Priority) : t.Status);
         return new GroupKey(value ?? "", value ?? "(none)");
+    }
+
+    private static CountGroup StatusGroup(GroupKey key, int count, System.Text.Json.JsonElement? workflows)
+    {
+        if (workflows is null || key.Identity.Length == 0)
+        {
+            return new CountGroup(key.Label, count);
+        }
+
+        string label = WorkflowStatus.LabelOf(new Ticket { Status = key.Identity }, workflows) ?? key.Label;
+        return string.Equals(label, key.Identity, StringComparison.OrdinalIgnoreCase) ? new CountGroup(label, count) : new CountGroup(label, count, key.Identity);
     }
 
     private static string? Blank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private sealed record GroupKey(string Identity, string Label);
 
-    /// <summary>
-    /// Whether a ticket's person is the caller. The object ID decides when the ticket has one, so a ticket naming
-    /// someone else's ID with the caller's email (or the reverse) isn't counted as theirs; the email decides only for
-    /// people recorded without an ID, or in the email-to-ticket form where the ID is the email. A caller who is itself
-    /// in the email form (a service account without an object ID) can only be matched by email.
-    /// </summary>
-    private static bool IsPerson(TicketUser? user, ActingUser me)
+    private ScanResult<JsonObject> Summaries(TicketScan.Result<JsonObject> scan, int max, TicketListQuery query)
     {
-        if (user is null)
-        {
-            return false;
-        }
-
-        if (string.Equals(me.Id.Trim(), me.Email.Trim(), StringComparison.OrdinalIgnoreCase))
-        {
-            return !string.IsNullOrWhiteSpace(user.Email) && string.Equals(user.Email.Trim(), me.Email.Trim(), StringComparison.OrdinalIgnoreCase);
-        }
-
-        string? id = string.IsNullOrWhiteSpace(user.Id) ? null : user.Id.Trim();
-        bool sameEmail = !string.IsNullOrWhiteSpace(user.Email) && string.Equals(user.Email.Trim(), me.Email.Trim(), StringComparison.OrdinalIgnoreCase);
-        if (id is null || string.Equals(id, user.Email?.Trim(), StringComparison.OrdinalIgnoreCase))
-        {
-            return sameEmail || string.Equals(id, me.Id.Trim(), StringComparison.OrdinalIgnoreCase);
-        }
-
-        // Compared as object IDs, so one written another way still matches.
-        return Guid.TryParse(id, out Guid theirs) && Guid.TryParse(me.Id, out Guid mine) ? theirs == mine : string.Equals(id, me.Id.Trim(), StringComparison.OrdinalIgnoreCase);
-    }
-
-    private ScanResult<TicketSummary> Summaries(TicketScan.Result<TicketSummary> scan, int max, TicketListQuery query)
-    {
-        List<TicketSummary> items = scan.Matches.Take(max).ToList();
+        List<JsonObject> items = scan.Matches.Take(max).ToList();
         string? more = scan.Matches.Count > max ? $"{scan.Matches.Count} tickets matched; raise 'limit' or add filters to see more." : null;
         string? hint = string.Join(" ", new[] { TicketScan.TruncationHint(scan, query, _client.TimeZones), more }.OfType<string>()) is { Length: > 0 } both ? both : null;
-        return new ScanResult<TicketSummary>(items, items.Count, scan.Matches.Count, scan.Scanned, scan.Total, scan.Truncated, hint);
+        return new ScanResult<JsonObject>(items, items.Count, scan.Matches.Count, scan.Scanned, scan.Total, scan.Truncated, hint);
     }
 
     private sealed record WhoAmIResult(
@@ -338,7 +306,8 @@ public sealed class WorkloadTools
 
     private sealed record CountGroup(
         [property: JsonPropertyName("key")] string Key,
-        [property: JsonPropertyName("count")] int Count);
+        [property: JsonPropertyName("count")] int Count,
+        [property: JsonPropertyName("statusId"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? StatusId = null);
 
     private sealed record CountResult(
         [property: JsonPropertyName("groupBy")] string GroupBy,

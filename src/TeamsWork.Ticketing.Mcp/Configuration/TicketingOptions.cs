@@ -90,8 +90,8 @@ public sealed class TicketingOptions
     public int InstanceCacheSeconds { get; set; } = 300;
 
     /// <summary>
-    /// Most tickets one call to a filtering tool (list_my_tickets, list_sla_risk, count_tickets) or to
-    /// find_ticket_by_number reads. The API has no filter for assignee, requestor, SLA state, or ticket number, so those
+    /// Most tickets one call to a filtering tool (get_queue, list_sla_risk, count_tickets, preview_bulk_update) or
+    /// one ticket-number lookup reads. The API has no filter for assignee, requestor, SLA state, or ticket number, so those
     /// tools page through tickets and filter them here.
     /// </summary>
     [Range(1, 10_000)]
@@ -165,6 +165,23 @@ public sealed class TicketingOptions
             .Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(d => d.TrimStart('@'))
             .Where(d => d.Length > 0);
+
+    /// <summary>
+    /// Comma-separated accounts that write to tickets without being a person: the help desk's own mailbox, a no-reply
+    /// sender. Each is a whole address (helpdesk@contoso.com) or the part before the @ (helpdesk), which matches it at any
+    /// domain. Their comments are still shown, but don't count as anyone's reply when get_queue and get_ticket_brief work
+    /// out who a ticket is waiting on. Unset uses <see cref="DefaultSystemAccounts"/>; an empty value turns them off.
+    /// </summary>
+    public string? SystemAccounts { get; set; }
+
+    public const string DefaultSystemAccounts = "helpdesk,help-desk,servicedesk,service-desk,noreply,no-reply,donotreply,do-not-reply";
+
+    /// <summary>The entries of <see cref="SystemAccounts"/> (or the defaults), lower case.</summary>
+    public IReadOnlySet<string> SystemAccountSet() =>
+        (SystemAccounts ?? DefaultSystemAccounts)
+            .Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(a => a.ToLowerInvariant())
+            .ToHashSet(StringComparer.Ordinal);
 
     /// <summary>The endpoint <see cref="Region"/> names, or null when it is unset or not a known region.</summary>
     public string? RegionBaseUrl() =>

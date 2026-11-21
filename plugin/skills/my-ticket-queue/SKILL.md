@@ -2,13 +2,13 @@
 name: my-ticket-queue
 description: |
   Summarises the signed-in user's TeamsWork Ticketing help desk work: tickets assigned to them or raised by them,
-  which ones are at risk of breaching their SLA, and what to do next. Read-only.
+  which ones are waiting on them or at risk of breaching their SLA, and what to do next. Read-only.
   Use when the user asks "what's on my plate", "my tickets", "what should I work on next", "am I behind on
   anything", "which of my tickets are about to breach", or "summarise my queue for standup".
 license: MIT
 metadata:
   author: TeamsWork Ticketing MCP
-  version: "1.0.0"
+  version: "2.0.0"
 ---
 
 # My ticket queue
@@ -18,57 +18,54 @@ Gives the user a prioritised view of their own tickets. This skill only reads; f
 
 ## Tools this uses
 
-From the TeamsWork Ticketing connector: `whoami`, `list_my_tickets`, `list_sla_risk`, `get_ticket`,
-`get_ticket_context`, and `count_tickets` for team-wide questions.
+From the TeamsWork Ticketing connector: `get_queue`, `get_ticket_brief` for a closer look at one ticket, and
+`count_tickets` and `list_sla_risk` for team-wide questions.
 
 ## Workflow
 
-1. **Confirm whose queue it is.** Call `whoami`. It names the account changes are attributed to and that
-   `list_my_tickets` matches against. If it says no user is signed in (a service account), tell the user their
-   queue can't be read as them, and stop.
+1. **Get the queue in one call.** Call `get_queue` with no arguments: the user's open tickets, most urgent first,
+   each with `waitingOn`, `idleDays` and `sla`. That is everything the table below needs.
+   - Use `role: requestor` for "tickets I raised" and `role: either` for both.
+   - If the `hint` says no user is signed in, tell the user the queue is the service account's, not theirs.
+   - If the `hint` says the server stopped reading early, or that only the first rows have `waitingOn`, say so.
 
-2. **Get their tickets.** Call `list_my_tickets`:
-   - `role: assignee` by default. Use `requestor` for "tickets I raised" and `either` for both.
-   - Unresolved only, unless the user asks about closed work (`includeResolved: true`).
-   - If `truncated` is true, the server stopped reading early. Say so, and offer to continue with the
-     `createdBefore` date its `hint` names.
+2. **Read the SLA state.** Each row's `sla` is `ok`, `frtEscalated`, `rtEscalated`, `frtBreached` or `rtBreached`
+   (first response or resolution). A row without `sla` has an unknown state: report it as **not verified**. If the
+   response has `slaTracking: "off"`, say SLA tracking is turned off rather than reporting nothing at risk.
 
-3. **Check SLA flags.** Call `list_sla_risk` to find likely risks, then match those results to the user's tickets.
-   - `isFrtBreached` or `isRtBreached` means the first-response or resolution target has already passed.
-   - `isFrtEscalated` or `isRtEscalated` means the ticket was escalated for it.
-   - If the hint says SLA tracking is turned off, say that instead of reporting nothing at risk.
-   - This scan is instance-wide, newest first, and may be limited or truncated. Absence from its results does **not**
-     mean a user's ticket is safe. For every ticket not returned, call `get_ticket` and check its SLA flags directly.
-     Report `OK` only when all four flags are explicitly false; if the scan is truncated or the flags are missing or
-     unknown, report SLA status as **not verified** and say so.
+3. **Read who each ticket is waiting on.** `waitingOn` names a role on the ticket: `assignee` (the help desk),
+   `requestor` (the person who raised it) or `thirdParty` (someone outside). Map it to the user row by row: with the
+   default `role`, `assignee` means the user; with `role: requestor`, `requestor` means the user and `assignee` the
+   person working on it; with `role: either`, compare the row's `assignee` and `requestor` with the user. A row
+   without `waitingOn` couldn't be told: the `hint` says why (no recent public reply, history not read for that row,
+   a failed read, or a workflow that doesn't say whether it's resolved); call `get_ticket_brief` if it matters.
+   `idleDays` is how long since anyone last did anything on it.
 
-4. **Look closer only where it matters.** For the top few tickets (breached first, then Urgent and Important, then
-   the oldest), call `get_ticket_context` to see the latest activity: is it waiting on the user, or on the requestor?
+4. **Look closer only where it matters.** If the user asks about one ticket, or the next step isn't clear from the
+   row, call `get_ticket_brief` with its number.
 
-5. **Summarise** in the format below, most urgent first, and suggest the single next action for each of the top
-   tickets.
+5. **Summarise** in the format below, in the order `get_queue` returned, and suggest the single next action for
+   each of the top tickets.
 
 ## Output format
 
 **Your queue: 7 open tickets (2 at SLA risk)**
 
-| # | Ticket | Title | Priority | SLA | Waiting on | Next step |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | #1022 | Printer on floor 2 offline | Urgent | Resolution breached | You | Confirm the fix with the requestor and resolve |
-| 2 | #1035 | New starter laptop | Important | First response escalated | You | Reply with the delivery date |
-| 3 | #1040 | Shared mailbox access | Medium | OK | Requestor | Nothing until they reply |
+| # | Ticket | Title | Priority | SLA | Waiting on | Idle | Next step |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | #1022 | Printer on floor 2 offline | Urgent | Resolution breached | You | 3 days | Confirm the fix with the requestor and resolve |
+| 2 | #1035 | New starter laptop | Important | First response escalated | You | 1 day | Reply with the delivery date |
+| 3 | #1040 | Shared mailbox access | Medium | OK | Requestor | 2 days | Nothing until they reply |
 
-Then one line on the rest, for example: "4 more Low or Medium tickets, none at risk; oldest is #0998 from 12 days
-ago."
+Then one line on the rest, for example: "4 more Low or Medium tickets, none at risk; the idlest is #0998, 12 days."
 
-For a standup summary, give three short lines instead of the table: done, in progress, and blocked. For "done",
-call `list_my_tickets` with `includeResolved: true` and take the resolved or closed tickets whose `lastUpdatedOn` is
-in the last day. The tool can't filter by resolution date, so say it's based on the last update.
+For a standup summary, give three short lines instead of the table: done, in progress, and blocked.
+- **Done:** `get_queue` with `state: resolvedSince` and `since` set to yesterday (YYYY-MM-DD).
+- **In progress:** the open queue, where `waitingOn` is `assignee`.
+- **Blocked:** the open queue, where `waitingOn` is `requestor` or `thirdParty`.
 
 ## Rules
 
 - Read-only: don't comment, reassign or change status from this skill. If the user wants to act on a ticket, use
   the `ticket-update` skill, which confirms each change.
-- "Waiting on" comes from the latest activity: a comment from the requestor after the user's last one means it's
-  waiting on the user.
 - Keep ticket contents to what the summary needs; they can include customer contact details.

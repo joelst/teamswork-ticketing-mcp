@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using ModelContextProtocol.Server;
 using TeamsWork.Ticketing.Mcp.Ticketing;
@@ -23,69 +24,123 @@ public sealed class InstanceTools
 
     [McpServerTool(Name = "get_instance", Title = "Get ticketing instance settings", ReadOnly = true, Idempotent = true, OpenWorld = false)]
     [Description(
-        "Get the Ticketing instance configuration: custom field definitions (IDs, types, options, whether mandatory), the assignee list, " +
-        "workflow definitions with state IDs, and SLA settings. Pass 'section' to get only the part you need; the full response is large. " +
-        "Results are cached for a few minutes; pass refresh=true after changing the instance's settings (a refresh re-reads unless the " +
-        "settings were read in the last 30 seconds).")]
+        "The help desk's settings: custom fields (IDs, types, options, mandatory), the assignee list, workflow states and " +
+        "transitions, and SLA rules. Pass 'section' for just one part. Cached for a few minutes; refresh=true after a change.")]
     public Task<string> GetInstance(
-        [Description("Part to return: all (default), customFields (custom and optional fields), assignees, workflows, or sla.")] string? section = null,
-        [Description("true to re-read the settings from the API, unless they were read in the last 30 seconds.")] bool refresh = false,
-        [Description("Caller's UTC offset in whole hours. Defaults to the server's configured time zone.")] int? timezoneOffset = null,
+        [Description("all (default), customFields, assignees, workflows, or sla.")] string? section = null,
+        [Description("true to re-read the settings (at most once every 30 seconds).")] bool refresh = false,
+        [Description(DateFilterText.TimezoneOffset)] int? timezoneOffset = null,
         CancellationToken cancellationToken = default)
     {
         return ToolRunner.RunAsync(async () =>
         {
             string part = ToolValidation.OptionalEnum(section, "section", Sections) ?? "all";
             Instance instance = await _cache.GetInstanceAsync(_client, timezoneOffset, refresh, cancellationToken);
-            return part switch
+            bool all = part == "all";
+            return new InstanceSection(instance.Id, instance.DisplayName ?? instance.InstanceName)
             {
-                "customFields" => new InstanceSection(instance)
-                {
-                    CustomFields = instance.CustomFields,
-                    CustomFieldsLeft = instance.CustomFieldsLeft,
-                    CustomFieldsRight = instance.CustomFieldsRight,
-                    OptionalFieldsLeft = instance.OptionalFieldsLeft,
-                    OptionalFieldsRight = instance.OptionalFieldsRight,
-                },
-                "assignees" => new InstanceSection(instance) { Assignees = instance.Assignees, IsAutomaticAssignTickets = instance.IsAutomaticAssignTickets },
-                "workflows" => new InstanceSection(instance) { Workflows = instance.Workflows },
-                "sla" => new InstanceSection(instance) { Sla = instance.Sla },
-                _ => (object)instance,
+                Code = all ? instance.Code : null,
+                // The API repeats every custom field in the form's left and right column lists, and the copies can each state
+                // different attributes; they are merged as writes merge them, so what is shown is what a write checks against.
+                CustomFields = all || part == "customFields" ? CustomFieldViews(instance) : null,
+                OptionalFields = all || part == "customFields"
+                    ? DistinctFields((instance.OptionalFieldsLeft ?? []).Concat(instance.OptionalFieldsRight ?? []))
+                    : null,
+                Assignees = all || part == "assignees" ? Assignees(instance.Assignees) : null,
+                IsAutomaticAssignTickets = all || part == "assignees" ? instance.IsAutomaticAssignTickets : null,
+                Workflows = all || part == "workflows" ? WorkflowStatus.Compact(instance.Workflows) : null,
+                Sla = all || part == "sla" ? instance.Sla : null,
             };
         });
     }
 
     [McpServerTool(Name = "list_tag_categories", Title = "List tag categories", ReadOnly = true, Idempotent = true, OpenWorld = false)]
-    [Description("List all tag categories and the tags in each. Tag inputs on create_ticket/update_ticket accept a category's ID or name; the list_tickets 'tags' filter needs the ID (tagCategoryId_tagText).")]
+    [Description(
+        "The tag categories and the tags in each. Writes take a tag by its text (and category, when the text is in more than " +
+        "one); the list_tickets 'tags' filter needs tagCategoryId_tagText.")]
     public Task<string> ListTagCategories(
-        [Description("true to re-read the tags from the API, unless they were read in the last 30 seconds.")] bool refresh = false,
+        [Description("true to re-read the tags (at most once every 30 seconds).")] bool refresh = false,
         CancellationToken cancellationToken = default)
     {
         return ToolRunner.RunAsync(async () =>
         {
-            IReadOnlyList<TagCategory> items = await _cache.GetTagCategoriesAsync(_client, refresh, cancellationToken);
-            return new PageResult<TagCategory>(items, items.Count, null, null, null);
+            IReadOnlyList<TagCategory> categories = await _cache.GetTagCategoriesAsync(_client, refresh, cancellationToken);
+            // Deleted categories and tags can't be used, and colours mean nothing to an agent.
+            List<TagCategoryView> items = categories
+                .Where(c => c.Deleted != true && c.Id is not null)
+                .Select(c => new TagCategoryView(c.Id!, c.Text, (c.Tags ?? []).Where(t => t.Deleted != true && t.Text is not null).Select(t => t.Text!).ToList()))
+                .ToList();
+            return new PageResult<TagCategoryView>(items, items.Count, null, null, null);
         });
     }
 
-    /// <summary>One part of the instance settings, with the instance's identity so the agent knows what it's looking at.</summary>
+    /// <summary>
+    /// Each custom field once, with every attribute any copy states, and, where it matters, that a copy marks it unusable
+    /// (hidden, deleted...) or that the copies disagree on what it is, so a write would refuse a value for it.
+    /// </summary>
+    private static List<JsonObject>? CustomFieldViews(Instance instance)
+    {
+        List<JsonObject> views = InstanceLookup.CustomFieldsOf(instance).Select(f =>
+        {
+            JsonObject o = ToolJson.ToNode(f.Field) as JsonObject ?? new JsonObject();
+            if (f.UnusableStatus is string status)
+            {
+                o["unusable"] = status;
+            }
+
+            if (f.Conflicting)
+            {
+                o["conflicting"] = true;
+            }
+
+            return o;
+        }).ToList();
+        return views.Count > 0 ? views : null;
+    }
+
+    private static List<CustomField>? DistinctFields(IEnumerable<CustomField> fields)
+    {
+        List<CustomField> list = fields.DistinctBy(f => f.Id ?? f.Title, StringComparer.OrdinalIgnoreCase).ToList();
+        return list.Count > 0 ? list : null;
+    }
+
+    private static JsonObject? Assignees(AssigneeConfig? config)
+    {
+        if (config is null)
+        {
+            return null;
+        }
+
+        var o = new JsonObject();
+        if (config.Type is string type)
+        {
+            o["type"] = type;
+        }
+
+        o["people"] = new JsonArray((config.Peoples ?? [])
+            .Select(p => TicketViews.Person(p.Name, p.Email))
+            .OfType<string>()
+            .Select(p => (JsonNode?)JsonValue.Create(p))
+            .ToArray());
+        return o;
+    }
+
+    private sealed record TagCategoryView(
+        [property: JsonPropertyName("id")] string Id,
+        [property: JsonPropertyName("name")] string? Name,
+        [property: JsonPropertyName("tags")] IReadOnlyList<string> Tags);
+
+    /// <summary>The instance settings asked for, with the instance's identity so the agent knows what it's looking at.</summary>
     private sealed record InstanceSection(
         [property: JsonPropertyName("id")] string? Id,
         [property: JsonPropertyName("displayName")] string? DisplayName)
     {
-        public InstanceSection(Instance instance)
-            : this(instance.Id, instance.DisplayName ?? instance.InstanceName)
-        {
-        }
-
-        [JsonPropertyName("customFields")] public IReadOnlyList<CustomField>? CustomFields { get; init; }
-        [JsonPropertyName("customFieldsLeft")] public IReadOnlyList<CustomField>? CustomFieldsLeft { get; init; }
-        [JsonPropertyName("customFieldsRight")] public IReadOnlyList<CustomField>? CustomFieldsRight { get; init; }
-        [JsonPropertyName("optionalFieldsLeft")] public IReadOnlyList<CustomField>? OptionalFieldsLeft { get; init; }
-        [JsonPropertyName("optionalFieldsRight")] public IReadOnlyList<CustomField>? OptionalFieldsRight { get; init; }
-        [JsonPropertyName("assignees")] public AssigneeConfig? Assignees { get; init; }
+        [JsonPropertyName("code")] public string? Code { get; init; }
+        [JsonPropertyName("customFields")] public IReadOnlyList<JsonObject>? CustomFields { get; init; }
+        [JsonPropertyName("optionalFields")] public IReadOnlyList<CustomField>? OptionalFields { get; init; }
+        [JsonPropertyName("assignees")] public JsonObject? Assignees { get; init; }
         [JsonPropertyName("isAutomaticAssignTickets")] public bool? IsAutomaticAssignTickets { get; init; }
-        [JsonPropertyName("workflows")] public JsonElement? Workflows { get; init; }
+        [JsonPropertyName("workflows")] public JsonNode? Workflows { get; init; }
         [JsonPropertyName("sla")] public JsonElement? Sla { get; init; }
     }
 }

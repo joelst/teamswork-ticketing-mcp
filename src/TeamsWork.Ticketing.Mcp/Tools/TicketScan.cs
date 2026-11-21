@@ -23,6 +23,7 @@ internal static class TicketScan
     /// <summary>
     /// Reads tickets and keeps what <paramref name="pick"/> returns for each (null skips the ticket). Only the picked
     /// values are kept, not the tickets, so a scan of full tickets holds one page at a time rather than every match.
+    /// It stops early, marked incomplete, once <paramref name="enough"/> (asked after each page) says so.
     /// </summary>
     public static async Task<Result<T>> RunAsync<T>(
         TicketingClient client,
@@ -30,7 +31,8 @@ internal static class TicketScan
         Func<Ticket, T?> pick,
         int maxTickets,
         int pageSize,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<bool>? enough = null)
         where T : class
     {
         // Newest created first, which the API does only when asked: its default order isn't by date. The hint for a
@@ -133,6 +135,12 @@ internal static class TicketScan
             // means there may be more; a short page is the end. The API may return fewer than asked for, so page fullness
             // alone never ends a scan that a total says isn't finished.
             more = token is not null || (total is int reported ? reported > proven : items.Count == size);
+
+            // The caller has what it was looking for: the rest isn't read, and the result says it wasn't.
+            if (more && enough?.Invoke() == true)
+            {
+                break;
+            }
         }
         while (more && read < maxTickets);
 

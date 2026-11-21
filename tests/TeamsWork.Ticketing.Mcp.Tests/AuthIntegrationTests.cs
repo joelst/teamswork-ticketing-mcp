@@ -109,12 +109,12 @@ public sealed class AuthIntegrationTests : IClassFixture<McpServerFactory>
 {
     private static readonly string[] ExpectedTools =
     [
-        "list_tickets", "get_ticket", "create_ticket", "update_ticket", "update_ticket_status",
+        "list_tickets", "get_ticket_brief", "create_ticket", "update_ticket", "update_ticket_status",
         "list_ticket_activities", "add_ticket_comment",
-        "list_ticket_attachments", "add_ticket_link_attachments", "list_activity_attachments",
+        "list_ticket_attachments", "add_ticket_link_attachments",
         "get_instance", "list_tag_categories",
-        "find_ticket_by_number", "get_ticket_context", "find_similar_tickets", "assign_ticket",
-        "whoami", "list_my_tickets", "list_sla_risk", "count_tickets",
+        "find_similar_tickets", "assign_ticket", "preview_bulk_update", "bulk_update",
+        "whoami", "get_queue", "list_sla_risk", "count_tickets",
     ];
 
     private readonly McpServerFactory _factory;
@@ -288,14 +288,44 @@ public sealed class AuthIntegrationTests : IClassFixture<McpServerFactory>
         await using McpClient client = await ConnectAsync(McpServerFactory.UserToken());
 
         CallToolResult result = await client.CallToolAsync(
-            "get_ticket",
-            new Dictionary<string, object?> { ["ticketId"] = "1839" },
+            "get_ticket_brief",
+            new Dictionary<string, object?> { ["ticket"] = "not a ticket" },
             cancellationToken: Ct);
 
         Assert.True(result.IsError);
         string text = string.Join(" ", result.Content.OfType<TextContentBlock>().Select(c => c.Text));
-        Assert.Contains("ticketId", text, StringComparison.Ordinal);
+        Assert.Contains("'ticket' must be a ticket number", text, StringComparison.Ordinal);
         Assert.DoesNotContain("integration-test-key", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_ticket_number_sent_as_a_json_number_is_taken_as_the_number()
+    {
+        await using McpClient client = await ConnectAsync(McpServerFactory.UserToken());
+
+        CallToolResult one = await client.CallToolAsync("get_ticket_brief", new Dictionary<string, object?> { ["ticket"] = 2213 }, cancellationToken: Ct);
+        CallToolResult many = await client.CallToolAsync("preview_bulk_update",
+            new Dictionary<string, object?> { ["tickets"] = new object[] { 2213, "2214" }, ["set"] = new Dictionary<string, object?> { ["priority"] = "Low" } },
+            cancellationToken: Ct);
+
+        // Past binding either way: the call got as far as the API (unreachable here), where an argument the SDK couldn't
+        // convert stops it before with a message that names nothing.
+        foreach (CallToolResult result in new[] { one, many })
+        {
+            string text = string.Join(" ", result.Content.OfType<TextContentBlock>().Select(c => c.Text));
+            Assert.True(text.Contains("Ticketing API", StringComparison.Ordinal), text);
+        }
+    }
+
+    [Fact]
+    public async Task No_tool_schema_points_elsewhere_with_a_ref()
+    {
+        await using McpClient client = await ConnectAsync(McpServerFactory.UserToken());
+
+        IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: Ct);
+
+        // Some MCP clients don't follow $ref, and would see a tool's input as untyped.
+        Assert.All(tools, t => Assert.DoesNotContain("\"$ref\"", t.ProtocolTool.InputSchema.GetRawText(), StringComparison.Ordinal));
     }
 
     [Fact]

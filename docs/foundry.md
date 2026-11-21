@@ -63,10 +63,10 @@ tool = {
     "server_label": "ticketing",
     "server_url": "https://<app>.<region>.azurecontainerapps.io/mcp",
     "project_connection_id": "taas-ticketing",
-    "allowed_tools": ["list_tickets", "get_ticket", "list_ticket_activities", "get_instance",
+    "allowed_tools": ["list_tickets", "get_ticket_brief", "list_ticket_activities", "get_instance",
                       "list_tag_categories", "add_ticket_comment", "create_ticket"],
     "require_approval": {"always": ["create_ticket", "add_ticket_comment", "update_ticket", "update_ticket_status",
-                                    "assign_ticket", "add_ticket_link_attachments"]},
+                                    "assign_ticket", "add_ticket_link_attachments", "bulk_update"]},
 }
 ```
 

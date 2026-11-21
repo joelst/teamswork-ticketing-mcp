@@ -21,31 +21,51 @@ or tool output.
 
 | Tool | Kind | Purpose |
 | --- | --- | --- |
-| `list_tickets` | read | Search / filter / sort / page tickets, with `select` to trim fields |
-| `get_ticket` | read | Full ticket incl. workflow states and allowed transitions |
+| `list_tickets` | read | Search / filter / sort / page tickets as summary rows; `select` adds fields; `status` is one exact workflow state |
+| `get_ticket_brief` | read | One ticket in one call: details, `allowedNextStatuses`, who it waits on (`waitingOn`, `idleDays`), latest activity and attachments; `activities=0` for the details alone |
 | `create_ticket` | write | Create a ticket (requestor defaults to the caller) |
-| `update_ticket` | write | Change title, description, assignee, priority, expected date, tags, custom fields |
-| `update_ticket_status` | write | Move a ticket through its workflow (resolve, close, reopen, custom states) |
+| `update_ticket` | write | Change title, description, assignee, priority, expected date, tags (whole list, or `addTags`/`removeTags`), custom fields |
+| `update_ticket_status` | write | Move a ticket through its workflow (resolve, close, reopen, custom states); a step the workflow doesn't allow is refused with the ones it does |
 | `list_ticket_activities` | read | Comment / change history, paged |
-| `add_ticket_comment` | write | Add a public or private comment |
-| `list_ticket_attachments` | read | Files and links on a ticket |
+| `add_ticket_comment` | write | Add a public reply or a private note (`isPrivate` is required) |
+| `list_ticket_attachments` | read | Files and links on a ticket (file download URLs only with `includeUrls`) |
 | `add_ticket_link_attachments` | write | Attach hyperlinks with a comment |
-| `list_activity_attachments` | read | Attachments of one attachment activity |
-| `get_instance` | read | Custom field definitions, assignees, workflows, SLA settings; `section` returns one part |
+| `get_instance` | read | Custom fields, assignees, workflow states and steps, SLA settings; `section` returns one part |
 | `list_tag_categories` | read | Tag categories and tags |
-| `find_ticket_by_number` | read | Full ticket from the number people quote (`ticketNo`), not the UUID |
-| `get_ticket_context` | read | Ticket, recent activity, and attachments in one call |
 | `find_similar_tickets` | read | Open tickets with similar titles, to check for duplicates before `create_ticket` |
 | `assign_ticket` | write | Assign a ticket by the assignee's email or name |
 | `whoami` | read | The account writes are attributed to |
-| `list_my_tickets` | read | Tickets assigned to or raised by the caller |
+| `get_queue` | read | A queue in one call (mine, a person's, the team's, the unassigned, or resolved since a day), most urgent first, with `waitingOn`, `idleDays` and SLA state |
 | `list_sla_risk` | read | Unresolved tickets that breached or escalated an SLA |
 | `count_tickets` | read | Ticket counts by status, priority, or assignee |
+| `preview_bulk_update` | read | Preview one change to up to 50 tickets (by number or filter): what changes on each, which the workflow blocks, and a `confirmToken` |
+| `bulk_update` | write | Apply a previewed change by its `confirmToken` alone; tickets changed since the preview are skipped |
 | `upload_ticket_files` | write | Upload files from a chosen local folder (stdio only, Windows and Linux, off unless `Ticketing:UploadRoot` is set) |
 
 Every write is attributed to the **authenticated caller** (from the token's claims). Tools never accept a `user`
 argument, so an agent cannot impersonate someone else. App-only callers (for example a Foundry managed identity) are
 attributed to the configured service account.
+
+Results are shaped for a model that pays for every character. Every `ticket` argument takes the number people quote
+(2213 or `#2213`) or a UUID; numbers seen in earlier responses are remembered, so most need no lookup. People
+are `"Name <email>"` strings, times are UTC to the second, long text is cut with a note of how much was left out,
+quoted earlier messages are removed from emailed comments, and internal fields, workflow graphs and file download URLs are
+left out unless asked for. Writes answer with a short acknowledgment (`ok`, `ticketNo`, what `changed`, `actedAs`)
+rather than the whole ticket. `list_tickets`' `status` description names the instance's own workflow states.
+
+`get_queue` and `get_ticket_brief` say who each ticket is waiting on: nobody once it is resolved; the requestor (or a
+third party) in a state named for waiting; otherwise whoever didn't write the latest public reply by a person. Private
+notes, automation rules, and system accounts (`Ticketing:SystemAccounts`, by default mailboxes such as `helpdesk@` and
+`noreply@`) don't count as replies. Working that out reads each row's latest history, one request per row, for at most
+25 rows a call.
+
+`preview_bulk_update` changes nothing. It returns a `confirmToken` that only the same caller can use, once, within 15
+minutes, and `bulk_update` takes nothing else. A ticket changed since the preview (its stored version moves with every
+comment) is skipped, a step the workflow doesn't allow is reported as blocked, and a private comment is never made
+public to satisfy a step that records one. A batch takes at most 50 tickets; if the API quota runs out part way,
+`bulk_update` returns a `resumeToken` for the rest. Tokens, and the result of applying one, are held in memory for 15
+minutes, so after that or a restart, preview again. A comment isn't deduplicated, so before previewing a comment again,
+check whether an earlier confirmation already added it (`get_ticket_brief`): it would be added twice.
 
 Writes accept names where the API wants IDs: a person by email or name (looked up in the instance's assignee list),
 a tag category by name, and a custom field by title. Every person is checked against the assignee list: a reference
@@ -57,11 +77,12 @@ type and options before they are sent, and a field the server can't check is ref
 cached for `Ticketing:InstanceCacheSeconds`; a name not found in the cache is looked up once more, and a refresh is
 honoured at most once every 30 seconds for the whole cache (otherwise the cached copy is used).
 
-The API can't filter by assignee, requestor, ticket number, or SLA state, so `list_my_tickets`, `list_sla_risk`,
-`count_tickets`, and `find_ticket_by_number` read tickets and filter them in the server. One call reads at most
-`Ticketing:MaxScanTickets` tickets (default 1000, usually a single request) and says when it stopped early. The first three
+The API can't filter by assignee, requestor, ticket number, or SLA state, so `get_queue`, `list_sla_risk`,
+`count_tickets`, `preview_bulk_update`, and the ticket-number lookup read tickets and filter them in the server. One call reads at
+most `Ticketing:MaxScanTickets` tickets (default 1000, usually a single request; up to five when SLA flags are read, since
+those need whole tickets) and says when it stopped early. The scanning tools
 read newest created first, so their note names the `createdBefore` to call again with to continue;
-`find_ticket_by_number` reports a number missing only when one response proves it, and otherwise says it may exist.
+The number lookup reports a ticket missing only when one response proves it, and otherwise says it may exist.
 `list_sla_risk` says so when the instance has SLA tracking turned off, rather than reporting nothing at risk.
 
 A write that fails after it may have reached the API (a timeout, a 5xx, a connection dropped before or while the
@@ -294,6 +315,7 @@ the production variable group to restrict which Entra client apps can call the M
 | `Ticketing:BaseUrl` | appsettings / env | Ticketing API base URL, for an endpoint `Region` doesn't cover. Set one or the other |
 | `Ticketing:InstanceCacheSeconds` | env | How long instance settings and tags are cached, default 300; `0` turns it off |
 | `Ticketing:MaxScanTickets` | env | Most tickets one filtering tool call (or ticket-number lookup) reads, default 1000 |
+| `Ticketing:SystemAccounts` | env | Comma-separated accounts whose comments aren't anyone's reply when working out who a ticket waits on: whole addresses, or the part before the @ (matching any domain). Unset uses the built-in mailbox names such as `helpdesk`; empty turns them off. For a hosted server, set `Ticketing__SystemAccounts` on the container app. |
 | `Ticketing:ExternalEmailDomains` | env / appsettings; hosted: `externalEmailDomains` in app.bicep (pipeline variable `externalEmailDomains`) | Comma-separated email domains allowed for people outside the assignee list (requestors, people fields), or `*` alone to allow any. Required with Entra sign-in (app.bicep, the pipeline and the server's startup check all refuse it empty); unset allows any for stdio and `--local`. Matching is exact (list each subdomain), ASCII only (punycode for an internationalised domain); startup refuses other wildcards. Images built before `*` was accepted refuse it at startup, so set real domains before rolling back to one |
 | `Ticketing:MaxUpstreamRequestsPerCallerPerMinute` | env | Upstream requests one caller may cause per minute, counting every request a tool call makes, default 50; `0` turns it off (Entra mode) |
 | `Ticketing:UploadRoot` | env / user secrets (stdio only) | Folder `upload_ticket_files` may read; unset turns uploads off |

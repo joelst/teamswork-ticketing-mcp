@@ -108,15 +108,15 @@ write tool for everyone, whatever the role.
 | Tool | Staff | Requester | Agent RW | Agent RO |
 | --- | --- | --- | --- | --- |
 | `whoami`, `get_instance`, `list_tag_categories` | yes | yes (`get_instance`: fields, workflow, and no assignee emails) | yes | yes |
-| `list_tickets`, `count_tickets`, `find_similar_tickets`, `find_ticket_by_number` | all tickets | visible tickets, from the index | all | all |
-| `get_ticket`, `get_ticket_context` | all | visible tickets | all | all |
-| `list_ticket_activities`, `list_ticket_attachments`, `list_activity_attachments` | all | visible tickets; private activities left out | all | all |
-| `list_my_tickets` | yes | yes (theirs) | yes | yes |
+| `list_tickets`, `count_tickets`, `find_similar_tickets` | all tickets | visible tickets, from the index | all | all |
+| `get_ticket_brief` | all | visible tickets; private activities left out | all | all |
+| `list_ticket_activities`, `list_ticket_attachments` | all | visible tickets; private activities left out | all | all |
+| `get_queue` | yes | `who=me` only (theirs) | yes | yes |
 | `list_sla_risk` | yes | no | yes | yes |
 | `create_ticket` | yes | yes: requestor is always the caller; no assignee | yes | no |
 | `add_ticket_comment` | yes | on visible tickets; never private | yes | no |
 | `update_ticket_status` | yes | on visible tickets, only transitions whose `authorizedUsers` include `requestor` | yes | no |
-| `update_ticket`, `assign_ticket`, `add_ticket_link_attachments` | yes | no | yes | no |
+| `update_ticket`, `assign_ticket`, `add_ticket_link_attachments`, `preview_bulk_update`, `bulk_update` | yes | no | yes | no |
 
 A ticket is **visible** to a requester when they are its requestor, assignee, or creator, or are in a people-picker
 field marked `isSeeTicket`. A person on a ticket is identified by Entra object ID, except on tickets that arrived
@@ -136,8 +136,7 @@ Two layers, both required; hiding a tool is not the control.
 2. **Row layer.** One `TicketAccess` service answers "may this caller see / comment on / move this ticket":
    - single-ticket tools fetch the ticket and check the fetched copy, which is authoritative (the index isn't used
      for these), and answer a ticket the caller can't see exactly like a missing one, so its existence doesn't leak;
-   - activity and attachment tools check the owning ticket (`list_activity_attachments` reads `ticketId` from the
-     response) and drop `isPrivate` activities for requesters;
+   - activity and attachment tools check the owning ticket and drop `isPrivate` activities for requesters;
    - list, search, and count tools for requesters go through the index;
    - requester writes are rewritten or refused before the API call (`requestor` forced to the caller, `isPrivate`
      forced false, transitions checked against the workflow edge).
@@ -189,7 +188,7 @@ answers that the list is still loading rather than returning a partial list as c
 scale-to-zero stays viable; `minReplicas = 1` only avoids the rebuild. A persisted snapshot (blob storage) is a later
 option. The single-replica rule already in `app.bicep` means one index per deployment.
 
-**Uses beyond requesters:** `list_my_tickets`, `count_tickets`, and `list_sla_risk` for staff can read the index
+**Uses beyond requesters:** `get_queue`, `count_tickets`, and `list_sla_risk` for staff can read the index
 instead of scanning up to `MaxScanTickets` on each call, which removes their truncation and most of their upstream
 cost. The existing scan stays as the fallback while the index is loading.
 
@@ -226,7 +225,7 @@ Each milestone ships behind `Access:Mode = Open` and keeps today's tests green.
   to hidden ones are refused).
 
 **M2: the row layer for single tickets**
-- `TicketAccess`; `get_ticket`, `get_ticket_context`, activities and attachments (private activities dropped);
+- `TicketAccess`; `get_ticket_brief`, activities and attachments (private activities dropped);
   "not found" for invisible tickets.
 - Tests: a requester can't read, comment on, or move someone else's ticket by ID or number; staff can.
 
@@ -235,7 +234,7 @@ Each milestone ships behind `Access:Mode = Open` and keeps today's tests green.
   filter, no timer), the age thresholds, `refresh: true`, write-through, caps, cold-start behaviour, its own limiter
   share.
 - Requester `list_tickets`, `count_tickets`, `find_similar_tickets` (API search, then filtered to visible tickets),
-  `find_ticket_by_number`, `list_my_tickets`.
+  ticket-number lookups, `get_queue` with `who=me`.
 - Tests with a fake API and clock: sync picks up changes after the watermark, the overlap doesn't duplicate rows, a
   full sync drops deleted tickets, a sync failure keeps the old index; each age band behaves as in the table (no
   request under 5 minutes, a background sync between 5 and 15, a wait past 15); concurrent calls share one sync; an
@@ -246,7 +245,7 @@ Each milestone ships behind `Access:Mode = Open` and keeps today's tests green.
   `update_ticket_status` (edge must authorize `requestor`).
 
 **M5: staff tools on the index, docs, and rollout**
-- `list_my_tickets`, `count_tickets`, `list_sla_risk` read the index when it's ready.
+- `get_queue`, `count_tickets`, `list_sla_risk` read the index when it's ready.
 - `docs/security.md`, README configuration table, `app.bicep` parameters, `minReplicas` guidance.
 - Rollout: deploy with `Open`, watch sync metrics (rows, last sync, sync requests a minute), then switch to
   `RoleScoped`.
