@@ -170,7 +170,8 @@ public sealed partial class BulkTools
     [Description(
         "Apply a change previewed with preview_bulk_update, by its confirmToken alone, once the user has agreed. Tickets changed " +
         "since the preview are skipped (each is re-read just before it is written; the API can't make the write itself conditional). " +
-        "Confirming the same token again returns the first result without changing anything.")]
+        "Confirming the same token again returns the first result without changing anything, for 15 minutes. A comment isn't " +
+        "deduplicated: previewing the same comment again adds it again to tickets that already have it, so check them first.")]
     public Task<string> BulkUpdate(
         [Description("The confirmToken from preview_bulk_update.")] string confirmToken,
         CancellationToken cancellationToken = default)
@@ -180,7 +181,11 @@ public sealed partial class BulkTools
             string token = ToolValidation.RequireLine(confirmToken, "confirmToken", 64);
             ActingUser actor = await _actingUser.GetActingUserAsync(cancellationToken);
             BulkStore.Batch batch = _store.Find(token)
-                ?? throw new McpException("That confirmToken is unknown or has expired: tokens last 15 minutes and don't survive a server restart. Preview the change again with preview_bulk_update.");
+                ?? throw new McpException(
+                    "That confirmToken is unknown or has expired: tokens and their results last 15 minutes and don't survive a server restart, " +
+                    "so whether it was applied can't be told from here. Before previewing the change again with preview_bulk_update, check " +
+                    "the tickets with get_ticket_brief: a comment isn't deduplicated, so it would be added again where an earlier " +
+                    "confirmation already added it.");
             if (!string.Equals(batch.Owner, Owner(actor), StringComparison.Ordinal))
             {
                 throw new McpException("That confirmToken was issued to someone else. Preview the change yourself with preview_bulk_update.");

@@ -63,7 +63,9 @@ notes, automation rules, and system accounts (`Ticketing:SystemAccounts`, by def
 minutes, and `bulk_update` takes nothing else. A ticket changed since the preview (its stored version moves with every
 comment) is skipped, a step the workflow doesn't allow is reported as blocked, and a private comment is never made
 public to satisfy a step that records one. A batch takes at most 50 tickets; if the API quota runs out part way,
-`bulk_update` returns a `resumeToken` for the rest. Tokens are held in memory, so after a restart, preview again.
+`bulk_update` returns a `resumeToken` for the rest. Tokens, and the result of applying one, are held in memory for 15
+minutes, so after that or a restart, preview again. A comment isn't deduplicated, so before previewing a comment again,
+check whether an earlier confirmation already added it (`get_ticket_brief`): it would be added twice.
 
 Writes accept names where the API wants IDs: a person by email or name (looked up in the instance's assignee list),
 a tag category by name, and a custom field by title. Every person is checked against the assignee list: a reference

@@ -529,6 +529,17 @@ public sealed class QueueBriefBulkTests
     }
 
     [Fact]
+    public async Task An_unknown_token_warns_that_previewing_a_comment_again_would_repeat_it()
+    {
+        BulkTools bulk = Bulk(new Router(_ => InstanceJson), new BulkStore(Clock));
+
+        McpException ex = await Assert.ThrowsAsync<McpException>(() => bulk.BulkUpdate("no-such-token", Ct));
+
+        Assert.Contains("get_ticket_brief", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("a comment isn't deduplicated", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_comment_must_say_whether_it_is_private()
     {
         BulkTools bulk = Bulk(new Router(_ => InstanceJson), new BulkStore(Clock));

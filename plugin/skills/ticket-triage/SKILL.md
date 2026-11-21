@@ -56,7 +56,8 @@ From the TeamsWork Ticketing connector: `list_tickets`, `get_queue`, `get_ticket
      which keeps the ticket's others; `tags` replaces the whole list.
    - Assignee alone: `assign_ticket` with their email.
    - The same change to several tickets (assign five to Sam, say): `preview_bulk_update` with their numbers, show
-     the preview, and after a yes, `bulk_update` with its `confirmToken` alone.
+     the preview, and after a yes, `bulk_update` with its `confirmToken` alone. If the token has expired, check the
+     tickets with `get_ticket_brief` before previewing a comment again: an earlier confirmation may have added it.
    - A note about the decision: `add_ticket_comment` with `isPrivate: true`, so the requestor doesn't see internal
      reasoning. A question for the requestor goes in a comment with `isPrivate: false`, and only when approved.
    - Report each result. Every write answers with a short acknowledgment, including `actedAs`: the change is
