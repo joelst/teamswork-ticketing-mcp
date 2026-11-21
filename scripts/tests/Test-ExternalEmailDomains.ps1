@@ -17,7 +17,8 @@ foreach ($value in 'contoso.com', 'contoso.com, contoso.co.uk', '@contoso.com', 
     Check "'$value' is accepted" (Accepts $value)
 }
 
-foreach ($value in '', ' ', ',', '@ ;', 'contoso.com, *', '*.contoso.com', 'contoso', 'contoso.123', '-contoso.com', 'bücher.example', 'contoso..com') {
+foreach ($value in '', ' ', ',', '@ ;', 'contoso.com, *', '*.contoso.com', 'contoso', 'contoso.123', '-contoso.com', 'bücher.example', 'contoso..com',
+    '*,', '@*', '*;', ', *', "*`t") {   # a malformed * is refused, as the server refuses it, not read as *
     Check "'$value' is refused" (-not (Accepts $value))
 }
 

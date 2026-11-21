@@ -136,9 +136,12 @@ public sealed class TicketingOptions
             ? new HashSet<string>(StringComparer.Ordinal)
             : ExternalEmailDomainEntries().Select(d => d.ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
 
-    /// <summary>True when <see cref="ExternalEmailDomains"/> is <c>*</c> alone.</summary>
+    /// <summary>
+    /// True when <see cref="ExternalEmailDomains"/> is <c>*</c> alone, give or take spaces around it. Only that: a value
+    /// such as "*,", "@*" or "*;" is malformed, so it is refused at startup rather than read as allowing any domain.
+    /// </summary>
     public bool AllowsAnyExternalEmailDomain() =>
-        ExternalEmailDomainEntries().ToList() is [AnyExternalEmailDomain];
+        string.Equals(ExternalEmailDomains?.Trim(' '), AnyExternalEmailDomain, StringComparison.Ordinal);
 
     /// <summary>
     /// Entries of <see cref="ExternalEmailDomains"/> that aren't plain ASCII host names. <c>*</c> is valid only on its

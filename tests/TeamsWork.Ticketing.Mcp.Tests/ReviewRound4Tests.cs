@@ -90,6 +90,11 @@ public sealed class ReviewRound4Tests
     [Theory]
     [InlineData("contoso.com, *")] // would read as a restriction while allowing everything
     [InlineData("*, *")]
+    [InlineData("*,")]             // malformed: refused, not read as *
+    [InlineData("@*")]
+    [InlineData("*;")]
+    [InlineData(", *")]
+    [InlineData("*\t")]
     public void A_star_with_other_entries_is_refused(string value)
     {
         TicketingOptions options = TestFactory.Options(o => o.ExternalEmailDomains = value);

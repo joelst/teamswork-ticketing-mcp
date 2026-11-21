@@ -34,9 +34,10 @@ function Test-HostName([string] $Domain) {
     return $true
 }
 
+# The whole value, give or take spaces, as the server reads it: "*," or "@*" is malformed and refused, not taken as *.
 # Ordinal, as the server compares: -eq ignores zero-width characters, so "*" followed by U+200B would pass here and then
 # stop the server starting.
-if ($entries.Count -eq 1 -and [string]::Equals($entries[0], '*', [StringComparison]::Ordinal)) { return }
+if ([string]::Equals("$Value".Trim([char]' '), '*', [StringComparison]::Ordinal)) { return }
 
 $invalid = @($entries | Where-Object { -not (Test-HostName $_) })
 if ($entries.Count -eq 0 -or $invalid.Count -gt 0) {
