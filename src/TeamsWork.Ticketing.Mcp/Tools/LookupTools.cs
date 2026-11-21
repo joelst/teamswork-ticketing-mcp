@@ -178,7 +178,7 @@ public sealed class LookupTools
             string? leftOut = left.Any(x => x is not null) ? $"Left out: {string.Join(" and ", left.OfType<string>())} (includeAutomation, includePrivate)." : null;
             string? unknown = state.WaitingOn is not null ? null
                 : state.ResolutionUnknown ? "waitingOn is left out: the ticket's workflow doesn't say whether its state is resolved."
-                : state.RosterUnknown ? "waitingOn is left out: the help desk's staff list couldn't be read, so whether the latest reply came from staff isn't known."
+                : state.AuthorUnknown ? "waitingOn is left out: the latest public reply is from someone who is neither the requestor nor known staff (a cc, say), so who the ticket waits on isn't known."
                 : $"waitingOn is left out: none of the latest {recent.Count} activities is a public reply; list_ticket_activities has older ones.";
             if (string.Join(" ", new[] { unknown, leftOut, more }.OfType<string>()) is { Length: > 0 } hint)
             {

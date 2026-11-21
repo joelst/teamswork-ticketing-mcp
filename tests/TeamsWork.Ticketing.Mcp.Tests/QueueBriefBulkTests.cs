@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -56,13 +57,13 @@ public sealed class QueueBriefBulkTests
 
     // ---- waitingOn (spec section 8) ------------------------------------------------------------------------------
 
-    public static TheoryData<string, string, string?> WaitingCases => new()
+    public static TheoryData<string, string?, string?> WaitingCases => new()
     {
         // The latest public reply by a person decides.
         { $$"""[{"action":"commented","comment":"Still broken","user":{{Requestor}},"createdOn":"2026-11-18T12:00:00Z"}]""", "assignee", "2026-11-18T12:00:00Z" },
         { $$"""[{"action":"commented","comment":"Try this","user":{{Agent}},"createdOn":"2026-11-17T12:00:00Z"}]""", "requestor", "2026-11-17T12:00:00Z" },
-        // Someone else on the requestor's side (a cc) counts as the requestor.
-        { $$"""[{"action":"commented","comment":"Me too","user":{{Cc}},"createdOn":"2026-11-18T12:00:00Z"}]""", "assignee", "2026-11-18T12:00:00Z" },
+        // Someone neither the requestor nor known staff (a cc, or staff the assignee list leaves out) doesn't say.
+        { $$"""[{"action":"commented","comment":"Me too","user":{{Cc}},"createdOn":"2026-11-18T12:00:00Z"}]""", null, null },
         // Private notes, automation, and the help desk's mailbox aren't replies.
         { $$"""[{"action":"commented","comment":"note","isPrivate":true,"user":{{Agent}},"createdOn":"2026-11-19T10:00:00Z"}, {"action":"commented","comment":"Help","user":{{Requestor}},"createdOn":"2026-11-18T12:00:00Z"}]""", "assignee", "2026-11-18T12:00:00Z" },
         { $$"""[{"action":"commented","comment":"We got your email","user":{{Mailbox}},"createdOn":"2026-11-19T10:00:00Z"}, {"action":"commented","comment":"Help","user":{{Requestor}},"createdOn":"2026-11-18T12:00:00Z"}]""", "assignee", "2026-11-18T12:00:00Z" },
@@ -73,7 +74,7 @@ public sealed class QueueBriefBulkTests
 
     [Theory]
     [MemberData(nameof(WaitingCases))]
-    public void Waiting_on_follows_the_latest_public_reply_by_a_person(string history, string waitingOn, string? since)
+    public void Waiting_on_follows_the_latest_public_reply_by_a_person(string history, string? waitingOn, string? since)
     {
         Waiting.State s = Waiting.Compute(Ticket("In Progress"), Parse<List<Activity>>(history), People(), resolved: false, complete: true, Now);
 
@@ -133,7 +134,7 @@ public sealed class QueueBriefBulkTests
         string history = $$"""[{"action":"commented","comment":"Try this","user":{{Kim}},"createdOn":"2026-11-18T12:00:00Z"}]""";
         List<Activity> activities = Parse<List<Activity>>(history);
 
-        Assert.Equal("assignee", Waiting.Compute(Ticket("In Progress"), activities, People(), resolved: false, complete: true, Now).WaitingOn);
+        Assert.Null(Waiting.Compute(Ticket("In Progress"), activities, People(), resolved: false, complete: true, Now).WaitingOn);   // not placed yet
         TicketPeople known = People().WithAgents([new TicketUser("k1", "Kim Staff", "kim@example.test")]);
         Assert.Equal("requestor", Waiting.Compute(Ticket("In Progress"), activities, known, resolved: false, complete: true, Now).WaitingOn);
     }
@@ -1069,7 +1070,7 @@ public sealed class QueueBriefBulkTests
         var handler = new Router(r => r.Path switch
         {
             var p when p.EndsWith("/instance", StringComparison.Ordinal) => InstanceJson,
-            var p when p.EndsWith("/tickets", StringComparison.Ordinal) => Rows(1, _ => ",\"createdOn\":\"2026-11-10T00:00:00Z\""),
+            var p when p.EndsWith("/tickets", StringComparison.Ordinal) => Rows(1, _ => ",\"createdOn\":\"2026-11-10T00:00:00Z\",\"requestor\":" + Requestor),
             _ => $$"""{"items":[{"action":"commented","comment":"Help","user":{{Requestor}},"createdOn":"2026-11-18T12:00:00Z"}]}""",
         });
         (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(handler);
@@ -1843,8 +1844,82 @@ public sealed class QueueBriefBulkTests
         Waiting.State known = Waiting.Compute(Ticket("In Progress"), history, People(), resolved: false, complete: true, Now);
 
         Assert.Null(none.WaitingOn);
-        Assert.True(none.RosterUnknown);
-        Assert.NotNull(known.WaitingOn);
+        Assert.True(none.AuthorUnknown);
+        // The list can leave staff out, so reading it doesn't place Sam either: a cc, or staff it omits.
+        Assert.Null(known.WaitingOn);
+        Assert.True(known.AuthorUnknown);
+    }
+
+    [Theory]
+    [InlineData("Pending approval", "assignee")]   // names no one: the requestor's reply decides
+    [InlineData("Pending", "assignee")]
+    [InlineData("Pending customer", "requestor")]
+    [InlineData("Waiting on agent", "assignee")]
+    [InlineData("Awaiting vendor", "thirdParty")]
+    public void A_waiting_state_decides_only_when_it_names_whom(string status, string expected)
+    {
+        List<Activity> history = Parse<List<Activity>>($$"""[{"action":"commented","comment":"Any news?","user":{{Requestor}},"createdOn":"2026-11-18T12:00:00Z"}]""");
+
+        Assert.Equal(expected, Waiting.Compute(Ticket(status), history, People(), resolved: false, complete: true, Now, status).WaitingOn);
+    }
+
+    [Fact]
+    public void A_tag_object_without_a_category_is_matched_by_its_text_and_a_malformed_category_is_refused()
+    {
+        List<TagCategory> categories = Parse<ListResponse<TagCategory>>("""{"items":[{"id":"net","text":"Network","tags":[{"text":"VPN"}]}]}""").Items!.ToList();
+        JsonElement plain = JsonDocument.Parse("""[{"text":"VPN"},{"text":"VPN","tagCategoryId":null},{"text":"VPN","tagCategoryId":" "}]""").RootElement;
+        JsonElement malformed = JsonDocument.Parse("""[{"text":"VPN","tagCategoryId":5}]""").RootElement;
+
+        Assert.All(TagEdits.Current(plain, categories), t => Assert.Equal(new TicketTag("net", "VPN"), t));
+        Assert.Throws<McpException>(() => TagEdits.Current(malformed, categories));
+    }
+
+    [Fact]
+    public async Task Resolved_tickets_named_are_found_in_the_same_one_read()
+    {
+        var handler = new Router(r => r.Path.EndsWith("/instance", StringComparison.Ordinal) ? InstanceJson
+            : "{\"items\":[" + Bulk(1, "Old one", "Resolved", 1000) + "," + Bulk(2, "Older one", "Resolved", 2000) + "," + Bulk(3, "Open one", "Open", 3000) + "],\"itemCount\":3}");
+        BulkTools bulk = Bulk(handler, new BulkStore(Clock));
+
+        using JsonDocument doc = JsonDocument.Parse(await bulk.PreviewBulkUpdate(tickets: ["101", "102", "103"], set: new BulkChanges { Priority = "Urgent" }, cancellationToken: Ct));
+
+        Assert.Equal(3, doc.RootElement.GetProperty("count").GetInt32());
+        CapturedRoute list = Assert.Single(handler.Requests, r => r.Path.Contains("/tickets", StringComparison.Ordinal));   // no lookup, no single read
+        Assert.DoesNotContain("isResolved", list.Uri.Query, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task A_ticket_named_that_a_complete_read_lacks_is_reported_without_lookups()
+    {
+        var handler = new Router(r => r.Path.EndsWith("/instance", StringComparison.Ordinal) ? InstanceJson : WeeklyChecks());
+        BulkTools bulk = Bulk(handler, new BulkStore(Clock));
+
+        McpException ex = await Assert.ThrowsAsync<McpException>(() =>
+            bulk.PreviewBulkUpdate(tickets: ["101", "#999", "102"], set: new BulkChanges { Priority = "Urgent" }, cancellationToken: Ct));
+
+        Assert.Contains("'#999'", ex.Message, StringComparison.Ordinal);
+        Assert.Single(handler.Requests, r => r.Path.Contains("/tickets", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Tickets_a_partial_read_lacks_are_read_within_one_budget_for_the_batch()
+    {
+        // The scan may read 100 tickets but the API says there are 500, so the five named aren't among those read; one
+        // budget of 100 rows covers two single reads, and the third is refused rather than spend the caller's quota.
+        var handler = new Router(r => r.Path switch
+        {
+            var p when p.EndsWith("/instance", StringComparison.Ordinal) => InstanceJson,
+            var p when p.EndsWith("/tickets", StringComparison.Ordinal) => WeeklyChecks().Replace("\"itemCount\":4", "\"itemCount\":500", StringComparison.Ordinal),
+            var p => "{\"item\":" + Bulk(int.Parse(p[^2..], CultureInfo.InvariantCulture), "Old", "Open", 1) + "}",
+        });
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(handler, o => o.MaxScanTickets = 100);
+        var bulk = new BulkTools(client, new FixedActor(Jane), cache, options, new BulkStore(Clock));
+
+        McpException ex = await Assert.ThrowsAsync<McpException>(() => bulk.PreviewBulkUpdate(
+            tickets: [Id(10), Id(11), Id(12), Id(13), Id(14)], set: new BulkChanges { Priority = "Urgent" }, cancellationToken: Ct));
+
+        Assert.Contains("Name fewer tickets at a time", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(2, handler.Requests.Count(r => r.Path.Contains("/tickets/", StringComparison.Ordinal)));
     }
 
     [Fact]

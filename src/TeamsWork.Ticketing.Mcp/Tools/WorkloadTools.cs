@@ -259,7 +259,8 @@ public sealed class WorkloadTools
                 : new GroupKey(identity, Blank(t.Assignee?.Email) is string email ? $"{Blank(t.Assignee?.Name) ?? email} <{email}>" : Blank(t.Assignee?.Name) ?? identity);
         }
 
-        string? value = Blank(by == "priority" ? t.Priority : t.Status);
+        // A priority by the words the other tools show (Medium, not 2_Medium), so both forms count as one.
+        string? value = Blank(by == "priority" ? TicketViews.Priority(t.Priority) : t.Status);
         return new GroupKey(value ?? "", value ?? "(none)");
     }
 

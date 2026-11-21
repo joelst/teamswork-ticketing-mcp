@@ -438,6 +438,15 @@ public sealed class TicketingClient
                     return (false, default, Backoff(attempt, response.Headers.RetryAfter), (int)response.StatusCode >= 500);
                 }
 
+                // The headers arrived, so the API received the request. A 4xx refused it, whatever its body says, so a body
+                // that can't be read still leaves that known (and a final 429 still rate-limited); any other status may have
+                // come after the request was carried out.
+                HttpStatusCode status = response.StatusCode;
+                bool refused = (int)status is >= 400 and < 500;
+                TicketingApiException Unreadable(string message, Exception ex) => refused
+                    ? Failure(method, idempotent, mayHaveBeenProcessed: false, status, DescribeError(status, null), ex)
+                    : Failure(method, idempotent, mayHaveBeenProcessed: true, status, message, ex);
+
                 ReadOnlyMemory<byte> payload;
                 try
                 {
@@ -445,8 +454,7 @@ public sealed class TicketingClient
                 }
                 catch (OperationCanceledException ex) when (!exchange.IsCancellationRequested)
                 {
-                    // The headers arrived, so the API received the request.
-                    throw Failure(method, idempotent, mayHaveBeenProcessed: true, response.StatusCode, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
+                    throw Unreadable($"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
                 }
                 catch (OperationCanceledException) when (exchange.IsCancellationRequested)
                 {
@@ -455,13 +463,12 @@ public sealed class TicketingClient
                 }
                 catch (Exception ex) when (ex is IOException or HttpRequestException)
                 {
-                    // The connection dropped while the answer was arriving: the request was received, and may have been done.
-                    throw Failure(method, idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The connection to the Ticketing API dropped while its answer was arriving.", ex);
+                    throw Unreadable("The connection to the Ticketing API dropped while its answer was arriving.", ex);
                 }
-                catch (TicketingApiException ex) when (method != HttpMethod.Get && !ex.MayHaveBeenCarriedOut)
+                catch (TicketingApiException ex) when (!ex.MayHaveBeenCarriedOut)
                 {
-                    // An answer too large to read, after the request was received.
-                    throw Failure(method, idempotent, mayHaveBeenProcessed: true, response.StatusCode, ex.Message, ex);
+                    // An answer too large to read.
+                    throw Unreadable(ex.Message, ex);
                 }
 
                 ServiceMetrics.RecordUpstreamResponseBytes(MetricOperation(path), payload.Length);

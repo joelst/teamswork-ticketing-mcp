@@ -251,8 +251,8 @@ public sealed class QueueTools
             List<(Ticket Ticket, Waiting.State? State, bool Attempted)> rows = Fine(
                     page.Select((t, i) => (t, states[i], attempted[i])).ToList(), order, now)
                 .Take(max).ToList();
-            int unknown = rows.Count(r => r.State is { WaitingOn: null, ResolutionUnknown: false, RosterUnknown: false });
-            int rosterless = rows.Count(r => r.State is { WaitingOn: null, RosterUnknown: true });
+            int unknown = rows.Count(r => r.State is { WaitingOn: null, ResolutionUnknown: false, AuthorUnknown: false });
+            int unplaced = rows.Count(r => r.State is { WaitingOn: null, AuthorUnknown: true });
             int unresolvable = rows.Count(r => r.State is { WaitingOn: null, ResolutionUnknown: true });
             int unread = history ? rows.Count(r => !r.Attempted) : 0;
             int failed = rows.Count(r => unreadable.Contains(r.Ticket));   // among the rows returned, not every read tried
@@ -310,8 +310,8 @@ public sealed class QueueTools
                 unknown > 0 && extras.Contains("waitingOn")
                     ? $"{unknown} rows have no waitingOn: none of their latest {Waiting.HistoryWindow} activities is a public reply, so who they wait on isn't known."
                     : null,
-                rosterless > 0 && extras.Contains("waitingOn")
-                    ? $"{rosterless} rows have no waitingOn: the help desk's staff list couldn't be read, so whether their latest reply came from staff isn't known."
+                unplaced > 0 && extras.Contains("waitingOn")
+                    ? $"{unplaced} rows have no waitingOn: their latest public reply is from someone who is neither the requestor nor known staff (a cc, say), so who they wait on isn't known."
                     : null,
                 unresolvable > 0 && extras.Contains("waitingOn")
                     ? $"{unresolvable} rows have no waitingOn: their workflow doesn't say whether their state is resolved."

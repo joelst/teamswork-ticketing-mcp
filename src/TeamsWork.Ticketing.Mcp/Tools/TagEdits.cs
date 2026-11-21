@@ -26,26 +26,41 @@ internal static class TagEdits
         // read as no tags, which would erase them.
         if (ticketTags is not { ValueKind: JsonValueKind.Array } list)
         {
-            throw new McpException("The ticket's tags are in a form this server doesn't recognise, so they can't be kept for certain. Pass the whole list in 'tags' instead.");
+            throw Unrecognised();
         }
 
         var current = new List<TicketTag>();
         foreach (JsonElement tag in list.EnumerateArray())
         {
-            if (tag.ValueKind == JsonValueKind.Object &&
-                tag.TryGetProperty("tagCategoryId", out JsonElement id) && id.ValueKind == JsonValueKind.String &&
-                tag.TryGetProperty("text", out JsonElement written) && written.ValueKind == JsonValueKind.String)
+            string text;
+            if (tag.ValueKind == JsonValueKind.String)
             {
-                current.Add(new TicketTag(id.GetString()!, written.GetString()!));
-                continue;
+                text = tag.GetString()!;
+            }
+            else if (tag.ValueKind == JsonValueKind.Object &&
+                     tag.TryGetProperty("text", out JsonElement written) && written.ValueKind == JsonValueKind.String)
+            {
+                // With its category, the tag is known as it is; without one (absent, null or blank), it is matched by its
+                // text like a plain tag. A category of any other kind is refused, as a wrong reading would change the ticket.
+                JsonElement id = tag.TryGetProperty("tagCategoryId", out JsonElement given) ? given : default;
+                if (id.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(id.GetString()))
+                {
+                    current.Add(new TicketTag(id.GetString()!, written.GetString()!));
+                    continue;
+                }
+
+                if (id.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null or JsonValueKind.String))
+                {
+                    throw Unrecognised();
+                }
+
+                text = written.GetString()!;
+            }
+            else
+            {
+                throw Unrecognised();
             }
 
-            if (tag.ValueKind != JsonValueKind.String)
-            {
-                throw new McpException("The ticket's tags are in a form this server doesn't recognise, so they can't be kept for certain. Pass the whole list in 'tags' instead.");
-            }
-
-            string text = tag.GetString()!;
             var owners = categories.Where(c => c.Id is not null && (c.Tags ?? []).Any(t => Same(t.Text, text))).ToList();
             current.Add(owners.Count switch
             {
@@ -111,6 +126,9 @@ internal static class TagEdits
             : $"The ticket didn't have {string.Join(", ", notOnTicket.Select(t => $"'{t}'"))}, so nothing was removed for {(notOnTicket.Count == 1 ? "it" : "them")}.";
         return (tags, warning);
     }
+
+    private static McpException Unrecognised() =>
+        new("The ticket's tags are in a form this server doesn't recognise, so they can't be kept for certain. Pass the whole list in 'tags' instead.");
 
     /// <summary>The category <paramref name="given"/> names, by ID or by name; null when none does.</summary>
     internal static TagCategory? FindCategory(string given, IReadOnlyList<TagCategory> categories) =>

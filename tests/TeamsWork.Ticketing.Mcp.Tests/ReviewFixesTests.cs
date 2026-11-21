@@ -85,6 +85,43 @@ public sealed class ReviewFixesTests
         Assert.False(ex.IsRateLimited);
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.Conflict, false)]              // refused, whatever the body would have said
+    [InlineData(HttpStatusCode.InternalServerError, true)]
+    public async Task An_unreadable_answer_keeps_a_known_refusal(HttpStatusCode status, bool mayHaveBeenMade)
+    {
+        IOptions<TicketingOptions> opts = Options.Create(TestFactory.Options());
+        var client = new TicketingClient(new HttpClient(new DroppedBody(status)), opts, new TicketingRateLimiter(opts), new TimeZoneOffsetResolver(opts, TimeProvider.System),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<TicketingClient>.Instance, TimeProvider.System);
+
+        TicketingApiException ex = await Assert.ThrowsAsync<TicketingApiException>(() =>
+            client.UpdateTicketAsync(Guid.Parse(TicketA), new TicketWrite { Title = "t" }, Actor, false, null, Ct));
+
+        Assert.Equal(status, ex.StatusCode);
+        Assert.Equal(mayHaveBeenMade, ex.MayHaveBeenCarriedOut);
+    }
+
+    /// <summary>Sends the status, then drops the connection while the body is read.</summary>
+    private sealed class DroppedBody(HttpStatusCode status) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(status) { Content = new StreamContent(new FailingStream()) });
+
+        private sealed class FailingStream : Stream
+        {
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => 0; set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count) => throw new IOException("connection reset");
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        }
+    }
+
     [Fact]
     public async Task An_update_the_api_refused_or_a_failed_read_was_not_carried_out()
     {

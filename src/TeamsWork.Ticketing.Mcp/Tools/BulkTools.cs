@@ -599,8 +599,10 @@ public sealed partial class BulkTools
 
     /// <summary>
     /// The tickets named, as they stand now. Tickets known by UUID (given, or a number seen in an earlier response) are
-    /// read one at a time when there are only a couple; otherwise one read of the open tickets finds most of them,
-    /// numbers included, without a lookup each, and the rest are found and read one at a time.
+    /// read one at a time when there are only a couple. Otherwise one scan of the tickets, resolved ones included, finds
+    /// them, numbers too, without a lookup each, and stops once it has them all; one a complete scan didn't find doesn't
+    /// exist. The rest are found and read one at a time, all within one budget for the batch, so naming many old tickets
+    /// can't spend the caller's request quota before the preview returns.
     /// </summary>
     private async Task<(List<Picked> Tickets, string? Hint)> PickByRefsAsync(IReadOnlyList<string> refs, bool wholeTickets, int? timezoneOffset, CancellationToken cancellationToken)
     {
@@ -615,33 +617,67 @@ public sealed partial class BulkTools
             wanted.Add((given, known, number));
         }
 
-        // A scan of the open tickets is one request (or a few on a very large help desk); reading each ticket is one each.
+        static bool Names((string Given, Guid? Id, int? Number) w, Ticket t) =>
+            (w.Id is Guid g && Guid.TryParse(t.Id, out Guid tid) && tid == g) || (w.Number is int n && t.TicketNo == n);
+
+        // A scan is one request (or a few on a very large help desk); reading each ticket is one each.
         bool scanPays = wanted.Any(w => w.Id is null) || wanted.Count > 2;
-        var openQuery = new TicketListQuery { IsResolved = false, Select = wholeTickets ? null : BulkFields, TimezoneOffset = timezoneOffset };
-        Dictionary<string, long>? stamps = scanPays && wholeTickets ? await StampsAsync(openQuery, cancellationToken) : null;
-        TicketScan.Result<Picked> open = !scanPays ? new TicketScan.Result<Picked>([], 0, 0, false) : await TicketScan.RunAsync(
+        var allQuery = new TicketListQuery { Select = wholeTickets ? null : BulkFields, TimezoneOffset = timezoneOffset };
+        Dictionary<string, long>? stamps = scanPays && wholeTickets ? await StampsAsync(allQuery, cancellationToken) : null;
+        var reached = new HashSet<int>();
+        TicketScan.Result<Picked> scan = !scanPays ? new TicketScan.Result<Picked>([], 0, 0, false) : await TicketScan.RunAsync(
             _client,
-            openQuery,
+            allQuery,
             t =>
             {
                 _cache.Seen(t);
-                return wanted.Any(w => (w.Id is Guid g && Guid.TryParse(t.Id, out Guid tid) && tid == g) || (w.Number is int n && t.TicketNo == n)) ? Pick(t, stamps) : null;
+                bool named = false;
+                for (int i = 0; i < wanted.Count; i++)
+                {
+                    if (Names(wanted[i], t))
+                    {
+                        reached.Add(i);
+                        named = true;
+                    }
+                }
+
+                return named ? Pick(t, stamps) : null;
             },
             _options.MaxScanTickets,
             WorkloadTools.FullTicketPageSize,   // descriptions either way
-            cancellationToken);
+            cancellationToken,
+            enough: () => reached.Count == wanted.Count);
+
+        // Every ticket was read, so one named by number or UUID that wasn't among them doesn't exist. A prefixed number
+        // (ITH-2213) is left to the lookup, which checks its prefix.
+        if (scanPays && !scan.Truncated)
+        {
+            List<string> missing = wanted.Where((w, i) => !reached.Contains(i) && (w.Id is not null || w.Number is not null)).Select(w => $"'{w.Given}'").ToList();
+            if (missing.Count > 0)
+            {
+                throw new McpException($"No ticket is {string.Join(", ", missing)}: every ticket was checked. Check the numbers, or search with list_tickets.");
+            }
+        }
 
         var found = new List<Picked>();
         var seen = new HashSet<Guid>();
-        var refsTool = new TicketRefs(_client, _cache, _options);
-        foreach ((string given, Guid? gid, int? number) in wanted)
+        var budget = new TicketRefs.LookupBudget(_options.MaxScanTickets);
+        var refsTool = new TicketRefs(_client, _cache, _options, budget);
+        foreach ((string Given, Guid? Id, int? Number) w in wanted)
         {
             // A match whose _ts wasn't read (the two reads drifted apart) is read on its own, which carries it.
-            Picked? p = open.Matches.FirstOrDefault(m => m.Version.Ts is not null &&
-                ((gid is Guid g && Guid.TryParse(m.Ticket.Id, out Guid tid) && tid == g) || (number is int n && m.Ticket.TicketNo == n)));
+            Picked? p = scan.Matches.FirstOrDefault(m => m.Version.Ts is not null && Names(w, m.Ticket));
             if (p is null)
             {
-                Guid id = gid ?? await refsTool.ResolveAsync(given, timezoneOffset, cancellationToken, "tickets");
+                Guid id = w.Id ?? await refsTool.ResolveAsync(w.Given, timezoneOffset, cancellationToken, "tickets");
+                if (budget.Left < TicketRefs.LookupBudget.ReadCharge)
+                {
+                    throw new McpException(
+                        $"Reading the tickets named one at a time would take more requests than a batch may use, as some ({w.Given}, for one) " +
+                        $"aren't among the {_options.MaxScanTickets} most recently created tickets. Name fewer tickets at a time, or select them with a filter.");
+                }
+
+                budget.Left -= TicketRefs.LookupBudget.ReadCharge;
                 Ticket t = await _client.GetTicketAsync(id, includeHtml: false, timezoneOffset, cancellationToken);
                 _cache.Seen(t);
                 p = Pick(t, null);

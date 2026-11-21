@@ -21,15 +21,9 @@ internal sealed class TicketPeople
 
     private TicketPeople(IReadOnlySet<string> system) => _system = system;
 
-    /// <summary>
-    /// Whether the instance's assignee list was read. Without it, someone writing who isn't the ticket's assignee or
-    /// requestor may be staff or may not, so their reply can't say who the ticket waits on.
-    /// </summary>
-    public bool HasRoster { get; private init; }
-
     public static TicketPeople From(Instance? instance, TicketingOptions options)
     {
-        var people = new TicketPeople(options.SystemAccountSet()) { HasRoster = instance?.Assignees?.Peoples is not null };
+        var people = new TicketPeople(options.SystemAccountSet());
         foreach (Persona p in instance?.Assignees?.Peoples ?? [])
         {
             people.AddAgent(p.Id, p.Email);
@@ -161,11 +155,11 @@ internal static partial class Waiting
     /// Why <paramref name="WaitingOn"/> is null when it is: true when whether the ticket is resolved isn't known, false
     /// when the history read doesn't reach back far enough to tell.
     /// </param>
-    /// <param name="RosterUnknown">
-    /// True when <paramref name="WaitingOn"/> is null because the latest reply's author couldn't be placed: the staff
-    /// list wasn't read, and they are neither the ticket's assignee nor its requestor.
+    /// <param name="AuthorUnknown">
+    /// True when <paramref name="WaitingOn"/> is null because the latest reply's author couldn't be placed: they are
+    /// neither the ticket's requestor nor known to be staff.
     /// </param>
-    public sealed record State(string? WaitingOn, DateTimeOffset? WaitingSince, int? IdleDays, Reply? LastPublic, bool ResolutionUnknown = false, bool RosterUnknown = false);
+    public sealed record State(string? WaitingOn, DateTimeOffset? WaitingSince, int? IdleDays, Reply? LastPublic, bool ResolutionUnknown = false, bool AuthorUnknown = false);
 
     /// <param name="By">requestor, agent, or other (someone else on the requestor's side, such as a cc).</param>
     public sealed record Reply(string By, DateTimeOffset? On, string? Text);
@@ -208,13 +202,20 @@ internal static partial class Waiting
             return new State(null, null, idle, reply, ResolutionUnknown: true);
         }
 
-        // A state named for waiting says on whom: someone outside ("Awaiting vendor support", checked first, as such a
-        // state can name a role too), the help desk itself ("Waiting on assignee", "Pending agent"), or otherwise the
-        // requestor ("Waiting on customer").
+        // A state named for waiting says on whom when it names them: someone outside ("Awaiting vendor support", checked
+        // first, as such a state can name a role too), the help desk itself ("Waiting on assignee", "Pending agent"), or
+        // the requestor ("Waiting on customer"). One that names no one ("Pending", "Pending approval") doesn't say, and
+        // the latest reply decides as for any other state.
         if (Blank(statusLabel ?? t.Status) is string status && WaitingState().IsMatch(status))
         {
-            string on = ThirdPartyState().IsMatch(status) ? ThirdParty : AssigneeState().IsMatch(status) ? Assignee : Requestor;
-            return new State(on, null, idle, reply);
+            string? on = ThirdPartyState().IsMatch(status) ? ThirdParty
+                : AssigneeState().IsMatch(status) ? Assignee
+                : RequestorState().IsMatch(status) ? Requestor
+                : null;
+            if (on is not null)
+            {
+                return new State(on, null, idle, reply);
+            }
         }
 
         // Reopened by a person since the latest reply (a requestor's Reopen button sends no comment): the ticket is back
@@ -232,10 +233,11 @@ internal static partial class Waiting
             return complete ? new State(Assignee, created, idle, null) : new State(null, null, idle, null);
         }
 
-        if (reply.By == "other" && !people.HasRoster)
+        if (reply.By == "other")
         {
-            // Without the staff list, an author who is neither assignee nor requestor may be an agent.
-            return new State(null, null, idle, reply, RosterUnknown: true);
+            // Neither the requestor nor known staff: someone on the requestor's side (a cc), or staff the assignee list
+            // leaves out and no ticket read has shown as an assignee. Which it is can't be told, so neither can who it waits on.
+            return new State(null, null, idle, reply, AuthorUnknown: true);
         }
 
         return new State(reply.By == "agent" ? Requestor : Assignee, reply.On, idle, reply);
@@ -283,4 +285,7 @@ internal static partial class Waiting
 
     [GeneratedRegex(@"\b(assignee|agent|technician|engineer|staff|support|internal)\b", RegexOptions.IgnoreCase)]
     private static partial Regex AssigneeState();
+
+    [GeneratedRegex(@"\b(requestor|requester|customer|client|user|end[- ]?user|caller|reporter|submitter)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex RequestorState();
 }

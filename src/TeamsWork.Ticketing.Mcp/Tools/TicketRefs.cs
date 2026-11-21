@@ -28,12 +28,27 @@ internal sealed partial class TicketRefs
     private readonly TicketingClient _client;
     private readonly InstanceCache _cache;
     private readonly TicketingOptions _options;
+    private readonly LookupBudget? _budget;
 
-    public TicketRefs(TicketingClient client, InstanceCache cache, TicketingOptions options)
+    /// <param name="budget">
+    /// Rows the number lookups may read, shared by every lookup made through this instance (a batch's, say); without
+    /// one, each lookup may read Ticketing:MaxScanTickets.
+    /// </param>
+    public TicketRefs(TicketingClient client, InstanceCache cache, TicketingOptions options, LookupBudget? budget = null)
     {
         _client = client;
         _cache = cache;
         _options = options;
+        _budget = budget;
+    }
+
+    /// <summary>What is left of a lookup budget, in rows read (see <see cref="MinPageCharge"/>).</summary>
+    public sealed class LookupBudget(int rows)
+    {
+        public int Left { get; set; } = rows;
+
+        /// <summary>What one request for a single ticket is charged, like a page of rows.</summary>
+        public const int ReadCharge = MinPageCharge;
     }
 
     /// <summary>The ticket's UUID, or an error that says whether the ticket is certainly missing.</summary>
@@ -61,6 +76,9 @@ internal sealed partial class TicketRefs
         {
             { Id: string id } => Guid.Parse(id),
             { Conclusive: true } => throw new McpException($"There is no ticket number {number}. Check the number, or search with list_tickets."),
+            _ when _budget is not null => throw new McpException(
+                $"Ticket number {number} wasn't found before the lookups for this batch used up what they may read together " +
+                $"({_options.MaxScanTickets} tickets), so it may still exist. Name fewer tickets at a time, or select them with a filter."),
             _ => throw new McpException(
                 $"Ticket number {number} wasn't found among the {_options.MaxScanTickets} tickets a lookup may read " +
                 "(Ticketing:MaxScanTickets), so it may still exist. Find it with list_tickets (search or filters): a ticket listed " +
@@ -135,23 +153,23 @@ internal sealed partial class TicketRefs
     /// </summary>
     private async Task<NumberLookup> FindIdByNumberAsync(int number, int? timezoneOffset, CancellationToken cancellationToken)
     {
-        int budget = _options.MaxScanTickets;
+        LookupBudget budget = _budget ?? new LookupBudget(_options.MaxScanTickets);
 
-        int searchSize = Math.Min(NumberSearchSize, budget);
+        int searchSize = Math.Min(NumberSearchSize, budget.Left);
         ListResponse<Ticket> searched = await ListByNumberAsync(null, searchSize, search: number, timezoneOffset, cancellationToken);
-        budget -= searchSize;
+        budget.Left -= searchSize;
         if (Match(searched.Items, number) is NumberLookup found)
         {
             return found;
         }
 
-        if (budget <= 0)
+        if (budget.Left <= 0)
         {
             return new NumberLookup(null, false);
         }
 
         ListResponse<Ticket> newest = await ListByNumberAsync(null, 1, search: null, timezoneOffset, cancellationToken);
-        budget--; // one row: charging a full page here would leave a small budget no room to page at all
+        budget.Left--; // one row: charging a full page here would leave a small budget no room to page at all
         if (newest.Items is { Count: 0 })
         {
             return new NumberLookup(null, true); // no tickets at all
@@ -182,14 +200,14 @@ internal sealed partial class TicketRefs
             likeliest = Math.Min(likeliest, count - 1);
         }
 
-        int offset = Math.Max(0, likeliest - Math.Min(page, budget) + 1);
+        int offset = Math.Max(0, likeliest - Math.Min(page, budget.Left) + 1);
         var visited = new HashSet<int>();
-        while (budget > 0 && visited.Add(offset))
+        while (budget.Left > 0 && visited.Add(offset))
         {
-            int size = Math.Min(page, budget);
+            int size = Math.Min(page, budget.Left);
             ListResponse<Ticket> window = await ListByNumberAsync(offset, size, search: null, timezoneOffset, cancellationToken);
             IReadOnlyList<Ticket> items = window.Items ?? [];
-            budget -= Math.Max(items.Count, MinPageCharge);
+            budget.Left -= Math.Max(items.Count, MinPageCharge);
 
             if (Match(items, number) is NumberLookup hit)
             {

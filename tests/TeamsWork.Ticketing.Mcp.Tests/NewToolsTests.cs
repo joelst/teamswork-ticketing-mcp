@@ -407,6 +407,21 @@ public sealed class NewToolsTests
     }
 
     [Fact]
+    public async Task Count_groups_a_priority_by_its_word_whichever_form_the_api_sends()
+    {
+        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, """
+            {"items":[{"id":"a","priority":"2_Medium"},{"id":"b","priority":"Medium"},{"id":"c","priority":"4_Urgent"}],"itemCount":3}
+            """);
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
+
+        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), cache, options).CountTickets("priority", cancellationToken: Ct));
+
+        JsonElement groups = doc.RootElement.GetProperty("groups");
+        Assert.Equal(("Medium", 2), (groups[0].GetProperty("key").GetString(), groups[0].GetProperty("count").GetInt32()));
+        Assert.Equal("Urgent", groups[1].GetProperty("key").GetString());
+    }
+
+    [Fact]
     public async Task Whoami_reports_the_acting_user()
     {
         (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(new FakeHttpHandler());
