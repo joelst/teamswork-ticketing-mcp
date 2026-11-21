@@ -279,7 +279,7 @@ internal sealed partial class TicketRefs
             Limit = limit,
             TimezoneOffset = timezoneOffset,
         }, cancellationToken);
-        _cache.Numbers.Remember(r.Items);
+        _cache.Seen(r.Items);
         return r;
     }
 

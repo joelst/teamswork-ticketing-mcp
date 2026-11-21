@@ -38,6 +38,21 @@ public sealed class InstanceCache
     /// <summary>Everyone seen as a ticket's assignee, who counts as staff in every tool alike.</summary>
     public SeenAssignees Assignees { get; } = new();
 
+    /// <summary>Notes what a ticket read from the API shows: its number, and its assignee as staff.</summary>
+    public void Seen(Ticket? ticket)
+    {
+        Numbers.Remember(ticket);
+        Assignees.Remember(ticket?.Assignee);
+    }
+
+    public void Seen(IEnumerable<Ticket>? tickets)
+    {
+        foreach (Ticket ticket in tickets ?? [])
+        {
+            Seen(ticket);
+        }
+    }
+
     private readonly TimeSpan _ttl;
     private readonly TimeProvider _time;
     private readonly TimeZoneOffsetResolver _timeZones;

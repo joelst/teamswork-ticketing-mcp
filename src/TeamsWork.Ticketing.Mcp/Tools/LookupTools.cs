@@ -68,7 +68,7 @@ public sealed class LookupTools
             if (shown == 0)
             {
                 Ticket alone = await _client.GetTicketAsync(id, includeHtml, timezoneOffset, cancellationToken);
-                _cache.Numbers.Remember(alone);
+                _cache.Seen(alone);
                 return TicketViews.Detail(alone, includeHtml, await WorkflowStatus.WorkflowsForAsync(alone, _cache, _client, timezoneOffset, cancellationToken), detailChars);
             }
 
@@ -96,7 +96,7 @@ public sealed class LookupTools
             }
 
             Ticket t = await details;
-            _cache.Numbers.Remember(t);
+            _cache.Seen(t);
             ListResponse<Activity> h = await history;
             IReadOnlyList<Activity> recent = h.Items ?? [];
             // The instance settings (cached), read once: the ticket's workflow and the help desk's staff both come from
@@ -116,7 +116,6 @@ public sealed class LookupTools
 
             // The caller and everyone seen as an assignee count as staff, as in get_queue, so the two tools judge a reply
             // alike and the caller's own replies aren't taken for the requestor's.
-            _cache.Assignees.Remember(t.Assignee);
             TicketPeople people = TicketPeople.From(instance, _options).WithAgents(_cache.Assignees.All);
             if (await CallerAsync(cancellationToken) is TicketUser caller)
             {
@@ -235,7 +234,7 @@ public sealed class LookupTools
                     Limit = 25,
                     TimezoneOffset = timezoneOffset,
                 }, cancellationToken);
-                _cache.Numbers.Remember(r.Items);
+                _cache.Seen(r.Items);
 
                 foreach (Ticket t in r.Items ?? [])
                 {

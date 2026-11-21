@@ -765,6 +765,31 @@ public sealed class QueueBriefBulkTests
     }
 
     [Fact]
+    public async Task An_assignee_seen_by_any_ticket_read_counts_as_staff_in_a_later_brief()
+    {
+        // Kim isn't in the assignee list. find_similar_tickets reads a ticket assigned to Kim; Kim then replies on another.
+        const string Kim = """{"id":"k1","name":"Kim Staff","email":"kim@example.test"}""";
+        var pat = new ActingUser("p1", "Pat Asker", "pat@example.test", ActingUserSource.DelegatedToken);
+        var handler = new Router(r => r.Path switch
+        {
+            var p when p.EndsWith("/activities", StringComparison.Ordinal) =>
+                $$"""{"items":[{"id":"a","action":"commented","comment":"Try this","user":{{Kim}},"createdOn":"2026-11-18T12:00:00Z"}]}""",
+            var p when p.EndsWith("/attachments", StringComparison.Ordinal) => """{"items":[]}""",
+            var p when p.EndsWith("/instance", StringComparison.Ordinal) => InstanceJson,
+            var p when p.EndsWith("/tickets", StringComparison.Ordinal) =>
+                $$"""{"items":[{"id":"{{Id(2)}}","ticketNo":2,"title":"Printer jam","status":"Open","assignee":{{Kim}} }],"itemCount":1}""",
+            _ => $$"""{"item":{"id":"{{Id(1)}}","ticketNo":1,"title":"T","status":"Open","requestor":{{Requestor}},"assignee":{{Agent}} } }""",
+        });
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = BuildRouted(handler);
+        var lookup = new LookupTools(client, cache, options, Clock, new FixedActor(pat));
+
+        await lookup.FindSimilarTickets("Printer jam", cancellationToken: Ct);
+        using JsonDocument doc = JsonDocument.Parse(await lookup.GetTicketBrief(Id(1), cancellationToken: Ct));
+
+        Assert.Equal("requestor", doc.RootElement.GetProperty("waitingOn").GetString());
+    }
+
+    [Fact]
     public async Task The_limit_is_applied_after_ranking_with_history()
     {
         // Both Medium; the older one waits on the requestor, the newer one on me. With limit 1, mine comes first.
@@ -903,6 +928,28 @@ public sealed class QueueBriefBulkTests
         string error = Assert.Single(doc.RootElement.GetProperty("failed").EnumerateArray()).GetProperty("error").GetString()!;
         Assert.Contains("fields changed; the status change may or may not have been", error, StringComparison.Ordinal);
         Assert.NotNull(store.Find(doc.RootElement.GetProperty("resumeToken").GetString()!));   // ticket 102, not reached
+    }
+
+    [Fact]
+    public async Task A_failed_write_that_may_have_been_made_says_to_check_the_ticket()
+    {
+        var store = new BulkStore(Clock);
+        var preview = new Router(r => r.Path.EndsWith("/instance", StringComparison.Ordinal) ? InstanceJson : WeeklyChecks());
+        using JsonDocument previewed = JsonDocument.Parse(await Bulk(preview, store).PreviewBulkUpdate(
+            filter: new BulkFilter { TitlePattern = "Weekly check:*" }, set: Resolve, cancellationToken: Ct));
+        string token = previewed.RootElement.GetProperty("confirmToken").GetString()!;
+        var confirm = new Router(r =>
+            r.Method == HttpMethod.Put && r.Path.Contains(Id(1), StringComparison.Ordinal)
+                ? """{"item":null,"error":true,"message":"Something failed"}"""   // received, so it may have been carried out
+                : "{\"item\":" + (r.Path.Contains(Id(1), StringComparison.Ordinal) ? Bulk(1, "Weekly check: backups", "In Progress", 1000) : Bulk(2, "Weekly check: patching", "In Progress", 2000)) + "}");
+
+        using JsonDocument doc = JsonDocument.Parse(await Bulk(confirm, store).BulkUpdate(token, Ct));
+
+        string error = Assert.Single(doc.RootElement.GetProperty("failed").EnumerateArray()).GetProperty("error").GetString()!;
+        Assert.Contains("Something failed", error, StringComparison.Ordinal);
+        Assert.Contains("may have been made anyway", error, StringComparison.Ordinal);
+        Assert.Contains("get_ticket_brief", error, StringComparison.Ordinal);
+        Assert.Single(doc.RootElement.GetProperty("applied").EnumerateArray());
     }
 
     private const string FinalStateGraph = """
@@ -1723,7 +1770,7 @@ public sealed class QueueBriefBulkTests
     }
 
     [Fact]
-    public async Task A_write_retried_after_a_5xx_then_held_back_for_rate_has_an_unknown_outcome()
+    public async Task A_write_retried_after_a_5xx_then_held_back_for_rate_may_have_been_carried_out()
     {
         // The 503 may have come after the change was made; the retry is then refused by the caller's quota (one a minute).
         var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.ServiceUnavailable, "{}");
@@ -1736,7 +1783,9 @@ public sealed class QueueBriefBulkTests
             client.UpdateTicketStatusAsync(Guid.NewGuid(), "Resolved", null, null, new TicketUser("u1", "Jane", "jane@example.test"), null, Ct));
 
         Assert.Single(handler.Requests);
-        Assert.True(ex.OutcomeUnknown);
+        Assert.True(ex.MayHaveBeenCarriedOut);
+        Assert.False(ex.OutcomeUnknown);  // a status change without a note is safe to repeat
+        Assert.Contains("An earlier attempt may have been carried out", ex.Message, StringComparison.Ordinal);
         Assert.False(ex.IsRateLimited);   // so a bulk confirmation reports it rather than resume it as untouched
     }
 

@@ -134,7 +134,7 @@ public sealed class WorkloadTools
                 t =>
                 {
                     anyFlags |= HasSlaFlags(t);
-                    _cache.Numbers.Remember(t);
+                    _cache.Seen(t);
                     return AtRisk(t) ? TicketViews.Row(t, workflows: workflows) : null;
                 },
                 _options.MaxScanTickets,
@@ -232,7 +232,7 @@ public sealed class WorkloadTools
             // Only each ticket's group is kept. A person is grouped by email (or ID when there is none), so one
             // person under two display names is one group, and shown with the first name seen.
             TicketScan.Result<GroupKey> scan = await TicketScan.RunAsync(
-                _client, query, t => GroupOf(t, by), _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
+                _client, query, t => { _cache.Seen(t); return GroupOf(t, by); }, _options.MaxScanTickets, TicketScan.MaxApiPageSize, cancellationToken);
 
             // A custom state is counted by its ID and shown by its label, with the ID beside it, as the other tools show it.
             System.Text.Json.JsonElement? workflows = by == "status"

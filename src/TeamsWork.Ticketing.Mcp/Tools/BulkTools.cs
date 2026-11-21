@@ -108,7 +108,7 @@ public sealed partial class BulkTools
                 ? await PickByFilterAsync(filter, workflows, change.Status is not null, timezoneOffset, cancellationToken)
                 : await PickByRefsAsync(tickets!, change.Status is not null, timezoneOffset, cancellationToken);
 
-            IReadOnlyList<TagCategory> categories = change.AddTags.Count > 0 || change.RemoveTags.Count > 0 ? await lookup.TagCategoriesAsync() : [];
+            IReadOnlyList<TagCategory> categories = change.AddTags.Count > 0 || change.RemoveTags.Count > 0 ? await lookup.TagCategoriesAsync(change.RemoveTags) : [];
             // A mistake in the tags given (a removal with no text or an unknown category, a tag both added and removed)
             // is the request's, not any one ticket's: refused once here rather than blocking every ticket.
             _ = TagEdits.Apply([], change.AddTags, change.RemoveTags, categories);
@@ -265,6 +265,7 @@ public sealed partial class BulkTools
                 try
                 {
                     now = await _client.GetTicketAsync(item.Id, includeHtml: false, plan.TimezoneOffset, cancellationToken);
+                    _cache.Seen(now);
                 }
                 catch (TicketingApiException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
                 {
@@ -511,7 +512,7 @@ public sealed partial class BulkTools
             if (!next.Select(Key).ToHashSet(StringComparer.Ordinal).SetEquals(current.Select(Key)))
             {
                 tags = next;
-                from["tags"] = new JsonArray(current.Select(x => (JsonNode?)JsonValue.Create(x.Text)).ToArray());
+                from["tags"] = TicketViews.TagList(current);
             }
         }
 
@@ -581,7 +582,7 @@ public sealed partial class BulkTools
             query,
             t =>
             {
-                _cache.Numbers.Remember(t);
+                _cache.Seen(t);
                 return Guid.TryParse(t.Id, out _) && (titlePattern is null || titlePattern.IsMatch(t.Title ?? "")) && assigneeMatches(t) ? Pick(t, stamps) : null;
             },
             _options.MaxScanTickets,
@@ -623,7 +624,7 @@ public sealed partial class BulkTools
             openQuery,
             t =>
             {
-                _cache.Numbers.Remember(t);
+                _cache.Seen(t);
                 return wanted.Any(w => (w.Id is Guid g && Guid.TryParse(t.Id, out Guid tid) && tid == g) || (w.Number is int n && t.TicketNo == n)) ? Pick(t, stamps) : null;
             },
             _options.MaxScanTickets,
@@ -642,7 +643,7 @@ public sealed partial class BulkTools
             {
                 Guid id = gid ?? await refsTool.ResolveAsync(given, timezoneOffset, cancellationToken, "tickets");
                 Ticket t = await _client.GetTicketAsync(id, includeHtml: false, timezoneOffset, cancellationToken);
-                _cache.Numbers.Remember(t);
+                _cache.Seen(t);
                 p = Pick(t, null);
             }
 

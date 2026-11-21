@@ -173,8 +173,7 @@ public sealed class QueueTools
                 query,
                 t =>
                 {
-                    _cache.Numbers.Remember(t);
-                    _cache.Assignees.Remember(t.Assignee);   // every ticket read, not only the matches
+                    _cache.Seen(t);   // every ticket read, not only the matches
                     if (!matches(t))
                     {
                         return null;

@@ -1,9 +1,11 @@
 using System.Net;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 using TeamsWork.Ticketing.Mcp.Configuration;
 using TeamsWork.Ticketing.Mcp.Ticketing;
+using TeamsWork.Ticketing.Mcp.Ticketing.Models;
 using TeamsWork.Ticketing.Mcp.Tools;
 using static TeamsWork.Ticketing.Mcp.Tests.NewToolsTests;
 
@@ -439,6 +441,34 @@ public sealed class UsabilityTests
 
         Assert.Equal([("cat2", "Hardware")], SentTags(handler.Requests[2]));
         Assert.Contains("'Missing'", doc.RootElement.GetProperty("warning").GetString(), StringComparison.Ordinal);
+        Assert.Equal("""["Hardware"]""", doc.RootElement.GetProperty("changed").GetProperty("tags").GetRawText());
+    }
+
+    [Fact]
+    public void Tags_written_show_the_category_only_for_a_text_in_two_categories()
+    {
+        JsonArray shown = TicketViews.TagList([new TicketTag("cat2", "Shared"), new TicketTag("cat3", "shared"), new TicketTag("cat1", "Network")])!;
+
+        Assert.Equal("""[{"text":"Shared","tagCategoryId":"cat2"},{"text":"shared","tagCategoryId":"cat3"},"Network"]""", shown.ToJsonString());
+    }
+
+    [Fact]
+    public async Task A_removal_naming_a_category_renamed_since_the_cache_was_filled_reads_the_categories_again()
+    {
+        var handler = new FakeHttpHandler()
+            .Enqueue(HttpStatusCode.OK, Categories)                                    // cached while "Area"
+            .Enqueue(HttpStatusCode.OK, TicketWithTags("Network", "Hardware"))
+            .Enqueue(HttpStatusCode.OK, Categories.Replace("\"Area\"", "\"Location\"", StringComparison.Ordinal))
+            .Enqueue(HttpStatusCode.OK, $$$"""{"item":{"id":"{{{TicketA}}}"}}""");
+        var time = new MutableTime(new DateTimeOffset(2026, 11, 20, 12, 0, 0, TimeSpan.Zero));
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler, time: time);
+        await cache.GetTagCategoriesAsync(client, refresh: false, Ct);
+        time.Advance(InstanceCache.MinRefreshInterval + TimeSpan.FromSeconds(1));
+
+        await new TicketTools(client, new FixedActor(Jane), cache, options)
+            .UpdateTicket(TicketA, removeTags: [new TagRef { Text = "Network", TagCategoryId = "Location" }], cancellationToken: Ct);
+
+        Assert.Equal([("cat2", "Hardware")], SentTags(handler.Requests[3]));
     }
 
     [Fact]

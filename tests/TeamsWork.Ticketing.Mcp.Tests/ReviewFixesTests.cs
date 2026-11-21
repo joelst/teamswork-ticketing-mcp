@@ -80,6 +80,25 @@ public sealed class ReviewFixesTests
             TestFactory.Client(handler).UpdateTicketAsync(Guid.Parse(TicketA), new TicketWrite { Title = "t" }, Actor, false, null, Ct));
 
         Assert.False(ex.OutcomeUnknown); // an update can safely be repeated
+        Assert.True(ex.MayHaveBeenCarriedOut); // but a 500 can come after it was made, so the caller is told to check
+        Assert.Contains("may have been made anyway", ex.Message, StringComparison.Ordinal);
+        Assert.False(ex.IsRateLimited);
+    }
+
+    [Fact]
+    public async Task An_update_the_api_refused_or_a_failed_read_was_not_carried_out()
+    {
+        var refused = new FakeHttpHandler().Enqueue(HttpStatusCode.BadRequest, """{"message":"x"}""");
+        TicketingApiException update = await Assert.ThrowsAsync<TicketingApiException>(() =>
+            TestFactory.Client(refused).UpdateTicketAsync(Guid.Parse(TicketA), new TicketWrite { Title = "t" }, Actor, false, null, Ct));
+
+        var failing = new FakeHttpHandler().Enqueue(HttpStatusCode.InternalServerError, "{}");
+        TicketingApiException read = await Assert.ThrowsAsync<TicketingApiException>(() =>
+            TestFactory.Client(failing).GetTicketAsync(Guid.Parse(TicketA), false, null, Ct));
+
+        Assert.False(update.MayHaveBeenCarriedOut);
+        Assert.False(read.MayHaveBeenCarriedOut);
+        Assert.DoesNotContain("may have been made", read.Message, StringComparison.Ordinal);
     }
 
     // ---- Custom field values ----------------------------------------------------------------------------------

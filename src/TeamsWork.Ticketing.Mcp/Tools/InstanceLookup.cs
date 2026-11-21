@@ -91,9 +91,16 @@ internal sealed partial class InstanceLookup
         }
     }
 
-    /// <summary>The instance's tag categories (cached), for resolving the categories removeTags names.</summary>
-    public async Task<IReadOnlyList<TagCategory>> TagCategoriesAsync() =>
-        await _cache.GetTagCategoriesAsync(_client, refresh: false, _cancellationToken);
+    /// <summary>
+    /// The instance's tag categories (cached), for resolving the categories <paramref name="remove"/> names. Read once more
+    /// if one of them isn't found, in case it was added or renamed since the cache was filled, as with added tags.
+    /// </summary>
+    public async Task<IReadOnlyList<TagCategory>> TagCategoriesAsync(IReadOnlyList<TagRef> remove)
+    {
+        IReadOnlyList<TagCategory> categories = await _cache.GetTagCategoriesAsync(_client, refresh: false, _cancellationToken);
+        bool missing = remove.Any(r => !string.IsNullOrWhiteSpace(r.TagCategoryId) && TagEdits.FindCategory(r.TagCategoryId.Trim(), categories) is null);
+        return missing ? await _cache.GetTagCategoriesAsync(_client, refresh: true, _cancellationToken) : categories;
+    }
 
     internal static McpException TagMiss(string message) => Miss(message);
 

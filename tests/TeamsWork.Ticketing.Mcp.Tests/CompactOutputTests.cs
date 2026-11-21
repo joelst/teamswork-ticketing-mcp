@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 using TeamsWork.Ticketing.Mcp.Configuration;
@@ -356,6 +357,81 @@ public sealed class CompactOutputTests
         Assert.Contains("Open, Resolved", text, StringComparison.Ordinal);
         Assert.Contains("isResolved", text, StringComparison.Ordinal);
         Assert.Null(StatusDescriptions.Describe(null)); // without states, the fixed description stands
+    }
+
+    [Fact]
+    public void A_tag_that_carries_its_category_keeps_it_so_same_text_tags_can_be_told_apart()
+    {
+        JsonElement tags = JsonDocument.Parse("""[{"tagCategoryId":"cat1","text":"VPN"},{"tagCategoryId":"cat2","text":"VPN"},"Printer",{"text":"Bare"}]""").RootElement;
+
+        Assert.Equal(
+            """[{"text":"VPN","tagCategoryId":"cat1"},{"text":"VPN","tagCategoryId":"cat2"},"Printer","Bare"]""",
+            TicketViews.Tags(tags)!.ToJsonString());
+    }
+
+    [Fact]
+    public async Task A_settings_read_that_outlasts_the_wait_and_then_fails_is_not_started_again_by_each_listing()
+    {
+        var handler = new HeldInstance(HttpStatusCode.InternalServerError, "{}");
+        (TicketingClient client, InstanceCache cache, ServiceProvider services) = DescribeServices(handler);
+        using ServiceProvider owned = services;
+
+        Assert.Null(await StatusDescriptions.DescribeAsync(services, Ct, TimeSpan.FromMilliseconds(50)));   // the wait ends first
+        handler.Release.SetResult();
+        await Assert.ThrowsAsync<TicketingApiException>(() => cache.GetInstanceAsync(client, null, refresh: false, Ct));
+        int sent = handler.Requests;
+
+        Assert.Null(await StatusDescriptions.DescribeAsync(services, Ct, TimeSpan.FromMilliseconds(50)));
+
+        Assert.Equal(sent, handler.Requests);
+    }
+
+    [Fact]
+    public async Task A_settings_read_that_outlasts_the_wait_and_then_succeeds_is_used()
+    {
+        var handler = new HeldInstance(HttpStatusCode.OK, GraphInstance);
+        (TicketingClient client, InstanceCache cache, ServiceProvider services) = DescribeServices(handler);
+        using ServiceProvider owned = services;
+
+        Assert.Null(await StatusDescriptions.DescribeAsync(services, Ct, TimeSpan.FromMilliseconds(50)));
+        handler.Release.SetResult();
+        await cache.GetInstanceAsync(client, null, refresh: false, Ct);
+
+        string? text = await StatusDescriptions.DescribeAsync(services, Ct, TimeSpan.FromMilliseconds(50));
+
+        Assert.Contains("Open, Resolved", text, StringComparison.Ordinal);   // from the cache, though listing backs off
+    }
+
+    private static (TicketingClient, InstanceCache, ServiceProvider) DescribeServices(HttpMessageHandler handler)
+    {
+        IOptions<TicketingOptions> opts = Options.Create(TestFactory.Options());
+        var tz = new TimeZoneOffsetResolver(opts, TimeProvider.System);
+        var client = new TicketingClient(new HttpClient(handler), opts, new TicketingRateLimiter(opts), tz,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<TicketingClient>.Instance, TimeProvider.System);
+        var cache = new InstanceCache(opts, tz, TimeProvider.System);
+        ServiceProvider services = new ServiceCollection()
+            .AddSingleton(cache)
+            .AddSingleton(client)
+            .AddSingleton(new StatusDescriptions.BackOff(TimeProvider.System))
+            .BuildServiceProvider();
+        return (client, cache, services);
+    }
+
+    /// <summary>Answers every request once released, so a read can be made to outlast a wait.</summary>
+    private sealed class HeldInstance(HttpStatusCode status, string body) : HttpMessageHandler
+    {
+        private int _requests;
+
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int Requests => Volatile.Read(ref _requests);
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _requests);
+            await Release.Task.WaitAsync(cancellationToken);
+            return new HttpResponseMessage(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+        }
     }
 
     [Fact]

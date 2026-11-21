@@ -112,9 +112,13 @@ internal static class TagEdits
         return (tags, warning);
     }
 
+    /// <summary>The category <paramref name="given"/> names, by ID or by name; null when none does.</summary>
+    internal static TagCategory? FindCategory(string given, IReadOnlyList<TagCategory> categories) =>
+        categories.FirstOrDefault(c => string.Equals(c.Id, given, StringComparison.Ordinal))
+        ?? categories.FirstOrDefault(c => Same(c.Text, given));
+
     private static string CategoryId(string given, string paramName, IReadOnlyList<TagCategory> categories) =>
-        (categories.FirstOrDefault(c => string.Equals(c.Id, given, StringComparison.Ordinal))
-         ?? categories.FirstOrDefault(c => Same(c.Text, given)))?.Id
+        FindCategory(given, categories)?.Id
         ?? throw new McpException(
             $"'{paramName}' '{given}' is not a tag category ID or name. Categories: " +
             (categories.Count == 0 ? "(none defined)" : string.Join(", ", categories.Select(c => c.Text).OfType<string>())) + ".");

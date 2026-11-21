@@ -113,11 +113,7 @@ public sealed class TicketTools
 
             ListResponse<Ticket> r = await _client.ListTicketsAsync(query, cancellationToken);
             IReadOnlyList<Ticket> items = r.Items ?? [];
-            _cache.Numbers.Remember(items);
-            foreach (Ticket t in items)
-            {
-                _cache.Assignees.Remember(t.Assignee);
-            }
+            _cache.Seen(items);
             string? hint = string.Join(" ", new[]
             {
                 isResolved is null ? filter?.Hint : null,
@@ -171,7 +167,7 @@ public sealed class TicketTools
             };
 
             Ticket created = await _client.CreateTicketAsync(write, actor.ToTicketUser(), includeHtml: false, timezoneOffset, cancellationToken);
-            _cache.Numbers.Remember(created);
+            _cache.Seen(created);
 
             // The live API ignores priority on create (the ticket gets the instance default) but honours it on update.
             // The ticket exists from here on, so a failure setting the priority must not look like a failed create:
@@ -278,8 +274,9 @@ public sealed class TicketTools
                 // between the read and the write would be overwritten, as with any update of the whole list.
                 List<TicketTag> toAdd = await lookup.TagsAsync(addTags, "addTags") ?? [];
                 Ticket existing = await _client.GetTicketAsync(id, includeHtml: false, timezoneOffset, cancellationToken);
+                _cache.Seen(existing);
                 List<TicketTag> current = await lookup.CurrentTagsAsync(existing.Tags);
-                (newTags, tagWarning) = TagEdits.Apply(current, toAdd, removeTags ?? [], await lookup.TagCategoriesAsync());
+                (newTags, tagWarning) = TagEdits.Apply(current, toAdd, removeTags ?? [], await lookup.TagCategoriesAsync(removeTags ?? []));
             }
 
             var write = new TicketWrite
@@ -302,7 +299,7 @@ public sealed class TicketTools
             }
 
             Ticket updated = await _client.UpdateTicketAsync(id, write, actor.ToTicketUser(), includeHtml: false, timezoneOffset, cancellationToken);
-            _cache.Numbers.Remember(updated);
+            _cache.Seen(updated);
             return TicketViews.Ack(updated, actor, new Dictionary<string, object?>
             {
                 ["title"] = write.Title,
@@ -311,7 +308,7 @@ public sealed class TicketTools
                 ["assignee"] = TicketViews.Person(write.Assignee),
                 ["priority"] = write.Priority,
                 ["expectedDate"] = write.ExpectedDate,
-                ["tags"] = write.Tags?.Select(t => t.Text).ToList(),
+                ["tags"] = TicketViews.TagList(write.Tags),
                 ["customFields"] = customFields is { Count: > 0 } ? customFields.Keys.ToList() : null,
             }, warning: tagWarning);
         });
@@ -346,6 +343,7 @@ public sealed class TicketTools
             try
             {
                 current = await _client.GetTicketAsync(id, includeHtml: false, timezoneOffset, cancellationToken);
+                _cache.Seen(current);
             }
             catch (TicketingApiException ex) when (ex.StatusCode != System.Net.HttpStatusCode.NotFound)
             {
@@ -366,7 +364,7 @@ public sealed class TicketTools
 
             target = WorkflowStatus.CheckTarget(current, target, note, workflows);
             Ticket updated = await _client.UpdateTicketStatusAsync(id, target, res, note, actor.ToTicketUser(), timezoneOffset, cancellationToken);
-            _cache.Numbers.Remember(updated);
+            _cache.Seen(updated);
             var state = new JsonObject();
             TicketViews.Status(state, updated.Status is null ? new Ticket { Status = target, Workflow = current.Workflow, IsCustomWorkflow = current.IsCustomWorkflow } : updated, workflows);
             return TicketViews.Ack(updated, actor, new Dictionary<string, object?>
@@ -397,7 +395,7 @@ public sealed class TicketTools
             TicketUser? resolved = await new InstanceLookup(_client, _cache, timezoneOffset, cancellationToken, _options.ExternalEmailDomainSet()).PersonAsync(person, "assignee", assigneeOnly: true);
 
             Ticket updated = await _client.UpdateTicketAsync(id, new TicketWrite { Assignee = resolved }, actor.ToTicketUser(), includeHtml: false, timezoneOffset, cancellationToken);
-            _cache.Numbers.Remember(updated);
+            _cache.Seen(updated);
             return TicketViews.Ack(updated, actor, new Dictionary<string, object?> { ["assignee"] = TicketViews.Person(resolved) });
         });
     }

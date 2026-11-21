@@ -298,7 +298,7 @@ public sealed class TicketingClient
         CancellationToken cancellationToken)
     {
         // A request that isn't idempotent is only retried when it provably wasn't processed. An idempotent write retried
-        // after an attempt that may have been carried out (a 5xx, a connection lost after sending) has an unknown outcome
+        // after an attempt that may have been carried out (a 5xx, a connection lost after sending) may have been made
         // if a later attempt then fails, even one held back for rate: "nothing was changed" would no longer be true.
         bool mayHaveBeenProcessed = false;
         for (int attempt = 1; ; attempt++)
@@ -311,9 +311,9 @@ public sealed class TicketingClient
             {
                 (done, result, retryDelay, reached) = await AttemptAsync<T>(method, path, uri, body, continuationToken, idempotent, callerKey, attempt, cancellationToken);
             }
-            catch (TicketingApiException ex) when (mayHaveBeenProcessed && method != HttpMethod.Get && !ex.OutcomeUnknown)
+            catch (TicketingApiException ex) when (mayHaveBeenProcessed && method != HttpMethod.Get && !ex.MayHaveBeenCarriedOut)
             {
-                throw TicketingApiException.Unknown(ex.StatusCode, ex.Message + " An earlier attempt may have been carried out.", ex);
+                throw Failure(method, idempotent, mayHaveBeenProcessed: true, ex.StatusCode, ex.Message + " An earlier attempt may have been carried out.", ex);
             }
 
             if (done)
@@ -405,13 +405,13 @@ public sealed class TicketingClient
         {
             ServiceMetrics.RecordUpstreamRequest(method, MetricOperation(path), statusCode: null, errorType: "network_error", durationMs: ServiceMetrics.ElapsedMilliseconds(_timeProvider, started));
             ServiceMetrics.RecordUpstreamFailure(MetricOperation(path), statusCode: null, "network_error");
-            throw Failure(idempotent, mayHaveBeenProcessed: !IsPreSendFailure(ex), null, $"Could not reach the Ticketing API ({ex.HttpRequestError}).", ex);
+            throw Failure(method, idempotent, mayHaveBeenProcessed: !IsPreSendFailure(ex), null, $"Could not reach the Ticketing API ({ex.HttpRequestError}).", ex);
         }
         catch (TaskCanceledException ex) when (!exchange.IsCancellationRequested)
         {
             ServiceMetrics.RecordUpstreamRequest(method, MetricOperation(path), statusCode: null, errorType: "timeout", durationMs: ServiceMetrics.ElapsedMilliseconds(_timeProvider, started));
             ServiceMetrics.RecordUpstreamFailure(MetricOperation(path), statusCode: null, "timeout");
-            throw Failure(idempotent, mayHaveBeenProcessed: true, null, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
+            throw Failure(method, idempotent, mayHaveBeenProcessed: true, null, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
         }
         catch (OperationCanceledException)
         {
@@ -446,7 +446,7 @@ public sealed class TicketingClient
                 catch (OperationCanceledException ex) when (!exchange.IsCancellationRequested)
                 {
                     // The headers arrived, so the API received the request.
-                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
+                    throw Failure(method, idempotent, mayHaveBeenProcessed: true, response.StatusCode, $"The Ticketing API did not respond within {_options.RequestTimeoutSeconds} seconds.", ex);
                 }
                 catch (OperationCanceledException) when (exchange.IsCancellationRequested)
                 {
@@ -456,12 +456,12 @@ public sealed class TicketingClient
                 catch (Exception ex) when (ex is IOException or HttpRequestException)
                 {
                     // The connection dropped while the answer was arriving: the request was received, and may have been done.
-                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The connection to the Ticketing API dropped while its answer was arriving.", ex);
+                    throw Failure(method, idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The connection to the Ticketing API dropped while its answer was arriving.", ex);
                 }
-                catch (TicketingApiException ex) when (!idempotent && !ex.OutcomeUnknown)
+                catch (TicketingApiException ex) when (method != HttpMethod.Get && !ex.MayHaveBeenCarriedOut)
                 {
                     // An answer too large to read, after the request was received.
-                    throw TicketingApiException.Unknown(response.StatusCode, ex.Message, ex);
+                    throw Failure(method, idempotent, mayHaveBeenProcessed: true, response.StatusCode, ex.Message, ex);
                 }
 
                 ServiceMetrics.RecordUpstreamResponseBytes(MetricOperation(path), payload.Length);
@@ -469,7 +469,7 @@ public sealed class TicketingClient
                 if (!response.IsSuccessStatusCode)
                 {
                     // A 4xx means the API refused the request; a 5xx can come after it already acted.
-                    throw Failure(idempotent, mayHaveBeenProcessed: (int)response.StatusCode >= 500, response.StatusCode, DescribeError(response.StatusCode, CleanApiMessage(ExtractMessage(payload.Span))), null);
+                    throw Failure(method, idempotent, mayHaveBeenProcessed: (int)response.StatusCode >= 500, response.StatusCode, DescribeError(response.StatusCode, CleanApiMessage(ExtractMessage(payload.Span))), null);
                 }
 
                 // Some endpoints report failures with HTTP 200 and error=true. The request reached the endpoint, and nothing
@@ -479,7 +479,7 @@ public sealed class TicketingClient
                 if (ErrorFlag(payload.Span) is { Error.ValueKind: JsonValueKind.True } flagged)
                 {
                     string? apiMessage = CleanApiMessage(flagged.Message is { ValueKind: JsonValueKind.String } m ? m.GetString() : null);
-                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, apiMessage ?? "The Ticketing API reported an error.", null);
+                    throw Failure(method, idempotent, mayHaveBeenProcessed: true, response.StatusCode, apiMessage ?? "The Ticketing API reported an error.", null);
                 }
 
                 T? result;
@@ -490,12 +490,12 @@ public sealed class TicketingClient
                 }
                 catch (JsonException ex)
                 {
-                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned a response that could not be parsed as JSON.", ex);
+                    throw Failure(method, idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned a response that could not be parsed as JSON.", ex);
                 }
 
                 if (result is null)
                 {
-                    throw Failure(idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned an empty response.", null);
+                    throw Failure(method, idempotent, mayHaveBeenProcessed: true, response.StatusCode, "The Ticketing API returned an empty response.", null);
                 }
 
                 return (true, result, default, true);
@@ -566,15 +566,16 @@ public sealed class TicketingClient
     }
 
     /// <summary>
-    /// The exception for a failed request. For a create request (not idempotent) that may have reached the API, it is
-    /// marked <see cref="TicketingApiException.OutcomeUnknown"/> and advises checking before a retry; for anything
-    /// else the message is left as is, since repeating it is harmless or the API refused it.
+    /// The exception for a failed request. For a write that may have reached the API, it is marked
+    /// <see cref="TicketingApiException.MayHaveBeenCarriedOut"/> and advises checking the ticket; a create request (not
+    /// idempotent) is also marked <see cref="TicketingApiException.OutcomeUnknown"/>, since repeating it could do it
+    /// twice. For a read, or a request the API refused, the message is left as is.
     /// </summary>
-    private static TicketingApiException Failure(bool idempotent, bool mayHaveBeenProcessed, HttpStatusCode? status, string message, Exception? inner)
+    private static TicketingApiException Failure(HttpMethod method, bool idempotent, bool mayHaveBeenProcessed, HttpStatusCode? status, string message, Exception? inner)
     {
-        if (!idempotent && mayHaveBeenProcessed)
+        if (mayHaveBeenProcessed && method != HttpMethod.Get)
         {
-            return TicketingApiException.Unknown(status, message, inner);
+            return idempotent ? TicketingApiException.PossiblyApplied(status, message, inner) : TicketingApiException.Unknown(status, message, inner);
         }
 
         return inner is null ? new TicketingApiException(status, message) : new TicketingApiException(status, message, inner);

@@ -380,7 +380,10 @@ internal static partial class TicketViews
         }
     }
 
-    /// <summary>A ticket's tag texts, from either shape the API uses (plain texts, or {tagCategoryId, text}).</summary>
+    /// <summary>
+    /// A ticket's tags, from either shape the API uses: a plain text as it is, and a {tagCategoryId, text} tag with its
+    /// category kept, so two tags with the same text in different categories can be told apart (removeTags needs it).
+    /// </summary>
     public static JsonArray? Tags(JsonElement? tags)
     {
         if (tags is not { ValueKind: JsonValueKind.Array } list || list.GetArrayLength() == 0)
@@ -397,13 +400,45 @@ internal static partial class TicketViews
                 JsonValueKind.Object when tag.TryGetProperty("text", out JsonElement t) && t.ValueKind == JsonValueKind.String => t.GetString(),
                 _ => null,
             };
-            if (Blank(text) is string value)
+            if (Blank(text) is not string value)
+            {
+                continue;
+            }
+
+            if (tag.ValueKind == JsonValueKind.Object && tag.TryGetProperty("tagCategoryId", out JsonElement category) &&
+                Blank(category.ValueKind == JsonValueKind.String ? category.GetString() : null) is string categoryId)
+            {
+                texts.Add(new JsonObject { ["text"] = value, ["tagCategoryId"] = categoryId });
+            }
+            else
             {
                 texts.Add(value);
             }
         }
 
         return texts.Count > 0 ? texts : null;
+    }
+
+    /// <summary>
+    /// Tags being written, by text, with the category kept only for a text that is in the list more than once (in two
+    /// categories), which would otherwise show as two identical entries.
+    /// </summary>
+    public static JsonArray? TagList(IEnumerable<TicketTag>? tags)
+    {
+        if (tags is null)
+        {
+            return null;
+        }
+
+        List<TicketTag> list = tags.ToList();
+        var shown = new JsonArray();
+        foreach (TicketTag tag in list)
+        {
+            bool repeated = list.Count(t => string.Equals(t.Text.Trim(), tag.Text.Trim(), StringComparison.OrdinalIgnoreCase)) > 1;
+            shown.Add(repeated ? new JsonObject { ["text"] = tag.Text, ["tagCategoryId"] = tag.TagCategoryId } : JsonValue.Create(tag.Text));
+        }
+
+        return shown;
     }
 
     private static void Number(JsonObject o, Ticket t)
