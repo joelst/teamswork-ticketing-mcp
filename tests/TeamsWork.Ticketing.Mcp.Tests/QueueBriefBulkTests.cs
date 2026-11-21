@@ -1541,8 +1541,31 @@ public sealed class QueueBriefBulkTests
     [InlineData("Thanks.\nOn Mon, 18 Nov 2026 at 10:00, Pat Example <pat@example.test> wrote:\nold text", true)]
     [InlineData("Thanks.\r\nOn 18 Nov 2026, at 10:00, Pat <pat@example.test> wrote:\r\n\r\nold text", true)]
     [InlineData("Thanks.\nOn Monday Pat wrote:\n\n> old text", true)]
+    [InlineData("Investigation:\nOn login user@example.com wrote:\nERROR authentication failed", false)]   // an address, but no date
+    [InlineData("Thanks.\nOn 11/18/2026 10:00, pat@example.test wrote:\nold text", true)]
     public void Only_a_wrote_line_with_email_evidence_cuts_the_text(string text, bool cut) =>
         Assert.Equal(cut, TicketViews.StripQuoted(text).Contains("[quoted reply cut", StringComparison.Ordinal));
+
+    [Fact]
+    public void Text_is_never_cut_inside_an_emoji()
+    {
+        string text = "ab\U0001F600cd";   // the emoji is two UTF-16 units, at 2 and 3
+
+        Assert.Equal("ab … [4 more characters]", TicketViews.Clip(text, 3));
+        Assert.Equal("ab…", TicketViews.Short(text, 3));
+    }
+
+    [Fact]
+    public void An_assignee_seen_later_by_id_alone_keeps_the_email_already_known()
+    {
+        var seen = new SeenAssignees();
+        const string Kim = "aaaaaaaa-0000-0000-0000-00000000000b";
+
+        seen.Remember(new TicketUser(Kim, "Kim Staff", "kim@example.test"));
+        seen.Remember(new TicketUser(Kim, "Kim Staff", ""));   // a read that carried the ID only
+
+        Assert.Equal("kim@example.test", Assert.Single(seen.All).Email);
+    }
 
     [Theory]
     [InlineData("2147483647", int.MaxValue)]

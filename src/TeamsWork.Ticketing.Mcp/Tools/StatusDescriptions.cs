@@ -55,9 +55,13 @@ internal static class StatusDescriptions
     internal static string? Describe(JsonElement? workflows)
     {
         List<string> states = WorkflowStatus.StatesIn(workflows).Count > 0 ? WorkflowStatus.StateNames(workflows) : [];
-        return states.Count == 0
-            ? null
-            : $"Only tickets in exactly this state: {string.Join(", ", states)}. For every open or every closed ticket, use isResolved instead.";
+        if (states.Count == 0)
+        {
+            return null;
+        }
+
+        return $"Only tickets in exactly this state: {string.Join(", ", states)}.{WorkflowStatus.IdNote(states)} " +
+            "For every open or every closed ticket, use isResolved instead.";
     }
 
     internal static async Task<string?> DescribeAsync(IServiceProvider services, CancellationToken cancellationToken, TimeSpan? wait = null)

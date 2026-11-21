@@ -103,7 +103,17 @@ public sealed class WorkloadTools
             // With every SLA rule off, the API reports no SLA flags at all, so a scan would find nothing and look like
             // "nothing at risk". Say what is actually true, and save the requests.
             // The settings only save a scan; if they can't be read, scan anyway rather than fail.
-            bool? slaEnabled = await SlaEnabledAsync(timezoneOffset, cancellationToken);
+            Instance? instance;
+            try
+            {
+                instance = await _cache.GetInstanceAsync(_client, timezoneOffset, refresh: false, cancellationToken);
+            }
+            catch (TicketingApiException)
+            {
+                instance = null;
+            }
+
+            bool? slaEnabled = instance is null ? null : SlaEnabled(instance.Sla);
             if (slaEnabled == false)
             {
                 return new ScanResult<JsonObject>([], 0, 0, 0, null, false,
@@ -111,9 +121,9 @@ public sealed class WorkloadTools
                     "or escalate an SLA. A Ticketing administrator can turn it on in the instance's SLA settings.");
             }
 
-            // For each row's state label: the settings were just read for SLA, so the cached copy, if that read worked;
-            // if it failed, rows show the raw status rather than try again.
-            System.Text.Json.JsonElement? workflows = _cache.CachedInstance(timezoneOffset)?.Workflows;
+            // For each row's state label, the settings that read returned (cached or not); if it failed, rows show the raw
+            // status rather than try again.
+            System.Text.Json.JsonElement? workflows = instance?.Workflows;
             bool AtRisk(Ticket t)
             {
                 bool breached = t.IsFrtBreached == true || t.IsRtBreached == true;

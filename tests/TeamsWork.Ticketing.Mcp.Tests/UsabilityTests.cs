@@ -163,6 +163,20 @@ public sealed class UsabilityTests
 
         Assert.Contains("Open (ID s2)", names);        // a custom state named like the default Open
         Assert.Contains("Waiting on vendor", names);   // a label only one state has
+        Assert.Contains("pass x alone", StatusDescriptions.Describe(CustomWorkflows), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_spent_batch_budget_makes_no_lookup_request()
+    {
+        var handler = new FakeHttpHandler();
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
+
+        McpException ex = await Assert.ThrowsAsync<McpException>(() =>
+            new TicketRefs(client, cache, options.Value, new TicketRefs.LookupBudget(0)).ResolveAsync("2213", null, Ct));
+
+        Assert.Contains("used up", ex.Message, StringComparison.Ordinal);
+        Assert.Empty(handler.Requests);
     }
 
     [Fact]

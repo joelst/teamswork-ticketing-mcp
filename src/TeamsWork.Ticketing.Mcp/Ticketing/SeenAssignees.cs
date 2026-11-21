@@ -28,7 +28,10 @@ public sealed class SeenAssignees
             _people.Clear();
         }
 
-        _people[key] = user!;
+        // A later read that shows the same person by ID alone keeps the email already known, which is what recognises
+        // their replies that carry an email but no ID.
+        _people.AddOrUpdate(key, user!, (_, known) =>
+            string.IsNullOrWhiteSpace(user!.Email) && !string.IsNullOrWhiteSpace(known.Email) ? user with { Email = known.Email } : user);
     }
 
     public IReadOnlyCollection<TicketUser> All => [.. _people.Values];

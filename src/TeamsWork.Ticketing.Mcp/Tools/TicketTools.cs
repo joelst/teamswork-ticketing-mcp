@@ -420,7 +420,7 @@ public sealed class TicketTools
                         !s.EndsWith($"(ID {id})", StringComparison.OrdinalIgnoreCase))
             .ToList();
         return new StateFilter(id,
-            $"Only tickets in '{state}'. Other states: {string.Join(", ", others)}. isResolved=false lists every open ticket, true every closed one.");
+            $"Only tickets in '{state}'. Other states: {string.Join(", ", others)}.{WorkflowStatus.IdNote(others)} isResolved=false lists every open ticket, true every closed one.");
     }
 
     // Far more than a ticket form has; they only bound the size of one request.

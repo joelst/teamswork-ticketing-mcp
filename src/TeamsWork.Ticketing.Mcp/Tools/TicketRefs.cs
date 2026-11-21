@@ -154,6 +154,10 @@ internal sealed partial class TicketRefs
     private async Task<NumberLookup> FindIdByNumberAsync(int number, int? timezoneOffset, CancellationToken cancellationToken)
     {
         LookupBudget budget = _budget ?? new LookupBudget(_options.MaxScanTickets);
+        if (budget.Left <= 0)
+        {
+            return new NumberLookup(null, false);   // a shared budget spent by earlier lookups: no request at all
+        }
 
         int searchSize = Math.Min(NumberSearchSize, budget.Left);
         ListResponse<Ticket> searched = await ListByNumberAsync(null, searchSize, search: number, timezoneOffset, cancellationToken);

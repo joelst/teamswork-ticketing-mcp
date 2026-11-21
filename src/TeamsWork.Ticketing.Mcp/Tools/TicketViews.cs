@@ -82,12 +82,21 @@ internal static partial class TicketViews
             return null;
         }
 
-        return t.Length <= max ? t : $"{t[..max].TrimEnd()} … [{t.Length - max} more characters]";
+        if (t.Length <= max)
+        {
+            return t;
+        }
+
+        int cut = Cut(t, max);
+        return $"{t[..cut].TrimEnd()} … [{t.Length - cut} more characters]";
     }
 
     /// <summary>The text cut to <paramref name="max"/> characters with an ellipsis, for a title in a row.</summary>
     public static string? Short(string? text, int max) =>
-        Blank(text) is not string t ? null : t.Length <= max ? t : t[..max].TrimEnd() + "…";
+        Blank(text) is not string t ? null : t.Length <= max ? t : t[..Cut(t, max)].TrimEnd() + "…";
+
+    /// <summary>Where to cut a text at most <paramref name="max"/> characters long without splitting a surrogate pair (an emoji, say).</summary>
+    private static int Cut(string text, int max) => max > 0 && char.IsHighSurrogate(text[max - 1]) ? max - 1 : max;
 
     /// <summary>
     /// A ticket's SLA state in one word, worst first (rtBreached, frtBreached, rtEscalated, frtEscalated), ok only when all
@@ -522,9 +531,9 @@ internal static partial class TicketViews
     // Sent or Date header and after it a Subject header, as Outlook's replies and forwarded messages have, where a note
     // such as "From: 10.1.1.1 / Sent: 500 requests" has no Subject; with the underscore separator above it if there is
     // one), its original-message
-    // banner, or Gmail's "On ... wrote:" when it names an address or quoted lines follow it ("On startup the logger
-    // wrote:" in a pasted log does neither). A "From:" line or a "--" line on its own is ordinary text, so it is kept.
+    // banner, or Gmail's "On ... wrote:" when it names a date or time and then an address, or quoted lines follow it ("On
+    // startup the logger wrote:" in a pasted log, or "On login user@example.com wrote:" in a note, does neither). A "From:" line or a "--" line on its own is ordinary text, so it is kept.
     // Email text often ends lines with CRLF, and a multiline $ matches before the \n only, so each $ allows the \r.
-    [GeneratedRegex(@"^(?:-{2,}[ \t]*Original Message[ \t]*-{2,}[ \t]*\r?$|On [^\r\n]{0,200}@[^\r\n]{0,200} wrote:[ \t]*\r?$|On [^\r\n]{4,200} wrote:[ \t]*\r?\n(?:[ \t]*\r?\n)?>|(?:_{10,}[ \t]*\r?\n)?From:[ \t][^\r\n]+\r?\n(?:[^\r\n]*\r?\n){0,3}?(?:Sent|Date):[^\r\n]*\r?\n(?:[^\r\n]*\r?\n){0,4}?Subject:)", RegexOptions.Multiline | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 200)]
+    [GeneratedRegex(@"^(?:-{2,}[ \t]*Original Message[ \t]*-{2,}[ \t]*\r?$|On [^\r\n]{0,200}?(?:\b(?:19|20)[0-9]{2}\b|\b[0-9]{1,2}:[0-9]{2}\b)[^\r\n]{0,200}@[^\r\n]{0,200} wrote:[ \t]*\r?$|On [^\r\n]{4,200} wrote:[ \t]*\r?\n(?:[ \t]*\r?\n)?>|(?:_{10,}[ \t]*\r?\n)?From:[ \t][^\r\n]+\r?\n(?:[^\r\n]*\r?\n){0,3}?(?:Sent|Date):[^\r\n]*\r?\n(?:[^\r\n]*\r?\n){0,4}?Subject:)", RegexOptions.Multiline | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 200)]
     private static partial Regex QuoteStart();
 }

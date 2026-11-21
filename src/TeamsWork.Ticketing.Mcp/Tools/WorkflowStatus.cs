@@ -143,6 +143,15 @@ internal static class WorkflowStatus
     private static string? Text(JsonElement e, string name) =>
         e.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(v.GetString()) ? v.GetString() : null;
 
+    /// <summary>
+    /// What to pass for a state <see cref="StateNames"/> lists as "Name (ID x)", when any is: only the ID picks it, as its
+    /// name is shared. Empty when none is.
+    /// </summary>
+    public static string IdNote(IEnumerable<string> names) =>
+        names.Any(n => n.Contains(" (ID ", StringComparison.Ordinal))
+            ? " For a state shown as 'Name (ID x)', pass x alone: the name is shared, so it may pick another state."
+            : "";
+
     /// <summary>The instance's state names (labels), or the default workflow's when its settings name none.</summary>
     public static List<string> StateNames(JsonElement? workflows)
     {

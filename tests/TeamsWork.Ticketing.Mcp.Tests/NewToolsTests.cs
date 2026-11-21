@@ -372,6 +372,23 @@ public sealed class NewToolsTests
     internal const string SlaOnInstanceJson = """{"item":{"id":"i","sla":{"frt":{"urgent":{"enabled":true}},"rt":{"urgent":{"enabled":false}}}}}""";
 
     [Fact]
+    public async Task Sla_risk_labels_custom_states_from_the_settings_it_read_even_with_caching_off()
+    {
+        var handler = new FakeHttpHandler()
+            .Enqueue(HttpStatusCode.OK, """
+                {"item":{"id":"i","sla":{"frt":{"urgent":{"enabled":true}}},
+                 "workflows":{"ticket":[{"nodes":[{"id":"c1","type":"textFieldNode","data":{"label":"Awaiting parts"}}],"edges":[]}]}}}
+                """)
+            .Enqueue(HttpStatusCode.OK, """{"items":[{"id":"a","ticketNo":5,"status":"c1","isRtBreached":true}],"itemCount":1}""");
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler, TestFactory.Options(o => o.InstanceCacheSeconds = 0));
+
+        using JsonDocument doc = JsonDocument.Parse(await new WorkloadTools(client, new FixedActor(Jane), cache, options).ListSlaRisk(cancellationToken: Ct));
+
+        Assert.Equal("Awaiting parts", doc.RootElement.GetProperty("items")[0].GetProperty("status").GetString());
+        Assert.Equal(2, handler.Requests.Count);   // one settings read
+    }
+
+    [Fact]
     public async Task Sla_risk_reads_whole_tickets_for_breach_flags()
     {
         var handler = new FakeHttpHandler()
