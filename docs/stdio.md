@@ -412,7 +412,10 @@ no headers.
 
 ## HTTP with Entra locally
 
-To exercise the real auth pipeline, omit `--local` and set `Entra__TenantId` and `Entra__ClientId`:
+To exercise the real auth pipeline, omit `--local` and set `Entra__TenantId`, `Entra__ClientId` and
+`Ticketing__ExternalEmailDomains` (your domain, or `*`). Getting a token with the Azure CLI needs the CLI to have
+consent for the server's scope; on a test tenant, `-PreAuthorizeAzureCli` gives it without a prompt
+([setup-entra.md](setup-entra.md#4-verify-a-token-locally)):
 
 ```powershell
 $token = az account get-access-token --resource api://<serverClientId> --query accessToken -o tsv

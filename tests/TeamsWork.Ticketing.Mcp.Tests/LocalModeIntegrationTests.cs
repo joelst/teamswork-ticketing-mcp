@@ -276,6 +276,28 @@ public sealed class LocalModeIntegrationTests
         Assert.Contains(message, report, StringComparison.Ordinal);
     }
 
+    // Unset is allowed here (only Entra mode requires a choice), but a value with no domain in it would otherwise read as
+    // unset and allow any domain, so it stops startup instead.
+    [Theory]
+    [InlineData(",", false)]
+    [InlineData("@ ;", false)]
+    [InlineData("", true)]
+    [InlineData("contoso.com", true)]
+    public async Task External_email_domains_that_name_no_domain_stop_startup(string value, bool starts)
+    {
+        await using var factory = new LocalModeFactory { Settings = { ["Ticketing:ExternalEmailDomains"] = value } };
+
+        if (starts)
+        {
+            factory.CreateClient().Dispose();
+            return;
+        }
+
+        Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+        Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
+        Assert.Contains("Ticketing:ExternalEmailDomains names no domain", report, StringComparison.Ordinal);
+    }
+
     // Each bad value must reach the entry point as a configuration failure (reported without a stack trace) that
     // names the setting but never repeats the value.
     [Theory]

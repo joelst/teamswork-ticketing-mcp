@@ -77,6 +77,33 @@ public sealed class ReviewRound4Tests
     }
 
     [Fact]
+    public void A_lone_star_allows_any_outside_domain()
+    {
+        TicketingOptions options = TestFactory.Options(o => o.ExternalEmailDomains = " * ");
+        var person = new UserRef("pat@elsewhere.example", "pat@elsewhere.example", "pat@elsewhere.example");
+
+        Assert.Empty(options.InvalidExternalEmailDomains());
+        Assert.Empty(options.ExternalEmailDomainSet());
+        Assert.Equal("pat@elsewhere.example", InstanceLookup.ResolvePerson(person, "requestor", Listed, assigneeOnly: false, options.ExternalEmailDomainSet()).Email);
+    }
+
+    [Theory]
+    [InlineData("contoso.com, *")] // would read as a restriction while allowing everything
+    [InlineData("*, *")]
+    [InlineData("*,")]             // malformed: refused, not read as *
+    [InlineData("@*")]
+    [InlineData("*;")]
+    [InlineData(", *")]
+    [InlineData("*\t")]
+    public void A_star_with_other_entries_is_refused(string value)
+    {
+        TicketingOptions options = TestFactory.Options(o => o.ExternalEmailDomains = value);
+
+        Assert.False(options.AllowsAnyExternalEmailDomain());
+        Assert.NotEmpty(options.InvalidExternalEmailDomains());
+    }
+
+    [Fact]
     public void Punycode_domains_are_allowed_in_the_allowlist()
     {
         IReadOnlySet<string> domains = TestFactory.Options(o => o.ExternalEmailDomains = "XN--bcher-kva.example").ExternalEmailDomainSet();

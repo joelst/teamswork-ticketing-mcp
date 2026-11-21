@@ -21,12 +21,17 @@
     Needs Owner (or Contributor plus User Access Administrator) on the resource group or subscription, the .NET 10
     SDK, and Azure CLI 2.60+. The server's app registration comes from New-EntraAppRegistrations.ps1.
 
+    -ExternalEmailDomains is required: the email domains people outside the instance's assignee list may have when
+    named as a requestor or in a people field, such as contoso.com, or * to allow any. A server image built before
+    this setting accepted * refuses to start with it, so with -SkipImage (which deploys the newest image already in
+    the registry) or when rolling back to such an image, give real domains instead.
+
 .EXAMPLE
-    ./Deploy-TestInstance.ps1 -Location <region>
+    ./Deploy-TestInstance.ps1 -Location <region> -ExternalEmailDomains contoso.com
     Deploys to rg-taasmcp-test, finding the taas-mcp-server app registration by name.
 
 .EXAMPLE
-    ./Deploy-TestInstance.ps1 -Location <region> -TicketingRegion EU
+    ./Deploy-TestInstance.ps1 -Location <region> -ExternalEmailDomains contoso.com -TicketingRegion EU
     For a help desk on the vendor's EU endpoint.
 #>
 [CmdletBinding(SupportsShouldProcess)]
@@ -42,12 +47,14 @@ param(
     [string] $ServiceAccountId = '',
     [string] $ServiceAccountName = '',
     [string] $ServiceAccountEmail = '',
-    [string] $ExternalEmailDomains = '',
+    [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ExternalEmailDomains,
     [switch] $SetApiKey,
     [switch] $SkipImage
 )
 
 $ErrorActionPreference = 'Stop'
+# Before anything is deployed: a value the server would refuse at startup (",", "@ ;") is refused here instead.
+& (Join-Path $PSScriptRoot 'Test-ExternalEmailDomains.ps1') -Value $ExternalEmailDomains
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $ticketingBaseUrls = @{
     US  = 'https://teamswork.azure-api.net/ticketing/v1'
@@ -214,7 +221,7 @@ Write-Host "Resource group : $ResourceGroup"
 Write-Host "Image          : $loginServer/${imageRepository}:$tag"
 Write-Host "MCP endpoint   : $($app.mcpEndpoint.value)"
 Write-Host ''
-Write-Host 'Try it with your own token:'
+Write-Host 'Try it with your own token (the Azure CLI needs consent for the server''s scope; on a test tenant, New-EntraAppRegistrations.ps1 -PreAuthorizeAzureCli gives it):'
 Write-Host "  `$token = az account get-access-token --resource api://$EntraClientId --query accessToken -o tsv"
 Write-Host "  Invoke-RestMethod $($app.mcpEndpoint.value) -Method Post -Headers @{ Authorization = ""Bearer `$token""; Accept = 'application/json, text/event-stream' } -ContentType 'application/json' -Body '{""jsonrpc"":""2.0"",""id"":1,""method"":""tools/list"",""params"":{}}'"
 Write-Host "Your account must be assigned to $ServerAppName (Complete-CoworkSetup.ps1 -AssignUser does it)."

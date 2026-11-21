@@ -16,7 +16,8 @@
 #       entraTenantId, entraClientId (from infra/scripts/New-EntraAppRegistrations.ps1),
 #       serviceAccountId, serviceAccountName, serviceAccountEmail (optional, for app-only callers),
 #       publicBaseUrl (optional custom domain),
-#       externalEmailDomains (optional; comma-separated domains allowed for requestors outside the assignee list),
+#       externalEmailDomains (required; comma-separated domains allowed for requestors outside the assignee list,
+#         such as contoso.com, or * to allow any),
 #       acceptedClientApplicationIds (optional; comma-separated Entra client app IDs; empty allows all),
 #       blockedClientApplicationIds (optional; comma-separated Entra client app IDs always refused)
 #     An optional variable left out of the group is deployed as empty.
@@ -110,6 +111,9 @@ stages:
               az bicep build-params --file infra/app.bicepparam --stdout > /dev/null
               echo "Bicep templates and parameter files compile."
             displayName: Lint Bicep
+            env:
+              # app.bicepparam requires it, with no fallback; any domain compiles.
+              TAAS_EXTERNAL_EMAIL_DOMAINS: example.com
 
   # ---------------------------------------------------------------------------------------------------------------
   - stage: Core
@@ -122,6 +126,18 @@ stages:
       - job: CoreInfra
         displayName: core.bicep
         steps:
+          # Before anything is created or changed: a domain choice the server would refuse (missing, or naming no domain)
+          # stops the run here, not after the core resources, the API key and the image have been updated. A variable
+          # the group doesn't define arrives as its own macro text, which counts as empty.
+          - pwsh: |
+              $value = $env:OPT_EXTERNAL_EMAIL_DOMAINS
+              if ($value -like '$(*') { $value = '' }
+              try { ./infra/scripts/Test-ExternalEmailDomains.ps1 -Value $value }
+              catch { Write-Host "##vso[task.logissue type=error]$($_.Exception.Message)"; exit 1 }
+            displayName: Check deployment inputs
+            env:
+              OPT_EXTERNAL_EMAIL_DOMAINS: $(externalEmailDomains)
+
           - task: AzureCLI@2
             displayName: az deployment group create (core)
             name: core
@@ -230,6 +246,16 @@ stages:
             deploy:
               steps:
                 - checkout: self
+
+                # Checked again here (see the Core stage), right before the value is deployed.
+                - pwsh: |
+                    $value = $env:OPT_EXTERNAL_EMAIL_DOMAINS
+                    if ($value -like '$(*') { $value = '' }
+                    try { ./infra/scripts/Test-ExternalEmailDomains.ps1 -Value $value }
+                    catch { Write-Host "##vso[task.logissue type=error]$($_.Exception.Message)"; exit 1 }
+                  displayName: Check deployment inputs
+                  env:
+                    OPT_EXTERNAL_EMAIL_DOMAINS: $(externalEmailDomains)
 
                 - task: AzureCLI@2
                   displayName: az deployment group create (app)

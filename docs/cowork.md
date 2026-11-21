@@ -31,8 +31,8 @@ In this order:
    stops with *Insufficient privileges to complete the operation*.
 2. **A deployed endpoint**, such as `https://<app>.<region>.azurecontainerapps.io/mcp`. See
    [Deploy](../README.md#deploy). For a test instance deployed with your own sign-in, run
-   `./infra/scripts/Deploy-TestInstance.ps1 -Location <region>`. It finds the app registration from step 1 by name, so
-   run that first.
+   `./infra/scripts/Deploy-TestInstance.ps1 -Location <region> -ExternalEmailDomains <your domain>`. It finds the app
+   registration from step 1 by name, so run that first.
 3. **The people who may use it**, assigned to the server's enterprise app, which requires assignment: an unassigned
    user's sign-in is refused. `Complete-CoworkSetup.ps1 -AssignUser <UPN>` or `-AssignGroup <group>` does this.
    Assigning a group needs Entra ID P1 or P2.

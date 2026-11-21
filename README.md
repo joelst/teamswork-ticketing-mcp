@@ -50,8 +50,9 @@ attributed to the configured service account.
 Writes accept names where the API wants IDs: a person by email or name (looked up in the instance's assignee list),
 a tag category by name, and a custom field by title. Every person is checked against the assignee list: a reference
 can't pair one listed person's ID with another email, an outsider can't use a listed person's name, and an assignee must
-be on the list. People outside the list (requestors, people fields) are otherwise accepted as given; set
-`Ticketing:ExternalEmailDomains` to limit them to your own domains. Custom field values are checked against the field's
+be on the list. People outside the list (requestors, people fields) are otherwise accepted as given;
+`Ticketing:ExternalEmailDomains` limits them to your own domains. The hosted server won't start without it, so set it
+to your domains, or to `*` to allow any. Custom field values are checked against the field's
 type and options before they are sent, and a field the server can't check is refused. Instance settings and tags are
 cached for `Ticketing:InstanceCacheSeconds`; a name not found in the cache is looked up once more, and a refresh is
 honoured at most once every 30 seconds for the whole cache (otherwise the cached copy is used).
@@ -273,7 +274,8 @@ dotnet run --project src/TeamsWork.Ticketing.Mcp -- --local    # run from source
    `infra/scripts/Set-TicketingApiKey.ps1` (or supply it once as the secret pipeline variable `ticketingApiKey`).
 4. The **Deploy** stage prints the MCP endpoint (`https://<app>.<region>.azurecontainerapps.io/mcp`).
 
-For a test instance without the pipeline, `infra/scripts/Deploy-TestInstance.ps1 -Location <region>` runs the same
+For a test instance without the pipeline, `infra/scripts/Deploy-TestInstance.ps1 -Location <region>
+-ExternalEmailDomains <your domain>` runs the same
 steps with your own Azure CLI sign-in, in its own resource group (`rg-taasmcp-test`), and smoke-tests the result. Run
 `New-EntraAppRegistrations.ps1` first; the deploy script finds the server's app registration by name. To use the
 endpoint from Microsoft 365 Copilot Cowork, see [docs/cowork.md](docs/cowork.md).
@@ -292,7 +294,7 @@ the production variable group to restrict which Entra client apps can call the M
 | `Ticketing:BaseUrl` | appsettings / env | Ticketing API base URL, for an endpoint `Region` doesn't cover. Set one or the other |
 | `Ticketing:InstanceCacheSeconds` | env | How long instance settings and tags are cached, default 300; `0` turns it off |
 | `Ticketing:MaxScanTickets` | env | Most tickets one filtering tool call (or ticket-number lookup) reads, default 1000 |
-| `Ticketing:ExternalEmailDomains` | env / appsettings; hosted: `externalEmailDomains` in app.bicep (pipeline variable `externalEmailDomains`) | Comma-separated email domains allowed for people outside the assignee list (requestors, people fields); unset allows any. Matching is exact (list each subdomain), ASCII only (punycode for an internationalised domain); startup refuses wildcards |
+| `Ticketing:ExternalEmailDomains` | env / appsettings; hosted: `externalEmailDomains` in app.bicep (pipeline variable `externalEmailDomains`) | Comma-separated email domains allowed for people outside the assignee list (requestors, people fields), or `*` alone to allow any. Required with Entra sign-in (app.bicep, the pipeline and the server's startup check all refuse it empty); unset allows any for stdio and `--local`. Matching is exact (list each subdomain), ASCII only (punycode for an internationalised domain); startup refuses other wildcards. Images built before `*` was accepted refuse it at startup, so set real domains before rolling back to one |
 | `Ticketing:MaxUpstreamRequestsPerCallerPerMinute` | env | Upstream requests one caller may cause per minute, counting every request a tool call makes, default 50; `0` turns it off (Entra mode) |
 | `Ticketing:UploadRoot` | env / user secrets (stdio only) | Folder `upload_ticket_files` may read; unset turns uploads off |
 | `Ticketing:MaxUploadBytes` | env | Largest total size of one upload, default 10 MiB |

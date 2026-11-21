@@ -30,8 +30,52 @@ What it configures on the server app:
 - Delegated scope `access_as_user` (users and OBO flows).
 - App role `Ticketing.ReadWrite` for applications (Foundry project managed identity / agent identity).
 - Optional claims `email` and `preferred_username` so writes can be attributed to the user.
-- Azure CLI pre-authorized for the scope, so `az login` users can run the stdio transport without a consent prompt.
 - Service principal with **assignment required**, so only assigned users, groups, or identities can obtain tokens.
+- With `-PreAuthorizeAzureCli` only: Azure CLI pre-authorized for the scope, so `az account get-access-token` gets a
+  token for the server without a consent prompt (see [section 4](#4-verify-a-token-locally)). Use it on a test tenant,
+  not in production: anyone who phishes an assigned user's Azure CLI sign-in (a device-code prompt) or copies their CLI
+  token cache can then call the server as that user without seeing a consent screen. The stdio transport doesn't
+  need it; it uses the API key, not a token. Running the script without the switch removes an earlier
+  pre-authorization, but not consent a user or admin has already granted the Azure CLI for the scope, nor tokens
+  already issued (they last until they expire, about an hour). To close it fully, revoke those grants as below.
+
+### Revoke the Azure CLI's consent for the server
+
+The portal can revoke admin consent (Enterprise applications → Microsoft Azure CLI → Permissions), but its **User
+consent** tab is read-only. Microsoft Graph lists and deletes both kinds: admin consent has `consentType`
+`AllPrincipals`, and each user's has `Principal` with their object ID. It needs a Privileged Role Administrator or
+Cloud Application Administrator (see Microsoft's
+[Review permissions granted to enterprise applications](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/manage-application-permissions)).
+
+```powershell
+& {
+    $ErrorActionPreference = 'Stop'   # a failed request stops it, so nothing is revoked from a partial list
+    # az reports a failure (an expired sign-in, say) only in its exit code, which 'Stop' doesn't catch, so check it here:
+    # otherwise a failed lookup would read as "no service principal".
+    function Invoke-Az { $out = az @args; if ($LASTEXITCODE) { throw "az $($args[0..2] -join ' ') failed (exit $LASTEXITCODE)." }; $out }
+    # 'sp list' returns nothing, successfully, for an app with no service principal; 'sp show' fails for it.
+    $cli    = Invoke-Az ad sp list --filter "appId eq '04b07795-8ddb-461a-bbee-02f9e1bf7b46'" --query '[0].id' -o tsv   # the Azure CLI
+    if (-not $cli) { 'The Azure CLI has no service principal in this tenant, so it holds no consent to revoke.'; return }
+    $server = Invoke-Az ad sp list --filter "appId eq '<serverClientId>'" --query '[0].id' -o tsv
+    if (-not $server) { throw 'No service principal for <serverClientId>: check the client ID and that az is signed in to the right tenant.' }
+    # Invoke-RestMethod rather than az rest: a next-page link holds '&', which az.cmd on Windows would split on.
+    $headers = @{ Authorization = 'Bearer ' + (Invoke-Az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv) }
+    # Every page: each user's consent is a grant of its own, so there can be more than Graph returns at once.
+    $url = "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$cli' and resourceId eq '$server'"
+    $grants = @()
+    while ($url) {
+        $page = Invoke-RestMethod -Uri $url -Headers $headers
+        $grants += $page.value
+        $url = $page.'@odata.nextLink'
+    }
+    $grants | Format-Table id, consentType, principalId, scope
+    foreach ($grant in $grants) {
+        Invoke-RestMethod -Method Delete -Uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($grant.id)" -Headers $headers
+    }
+}
+```
+
+Tokens already issued stay valid until they expire.
 
 ## Restrict calling client applications
 
@@ -53,6 +97,16 @@ legitimate integrations will receive HTTP 403.
 Entra admin center → Enterprise applications → **taas-mcp-server** → Users and groups → add the users/groups who
 should be able to use the ticketing tools through any agent.
 
+> **Assign help-desk staff only.** Everyone assigned gets the whole Ticketing API key's reach, through their agent:
+> every ticket and its private notes and attachments, and changing, reassigning or closing any ticket. The server has
+> no per-ticket or per-role permissions yet ([design](design/role-scoped-access.md)). Don't assign a company-wide
+> group, such as everyone licensed for Copilot.
+>
+> Keep **Assignment required** on (Enterprise applications → taas-mcp-server → Properties). The server checks only
+> that a token carries the `access_as_user` scope, so with assignment off, every member and guest of the tenant can
+> use it. Setting `Entra:AcceptedClientApplicationIds` (above) adds a second check on which client applications may
+> call.
+
 For application callers (Foundry managed identity or agent identity) assign the app role instead; see
 [foundry.md](foundry.md).
 
@@ -68,6 +122,13 @@ URL to the app registration under Authentication → Web.
 ```powershell
 az account get-access-token --resource api://<serverClientId> --query accessToken -o tsv
 ```
+
+The Azure CLI needs consent for the scope first. On a test tenant, a registration made with `-PreAuthorizeAzureCli`
+gives it without a prompt. Otherwise a user (where users may consent) or an admin grants it, for example by signing in
+with `az login --scope api://<serverClientId>/access_as_user` (the Azure CLI has no static permission on the server, so
+`/.default` can't ask for it); until then Entra refuses with *consent required*
+(AADSTS65001). If `Entra:AcceptedClientApplicationIds` is set, the server also refuses the token unless the Azure CLI's
+client ID, `04b07795-8ddb-461a-bbee-02f9e1bf7b46`, is in that list.
 
 Decode it (for example at jwt.ms) and check `aud` = `<serverClientId>` (v2 tokens use the GUID), `scp` contains
 `access_as_user`, and `oid`, `name`, `preferred_username` are present.

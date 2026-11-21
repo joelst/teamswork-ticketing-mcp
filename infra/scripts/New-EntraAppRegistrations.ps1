@@ -10,8 +10,12 @@
          - Delegated scope access_as_user (users / Copilot Studio / Foundry identity passthrough / VS Code)
          - App role        Ticketing.ReadWrite (application; for Foundry project managed identity / agent identity)
          - v2 access tokens, optional claims for email
-         - Azure CLI pre-authorized so `az login` users can run the stdio transport locally
          - Service principal with "assignment required" so only assigned users/groups/identities can get tokens
+         - With -PreAuthorizeAzureCli only: Azure CLI pre-authorized, so `az account get-access-token` gets a token
+           for the server without a consent prompt, for testing the HTTP endpoint by hand. Leave it off in production:
+           it lets anyone who phishes an assigned user's Azure CLI sign-in (device code) or copies their CLI token
+           cache call the server as that user without ever seeing a consent screen. A run without it removes an
+           earlier pre-authorization. Clients pre-authorized by hand, on either app, are kept.
 
       2. Copilot Studio connector app (default name: taas-mcp-copilot-connector)
          - Delegated permission to the server scope
@@ -23,6 +27,10 @@
 
 .EXAMPLE
     ./New-EntraAppRegistrations.ps1 -TenantId 00000000-0000-0000-0000-000000000000
+
+.EXAMPLE
+    ./New-EntraAppRegistrations.ps1 -TenantId 00000000-0000-0000-0000-000000000000 -PreAuthorizeAzureCli
+    For a test tenant: also lets `az account get-access-token` get a token for the server, to call it by hand.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -31,7 +39,8 @@ param(
     [string] $ConnectorAppName = 'taas-mcp-copilot-connector',
     [string] $ScopeName = 'access_as_user',
     [string] $AppRoleName = 'Ticketing.ReadWrite',
-    [switch] $SkipConnectorApp
+    [switch] $SkipConnectorApp,
+    [switch] $PreAuthorizeAzureCli
 )
 
 $ErrorActionPreference = 'Stop'
@@ -107,6 +116,17 @@ function New-StableGuid {
     return [Guid]::new($bytes).ToString()
 }
 
+# An app's pre-authorized clients with the one this script manages set as asked: present for $ScopeId when $Include,
+# absent otherwise. Graph replaces the whole list, so clients an admin pre-authorized by hand are carried over.
+function Get-PreAuthorized {
+    param($App, [string] $ClientId, [string] $ScopeId, [bool] $Include)
+    $list = @(@($App.api.preAuthorizedApplications) | Where-Object { $_ -and $_.appId -ne $ClientId } |
+        ForEach-Object { @{ appId = $_.appId; delegatedPermissionIds = @($_.delegatedPermissionIds) } })
+    if ($Include) { $list += @{ appId = $ClientId; delegatedPermissionIds = @($ScopeId) } }
+    # The comma keeps an empty or one-item list a list.
+    return , $list
+}
+
 Write-Host "Signing in context: tenant $TenantId"
 Invoke-Az @('account', 'show', '--query', 'tenantId', '-o', 'tsv') | Out-Null
 
@@ -137,9 +157,8 @@ $serverPatch = @{
                 userConsentDescription = 'Allows the app to read and update help-desk tickets on your behalf.'
             }
         )
-        preAuthorizedApplications = @(
-            @{ appId = $AzureCliClientId; delegatedPermissionIds = @($scopeId) }
-        )
+        # Sent even when empty, so a run without -PreAuthorizeAzureCli removes an earlier pre-authorization.
+        preAuthorizedApplications = (Get-PreAuthorized -App $server -ClientId $AzureCliClientId -ScopeId $scopeId -Include $PreAuthorizeAzureCli.IsPresent)
     }
     appRoles = @(
         @{
@@ -162,6 +181,8 @@ $serverPatch = @{
 if ($PSCmdlet.ShouldProcess($ServerAppName, 'Configure identifier URI, scope, app role, optional claims')) {
     Update-Application -ObjectId $serverObjectId -Patch $serverPatch
     Write-Host "Configured $ServerAppName ($identifierUri, scope $ScopeName, role $AppRoleName)."
+    Write-Host $(if ($PreAuthorizeAzureCli) { 'Azure CLI is pre-authorized for the scope (for testing; leave it off in production).' }
+        else { 'Azure CLI is not pre-authorized for the scope (-PreAuthorizeAzureCli adds it, for testing by hand).' })
 }
 
 $serverSp = Ensure-ServicePrincipal -AppId $serverAppId -AssignmentRequired $true
@@ -191,9 +212,7 @@ if (-not $SkipConnectorApp) {
                     userConsentDescription = 'Allows the ticketing connector to read and update tickets as you.'
                 }
             )
-            preAuthorizedApplications = @(
-                @{ appId = $AzureApiConnectionsClientId; delegatedPermissionIds = @($connectorScopeId) }
-            )
+            preAuthorizedApplications = (Get-PreAuthorized -App $connector -ClientId $AzureApiConnectionsClientId -ScopeId $connectorScopeId -Include $true)
         }
         requiredResourceAccess = @(
             @{
@@ -203,7 +222,8 @@ if (-not $SkipConnectorApp) {
                 )
             }
         )
-        web = @{ redirectUris = @() }
+        # No 'web': the connector's redirect URLs are added by hand after its Copilot Studio or Foundry connection is
+        # saved, so a re-run (to change pre-authorization, say) must leave them as they are. A new app has none anyway.
     }
 
     if ($PSCmdlet.ShouldProcess($ConnectorAppName, 'Configure OBO scope, pre-authorized Azure API Connections, permission to server')) {

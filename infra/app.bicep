@@ -49,8 +49,11 @@ param serviceAccountId string = ''
 param serviceAccountName string = ''
 param serviceAccountEmail string = ''
 
-@description('Comma-separated email domains allowed for people outside the assignee list (requestors, people fields), e.g. contoso.com. Empty allows any domain.')
-param externalEmailDomains string = ''
+// Required, so a deployment without it fails here rather than as a container that won't start: without it, text an
+// agent has read could make any outside address a ticket's requestor, and so the recipient of its notifications.
+@description('Comma-separated email domains allowed for people outside the assignee list (requestors, people fields), e.g. contoso.com. * allows any domain.')
+@minLength(1)
+param externalEmailDomains string
 
 @description('Comma-separated Entra client application IDs permitted to call the MCP endpoint. Empty allows any client.')
 param acceptedClientApplicationIds string = ''
@@ -89,9 +92,6 @@ var serviceAccountEnv = empty(serviceAccountId) ? [] : [
   { name: 'Ticketing__ServiceAccount__Email', value: serviceAccountEmail }
 ]
 
-var externalEmailDomainsEnv = empty(externalEmailDomains) ? [] : [
-  { name: 'Ticketing__ExternalEmailDomains', value: externalEmailDomains }
-]
 
 var clientApplicationIdsEnv = concat(
   empty(acceptedClientApplicationIds) ? [] : [
@@ -165,7 +165,8 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'Entra__TenantId', value: entraTenantId }
             { name: 'Entra__ClientId', value: entraClientId }
             { name: 'Entra__PublicBaseUrl', value: publicBaseUrl }
-          ], serviceAccountEnv, externalEmailDomainsEnv, clientApplicationIdsEnv)
+            { name: 'Ticketing__ExternalEmailDomains', value: externalEmailDomains }
+          ], serviceAccountEnv, clientApplicationIdsEnv)
           probes: [
             {
               type: 'Startup'

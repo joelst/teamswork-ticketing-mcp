@@ -77,6 +77,10 @@ jobs:
       - name: Cowork plugin
         shell: pwsh
         run: ./scripts/tests/Test-CoworkPlugin.ps1
+      # The outside-email-domain check the deployment entry points run before deploying.
+      - name: External email domains check
+        shell: pwsh
+        run: ./scripts/tests/Test-ExternalEmailDomains.ps1
 
   # Compiles the templates and their parameter files, which catches a parameter value outside a template's limits
   # before a deployment does. Needs no Azure sign-in.
@@ -86,6 +90,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Compile Bicep
+        env:
+          # app.bicepparam requires it, with no fallback; any domain compiles.
+          TAAS_EXTERNAL_EMAIL_DOMAINS: example.com
         run: |
           set -eu
           az bicep install

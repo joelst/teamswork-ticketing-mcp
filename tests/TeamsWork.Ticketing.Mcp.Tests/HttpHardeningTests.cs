@@ -62,6 +62,32 @@ public sealed class HttpHardeningTests
         Assert.Contains("Entra:TenantId", report, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData(",")]   // separators alone name no domain, and would otherwise allow any
+    [InlineData("@ ;")]
+    public async Task Entra_mode_refuses_to_start_until_outside_email_domains_are_chosen(string domains)
+    {
+        await using var factory = new McpServerFactory { Settings = { ["Ticketing:ExternalEmailDomains"] = domains } };
+
+        Exception ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+
+        Assert.True(StartupErrorReport.TryFormat(ex, new System.Collections.Hashtable(), null, out string report), ex.ToString());
+        Assert.Contains("Ticketing:ExternalEmailDomains must be set", report, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Entra_mode_starts_when_any_outside_email_domain_is_allowed_explicitly()
+    {
+        await using var factory = new McpServerFactory { Settings = { ["Ticketing:ExternalEmailDomains"] = "*" } };
+        using HttpClient http = factory.CreateClient();
+
+        using HttpResponseMessage r = await http.GetAsync("/healthz", Ct);
+
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+    }
+
     [Fact]
     public async Task One_caller_is_rate_limited_without_affecting_another()
     {

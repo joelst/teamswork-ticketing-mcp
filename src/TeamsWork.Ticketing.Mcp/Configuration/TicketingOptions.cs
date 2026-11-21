@@ -116,24 +116,49 @@ public sealed class TicketingOptions
 
     /// <summary>
     /// Comma-separated email domains (for example "contoso.com, contoso.co.uk") that people outside the instance's
-    /// assignee list may have when named as a requestor or in a people field. Unset allows any domain. Set it so text an
-    /// agent has read can't make an outside address the requestor of a ticket, and so receive its notifications.
+    /// assignee list may have when named as a requestor or in a people field, or <c>*</c> alone to allow any domain.
+    /// Set it so text an agent has read can't make an outside address the requestor of a ticket, and so receive its
+    /// notifications. Required with Entra sign-in; unset allows any domain for stdio and --local.
     /// </summary>
     public string? ExternalEmailDomains { get; set; }
 
+    /// <summary>The value that allows any domain, as an explicit choice rather than an unset setting.</summary>
+    public const string AnyExternalEmailDomain = "*";
+
     /// <summary>
-    /// The domains in <see cref="ExternalEmailDomains"/>, lower case. Matching is exact (a subdomain is a different
-    /// domain), and every entry must be an ASCII host name (punycode for an internationalised one); startup refuses
-    /// anything else, so a typo or wildcard can't silently match nothing.
+    /// The domains in <see cref="ExternalEmailDomains"/>, lower case; empty when it is unset or <c>*</c>, which allow
+    /// any domain. Matching is exact (a subdomain is a different domain), and every entry must be an ASCII host name
+    /// (punycode for an internationalised one); startup refuses anything else, so a typo or wildcard can't silently
+    /// match nothing.
     /// </summary>
     public IReadOnlySet<string> ExternalEmailDomainSet() =>
-        ExternalEmailDomainEntries().Select(d => d.ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
+        AllowsAnyExternalEmailDomain()
+            ? new HashSet<string>(StringComparer.Ordinal)
+            : ExternalEmailDomainEntries().Select(d => d.ToLowerInvariant()).ToHashSet(StringComparer.Ordinal);
 
-    /// <summary>Entries of <see cref="ExternalEmailDomains"/> that aren't plain ASCII host names.</summary>
+    /// <summary>
+    /// True when <see cref="ExternalEmailDomains"/> is <c>*</c> alone, give or take spaces around it. Only that: a value
+    /// such as "*,", "@*" or "*;" is malformed, so it is refused at startup rather than read as allowing any domain.
+    /// </summary>
+    public bool AllowsAnyExternalEmailDomain() =>
+        string.Equals(ExternalEmailDomains?.Trim(' '), AnyExternalEmailDomain, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Entries of <see cref="ExternalEmailDomains"/> that aren't plain ASCII host names. <c>*</c> is valid only on its
+    /// own, so a list such as "contoso.com, *" can't read as a restriction while allowing everything.
+    /// </summary>
     public IReadOnlyList<string> InvalidExternalEmailDomains() =>
-        ExternalEmailDomainEntries()
-            .Where(d => !TeamsWork.Ticketing.Mcp.Tools.ToolValidation.IsHostName(d))
-            .ToList();
+        AllowsAnyExternalEmailDomain()
+            ? []
+            : ExternalEmailDomainEntries()
+                .Where(d => !TeamsWork.Ticketing.Mcp.Tools.ToolValidation.IsHostName(d))
+                .ToList();
+
+    /// <summary>
+    /// True when <see cref="ExternalEmailDomains"/> names at least one domain, or is <c>*</c>. A value of separators alone
+    /// (",", "@", "; ") names none, and would otherwise read as unset, which allows any domain.
+    /// </summary>
+    public bool HasExternalEmailDomainEntries() => ExternalEmailDomainEntries().Any();
 
     private IEnumerable<string> ExternalEmailDomainEntries() =>
         (ExternalEmailDomains ?? "")
