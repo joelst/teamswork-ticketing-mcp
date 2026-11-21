@@ -216,14 +216,17 @@ public sealed class TicketTools
 
             var state = new JsonObject();
             TicketViews.Status(state, created, createdWorkflows);
+            // The people as the created ticket shows them (the priority is handled above).
+            (Dictionary<string, object?> people, string? differs) = TicketViews.Confirm(created, new TicketWrite { Requestor = write.Requestor, Assignee = write.Assignee });
+            string notes = string.Join(" ", new[] { warning, differs }.OfType<string>());
             return TicketViews.Ack(created, actor, new Dictionary<string, object?>
             {
                 ["status"] = state["status"]?.GetValue<string>(),
                 ["statusId"] = state["statusId"]?.GetValue<string>(),
                 ["priority"] = TicketViews.Priority(created.Priority),
-                ["requestor"] = TicketViews.Person(write.Requestor),
-                ["assignee"] = TicketViews.Person(write.Assignee),
-            }, warning: warning);
+                ["requestor"] = people.GetValueOrDefault("requestor"),
+                ["assignee"] = people.GetValueOrDefault("assignee"),
+            }, warning: notes.Length > 0 ? notes : null);
         });
     }
 
@@ -300,17 +303,12 @@ public sealed class TicketTools
 
             Ticket updated = await _client.UpdateTicketAsync(id, write, actor.ToTicketUser(), includeHtml: false, timezoneOffset, cancellationToken);
             _cache.Seen(updated);
-            return TicketViews.Ack(updated, actor, new Dictionary<string, object?>
-            {
-                ["title"] = write.Title,
-                ["description"] = write.Description is not null || write.DescriptionHtml is not null ? "updated" : null,
-                ["requestor"] = TicketViews.Person(write.Requestor),
-                ["assignee"] = TicketViews.Person(write.Assignee),
-                ["priority"] = write.Priority,
-                ["expectedDate"] = write.ExpectedDate,
-                ["tags"] = TicketViews.TagList(write.Tags),
-                ["customFields"] = customFields is { Count: > 0 } ? customFields.Keys.ToList() : null,
-            }, warning: tagWarning);
+            (Dictionary<string, object?> changed, string? differs) = TicketViews.Confirm(updated, write);
+            changed["description"] = write.Description is not null || write.DescriptionHtml is not null ? "updated" : null;
+            changed["tags"] = TicketViews.TagList(write.Tags);
+            changed["customFields"] = customFields is { Count: > 0 } ? customFields.Keys.ToList() : null;
+            string? warning = string.Join(" ", new[] { tagWarning, differs }.OfType<string>());
+            return TicketViews.Ack(updated, actor, changed, warning: warning.Length > 0 ? warning : null);
         });
     }
 
@@ -396,7 +394,8 @@ public sealed class TicketTools
 
             Ticket updated = await _client.UpdateTicketAsync(id, new TicketWrite { Assignee = resolved }, actor.ToTicketUser(), includeHtml: false, timezoneOffset, cancellationToken);
             _cache.Seen(updated);
-            return TicketViews.Ack(updated, actor, new Dictionary<string, object?> { ["assignee"] = TicketViews.Person(resolved) });
+            (Dictionary<string, object?> changed, string? differs) = TicketViews.Confirm(updated, new TicketWrite { Assignee = resolved });
+            return TicketViews.Ack(updated, actor, changed, warning: differs);
         });
     }
 

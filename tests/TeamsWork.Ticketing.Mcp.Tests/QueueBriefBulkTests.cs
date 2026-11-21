@@ -321,7 +321,7 @@ public sealed class QueueBriefBulkTests
     public async Task A_brief_of_five_activities_fits_the_4_kb_budget()
     {
         string acts = "{\"items\":[" + string.Join(",", Enumerable.Range(1, 20).Select(i => $$"""
-            {"id":"act-{{i}}-0000000000000000","action":"commented","comment":"{{new string('w', 300)}}\n\nFrom: Someone\nSent: earlier\nSubject: Re: help\n{{new string('q', 2000)}}",
+            {"id":"act-{{i}}-0000000000000000","action":"commented","comment":"{{new string('w', 300)}}\n\nFrom: Someone\nSent: Monday, November 18, 2026 10:00 AM\nSubject: Re: help\n{{new string('q', 2000)}}",
              "user":{{(i % 2 == 0 ? Agent : Requestor)}},"createdOn":"2026-11-18T12:00:00.1234567Z","cc":[],"_ts":1,"inboundProcessingId":"x"}
             """)) + "]}";
         var handler = new Router(r => r.Path switch
@@ -599,13 +599,13 @@ public sealed class QueueBriefBulkTests
     }
 
     [Theory]
-    [InlineData("Thanks.\n________________________________\nFrom: Pat <pat@example.test>\nSent: Monday\nTo: Help\nSubject: Re: help\nold")]
-    [InlineData("Thanks.\nFrom: Pat <pat@example.test>\nDate: Monday\nSubject: Re: help\nold")]
+    [InlineData("Thanks.\n________________________________\nFrom: Pat <pat@example.test>\nSent: Monday, November 18, 2026 10:00 AM\nTo: Help\nSubject: Re: help\nold")]
+    [InlineData("Thanks.\nFrom: Pat <pat@example.test>\nDate: Monday, November 18, 2026 10:00 AM\nSubject: Re: help\nold")]
     [InlineData("Thanks.\n-----Original Message-----\nold")]
     [InlineData("Thanks.\nOn Mon, 1 Jan 2026 at 10:00, Pat wrote:\n> old")]
     [InlineData("Thanks.\r\n-----Original Message-----\r\nold")]
     [InlineData("Thanks.\r\nOn Mon, 1 Jan 2026 at 10:00, Pat wrote:\r\n> old")]
-    [InlineData("Thanks.\r\nFrom: Pat <pat@example.test>\r\nSent: Monday\r\nSubject: Re: help\r\nold")]
+    [InlineData("Thanks.\r\nFrom: Pat <pat@example.test>\r\nSent: Monday, November 18, 2026 10:00 AM\r\nSubject: Re: help\r\nold")]
     public void A_real_quoted_reply_is_cut(string text)
     {
         Assert.StartsWith("Thanks. [quoted reply cut", TicketViews.StripQuoted(text), StringComparison.Ordinal);
@@ -663,6 +663,71 @@ public sealed class QueueBriefBulkTests
             filter: new BulkFilter { TitlePattern = "T*" }, set: new BulkChanges { AddTags = [new TagRef { TagCategoryId = "prod", Text = "VPN" }] }, cancellationToken: Ct));
 
         Assert.Equal(1, doc.RootElement.GetProperty("count").GetInt32());
+        // Both VPNs show their categories, so the user can see which tag they are approving.
+        Assert.Equal("prod", doc.RootElement.GetProperty("to").GetProperty("addTags")[0].GetProperty("tagCategoryId").GetString());
+        Assert.Equal("net", doc.RootElement.GetProperty("items")[0].GetProperty("from").GetProperty("tags")[0].GetProperty("tagCategoryId").GetString());
+    }
+
+    [Fact]
+    public void A_title_pattern_of_many_wildcards_matches_without_backtracking()
+    {
+        System.Text.RegularExpressions.Regex glob = BulkTools.Glob("*a*a*a*a*a*a*a*a*a*a*a*a*b");
+
+        Assert.DoesNotMatch(glob, new string('a', 20_000));   // would time out with backtracking
+        Assert.Matches(glob, "aaaaaaaaaaaab");
+    }
+
+    [Fact]
+    public void A_public_comment_with_no_author_leaves_waiting_on_unknown()
+    {
+        List<Activity> history = Parse<List<Activity>>($$"""
+            [{"action":"commented","comment":"Any update?","createdOn":"2026-11-19T12:00:00Z"},
+             {"action":"commented","comment":"Try this","user":{{Agent}},"createdOn":"2026-11-18T12:00:00Z"}]
+            """);
+
+        Waiting.State s = Waiting.Compute(Ticket("In Progress"), history, People(), resolved: false, complete: true, Now);
+
+        Assert.Null(s.WaitingOn);   // not "requestor" from the older agent reply
+        Assert.True(s.AuthorUnknown);
+    }
+
+    [Fact]
+    public async Task A_cancel_while_a_tickets_first_write_is_out_reports_it_rather_than_resume_it()
+    {
+        // Priority only: one PUT, which the cancel may cut off after it was sent.
+        var store = new BulkStore(Clock);
+        var preview = new Router(r => r.Path.EndsWith("/instance", StringComparison.Ordinal) ? InstanceJson : WeeklyChecks());
+        using JsonDocument previewed = JsonDocument.Parse(await Bulk(preview, store).PreviewBulkUpdate(
+            filter: new BulkFilter { TitlePattern = "Weekly check:*" }, set: new BulkChanges { Priority = "Urgent" }, cancellationToken: Ct));
+        string token = previewed.RootElement.GetProperty("confirmToken").GetString()!;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var confirm = new Router(r =>
+        {
+            if (r.Method == HttpMethod.Put)
+            {
+                cts.Cancel();
+                throw new OperationCanceledException(cts.Token);
+            }
+
+            return "{\"item\":" + (r.Path.Contains(Id(1), StringComparison.Ordinal) ? Bulk(1, "Weekly check: backups", "In Progress", 1000) : Bulk(2, "Weekly check: patching", "In Progress", 2000)) + "}";
+        });
+        BulkTools bulk = Bulk(confirm, store);
+
+        try
+        {
+            await bulk.BulkUpdate(token, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        using JsonDocument doc = JsonDocument.Parse(await bulk.BulkUpdate(token, Ct));
+
+        JsonElement failed = Assert.Single(doc.RootElement.GetProperty("failed").EnumerateArray());
+        Assert.Equal(101, failed.GetProperty("ticketNo").GetInt32());
+        Assert.Contains("the fields change may or may not have been", failed.GetProperty("error").GetString(), StringComparison.Ordinal);
+        BulkStore.Batch rest = store.Find(doc.RootElement.GetProperty("resumeToken").GetString()!)!;
+        Assert.DoesNotContain(rest.Items, i => i.Id == Guid.Parse(Id(1)));   // not resumed: its write may still land
     }
 
     [Fact]
@@ -1184,7 +1249,7 @@ public sealed class QueueBriefBulkTests
     [Fact]
     public void The_whole_text_keeps_the_quoted_reply()
     {
-        var a = new Activity { Id = "a", Comment = "Thanks.\nFrom: Pat <pat@example.test>\nSent: Monday\nSubject: Re: help\nold message" };
+        var a = new Activity { Id = "a", Comment = "Thanks.\nFrom: Pat <pat@example.test>\nSent: Monday, November 18, 2026 10:00 AM\nSubject: Re: help\nold message" };
 
         Assert.EndsWith("old message", TicketViews.Activity(a, includeHtml: false, TicketViews.FullTextChars)["text"]!.GetValue<string>(), StringComparison.Ordinal);
         Assert.Contains("quoted reply cut", TicketViews.Activity(a, includeHtml: false)["text"]!.GetValue<string>(), StringComparison.Ordinal);
@@ -1355,9 +1420,9 @@ public sealed class QueueBriefBulkTests
         Activity a = Parse<Activity>("""{"id":"a","action":"commented","comment":"    indented code\n    more","createdOn":"2026-11-18T12:00:00Z"}""");
 
         Assert.Equal("    indented code\n    more", TicketViews.Activity(a, includeHtml: false, TicketViews.FullTextChars)["text"]!.GetValue<string>());
-        Assert.Equal("indented code\n    more", TicketViews.Activity(a, includeHtml: false)["text"]!.GetValue<string>());
+        Assert.Equal("    indented code\n    more", TicketViews.Activity(a, includeHtml: false)["text"]!.GetValue<string>());   // fits, so kept as written
         Assert.EndsWith("[quoted reply cut; list_ticket_activities with maxChars=20000 has it]",
-            TicketViews.StripQuoted("Thanks.\r\nFrom: Pat\r\nSent: Monday\r\nTo: Help desk\r\nSubject: Re: help\r\n\r\nOld text"), StringComparison.Ordinal);
+            TicketViews.StripQuoted("Thanks.\r\nFrom: Pat\r\nSent: Monday, November 18, 2026 10:00 AM\r\nTo: Help desk\r\nSubject: Re: help\r\n\r\nOld text"), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1701,12 +1766,12 @@ public sealed class QueueBriefBulkTests
     [Fact]
     public void The_quoted_reply_note_comes_after_the_cut_whole()
     {
-        string text = new string('n', 300) + "\r\nFrom: Pat\r\nSent: Monday\r\nTo: Help desk\r\nSubject: Re: help\r\n\r\n" + new string('q', 5000);
+        string text = new string('n', 300) + "\r\nFrom: Pat\r\nSent: Monday, November 18, 2026 10:00 AM\r\nTo: Help desk\r\nSubject: Re: help\r\n\r\n" + new string('q', 5000);
 
         string? reply = TicketViews.Reply("\r\n  " + text, 160);
 
         Assert.EndsWith("[quoted reply cut; list_ticket_activities with maxChars=20000 has it]", reply, StringComparison.Ordinal);
-        Assert.Contains("[140 more characters]", reply, StringComparison.Ordinal);   // the new part's count, not the note's
+        Assert.Contains("[142 more characters]", reply, StringComparison.Ordinal);   // the new part's count (its indentation kept), not the note's
     }
 
     [Fact]
@@ -1850,7 +1915,8 @@ public sealed class QueueBriefBulkTests
 
     [Theory]
     [InlineData("Load test:\nFrom: 10.1.1.1\nSent: 500 requests\nAll were denied", false)]
-    [InlineData("Thanks.\nFrom: Pat <pat@example.test>\nSent: Monday\nTo: Help\nSubject: Re: VPN\nold", true)]
+    [InlineData("Load test:\nFrom: 10.1.1.1\nSent: 500 requests\nSubject: API health check\nAll were denied", false)]   // no date in Sent
+    [InlineData("Thanks.\nFrom: Pat <pat@example.test>\nSent: Monday, November 18, 2026 10:00 AM\nTo: Help\nSubject: Re: VPN\nold", true)]
     public void A_header_block_needs_a_subject_to_be_cut_as_a_quoted_email(string text, bool cut) =>
         Assert.Equal(cut, TicketViews.StripQuoted(text).Contains("[quoted reply cut", StringComparison.Ordinal));
 

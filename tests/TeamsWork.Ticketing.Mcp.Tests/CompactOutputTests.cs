@@ -209,7 +209,7 @@ public sealed class CompactOutputTests
         var activity = new Activity
         {
             Id = "a1",
-            Comment = "Thanks, that fixed it.\n\nFrom: Jane Doe <jane@example.test>\nSent: Monday\nSubject: Re: help\nOld message",
+            Comment = "Thanks, that fixed it.\n\nFrom: Jane Doe <jane@example.test>\nSent: Monday, November 18, 2026 10:00 AM\nSubject: Re: help\nOld message",
             CommentHtml = "<p>Thanks</p>",
             CreatedDateTime = "2026-11-18T17:30:29.5Z",
             CreatedBy = new TicketUser("r1", "Pat Example", "pat@example.test"),
@@ -243,7 +243,7 @@ public sealed class CompactOutputTests
     {
         var handler = new FakeHttpHandler()
             .Enqueue(HttpStatusCode.OK, InstanceJson)
-            .Enqueue(HttpStatusCode.OK, FullTicket);
+            .Enqueue(HttpStatusCode.OK, FullTicket.Replace(JaneAssigned, JohnAssigned, StringComparison.Ordinal));
         (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
 
         string json = await new TicketTools(client, new FixedActor(Jane), cache, options)
@@ -256,6 +256,27 @@ public sealed class CompactOutputTests
         Assert.Equal("Jane Doe <jane@example.test>", doc.RootElement.GetProperty("actedAs").GetString());
         Assert.DoesNotContain("xxxx", json, StringComparison.Ordinal); // the description isn't echoed
         Assert.True(Encoding.UTF8.GetByteCount(json) <= 400, $"An acknowledgment should be 400 bytes or less, not {Encoding.UTF8.GetByteCount(json)}.");
+        Assert.False(doc.RootElement.TryGetProperty("warning", out _));
+    }
+
+    private const string JaneAssigned = "\"assignee\":{\"id\":\"u1\",\"name\":\"Jane Doe\",\"email\":\"jane@example.test\"}";
+    private const string JohnAssigned = "\"assignee\":{\"id\":\"u2\",\"name\":\"John Smith\",\"email\":\"john@example.test\"}";
+
+    [Fact]
+    public async Task An_acknowledgment_shows_what_the_returned_ticket_has_and_warns_when_it_differs()
+    {
+        // The API answers with the ticket still assigned to Jane.
+        var handler = new FakeHttpHandler()
+            .Enqueue(HttpStatusCode.OK, InstanceJson)
+            .Enqueue(HttpStatusCode.OK, FullTicket);
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
+
+        using JsonDocument doc = JsonDocument.Parse(await new TicketTools(client, new FixedActor(Jane), cache, options)
+            .AssignTicket(TicketA, "john@example.test", cancellationToken: Ct));
+
+        Assert.Equal("Jane Doe <jane@example.test>", doc.RootElement.GetProperty("changed").GetProperty("assignee").GetString());
+        Assert.Contains("assignee is Jane Doe <jane@example.test>, not John Smith <john@example.test>",
+            doc.RootElement.GetProperty("warning").GetString(), StringComparison.Ordinal);
     }
 
     // ---- Instance settings ---------------------------------------------------------------------------------------

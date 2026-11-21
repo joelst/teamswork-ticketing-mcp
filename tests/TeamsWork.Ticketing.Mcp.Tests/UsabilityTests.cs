@@ -486,6 +486,41 @@ public sealed class UsabilityTests
     }
 
     [Fact]
+    public async Task A_ticket_tag_a_deleted_category_also_has_is_refused_rather_than_moved()
+    {
+        // The ticket's VPN may be the deleted Legacy category's; reading it as Area's would rewrite it.
+        const string WithDeleted = """
+            {"items":[
+              {"id":"cat1","text":"Area","tags":[{"text":"VPN"}]},
+              {"id":"old","text":"Legacy","deleted":true,"tags":[{"text":"VPN"}]},
+              {"id":"cat2","text":"Kind","tags":[{"text":"Hardware"}]}]}
+            """;
+        var handler = new FakeHttpHandler()
+            .Enqueue(HttpStatusCode.OK, WithDeleted)
+            .Enqueue(HttpStatusCode.OK, TicketWithTags("VPN"));
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
+
+        McpException ex = await Assert.ThrowsAsync<McpException>(() => new TicketTools(client, new FixedActor(Jane), cache, options)
+            .UpdateTicket(TicketA, addTags: [new TagRef { Text = "hardware" }], cancellationToken: Ct));
+
+        Assert.Contains("Area, Legacy", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(handler.Requests, r => r.Method == HttpMethod.Put);
+    }
+
+    [Fact]
+    public async Task A_number_search_skips_a_row_whose_id_is_the_zero_uuid()
+    {
+        var handler = new FakeHttpHandler().Enqueue(HttpStatusCode.OK, $$"""
+            {"items":[{"id":"00000000-0000-0000-0000-000000000000","ticketId":2213},{"id":"{{TicketA}}","ticketId":2213}]}
+            """);
+        (TicketingClient client, InstanceCache cache, IOptions<TicketingOptions> options) = Build(handler);
+
+        Guid id = await new TicketRefs(client, cache, options.Value).ResolveAsync("2213", null, Ct);
+
+        Assert.Equal(Guid.Parse(TicketA), id);
+    }
+
+    [Fact]
     public async Task A_ticket_tag_in_two_categories_is_refused_rather_than_guessed()
     {
         var handler = new FakeHttpHandler()

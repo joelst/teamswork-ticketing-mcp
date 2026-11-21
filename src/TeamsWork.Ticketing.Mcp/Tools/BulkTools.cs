@@ -349,19 +349,21 @@ public sealed partial class BulkTools
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                // The caller gave up (a client's time limit, say). With nothing done to the ticket yet, it goes back with
-                // the rest: a comment can't have been sent, and a PUT cut off after it landed moves the ticket's _ts, so
-                // the resumed batch skips it rather than apply anything twice. With part done, it can't be retried as
-                // previewed, so it is reported. What was done is kept with the batch, so confirming the token again
-                // returns it, with a token for the tickets not reached.
-                if (done.Count == 0)
+                // The caller gave up (a client's time limit, say). A ticket nothing can have reached goes back with the
+                // rest: nothing done yet, and no write out that may still land (a comment isn't cut off once sent, so one
+                // interrupted wasn't sent). Otherwise it is reported, not resumed: a PUT cut off after it was sent may still
+                // be applied, and resuming it could race that write. What was done is kept with the batch, so confirming
+                // the token again returns it, with a token for the tickets not reached.
+                bool uncertain = attempting is not null && mayHaveLanded;
+                if (done.Count == 0 && !uncertain)
                 {
                     remaining.AddRange(batch.Items.Skip(i));
                 }
                 else
                 {
+                    string changed = done.Count == 0 ? "nothing was changed first" : $"{string.Join(", ", done)} changed";
                     string next = attempting is null ? "nothing else was" : mayHaveLanded ? $"the {attempting} change may or may not have been" : $"the {attempting} change was not made";
-                    failed.Add(new JsonObject { ["ticketNo"] = label.DeepClone(), ["error"] = $"Interrupted: {string.Join(", ", done)} changed; {next}. Check it with get_ticket_brief." });
+                    failed.Add(new JsonObject { ["ticketNo"] = label.DeepClone(), ["error"] = $"Interrupted: {changed}; {next}. Check it with get_ticket_brief." });
                     remaining.AddRange(batch.Items.Skip(i + 1));
                 }
 
@@ -517,7 +519,7 @@ public sealed partial class BulkTools
             if (!next.Select(Key).ToHashSet(StringComparer.Ordinal).SetEquals(current.Select(Key)))
             {
                 tags = next;
-                from["tags"] = TicketViews.TagList(current);
+                from["tags"] = TicketViews.TagList(current, categories: true);
             }
         }
 
@@ -588,7 +590,7 @@ public sealed partial class BulkTools
             t =>
             {
                 _cache.Seen(t);
-                return Guid.TryParse(t.Id, out _) && (titlePattern is null || titlePattern.IsMatch(t.Title ?? "")) && assigneeMatches(t) ? Pick(t, stamps) : null;
+                return Guid.TryParse(t.Id, out Guid id) && id != Guid.Empty && (titlePattern is null || titlePattern.IsMatch(t.Title ?? "")) && assigneeMatches(t) ? Pick(t, stamps) : null;
             },
             _options.MaxScanTickets,
             WorkloadTools.FullTicketPageSize,   // descriptions either way
@@ -752,12 +754,15 @@ public sealed partial class BulkTools
             Put(to, "expectedDate", Plan.ExpectedDate);
             if (AddTags.Count > 0)
             {
-                to["addTags"] = new JsonArray(AddTags.Select(t => (JsonNode?)JsonValue.Create(t.Text)).ToArray());
+                to["addTags"] = TicketViews.TagList(AddTags, categories: true);
             }
 
             if (RemoveTags.Count > 0)
             {
-                to["removeTags"] = new JsonArray(RemoveTags.Select(t => (JsonNode?)JsonValue.Create(t.Text)).ToArray());
+                // A removal without a category takes the text from any category; from.tags shows which the ticket has.
+                to["removeTags"] = new JsonArray(RemoveTags.Select(t => string.IsNullOrWhiteSpace(t.TagCategoryId)
+                    ? (JsonNode?)JsonValue.Create(t.Text)
+                    : new JsonObject { ["text"] = t.Text, ["tagCategoryId"] = t.TagCategoryId.Trim() }).ToArray());
             }
 
             if (Plan.CommentText is not null)
@@ -835,7 +840,8 @@ public sealed partial class BulkTools
     /// <summary>A title pattern: * stands for any text, ? for one character, and case doesn't matter.</summary>
     internal static Regex Glob(string pattern) =>
         new("^" + Regex.Escape(pattern.Trim()).Replace("\\*", ".*", StringComparison.Ordinal).Replace("\\?", ".", StringComparison.Ordinal) + "$",
-            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
+            // Without backtracking, a pattern of many wildcards (*a*a*a*b) takes time linear in the title, not exponential.
+            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
 }
 

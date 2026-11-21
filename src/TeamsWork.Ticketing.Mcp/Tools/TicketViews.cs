@@ -72,12 +72,13 @@ internal static partial class TicketViews
         Blank(resolution) is string r && !Guid.TryParse(r, out _) ? r : null;
 
     /// <summary>
-    /// The text, cut to <paramref name="max"/> characters with a note of how much more there was. Asked for in full
-    /// (<see cref="FullTextChars"/>), it is kept as written, indentation and all; otherwise its ends are trimmed.
+    /// The text, cut to <paramref name="max"/> characters with a note of how much more there was. Text that fits is kept
+    /// as written from its first non-blank line, indentation and all (a code or YAML sample stays valid); only a cut drops
+    /// the whitespace before it.
     /// </summary>
     public static string? Clip(string? text, int max)
     {
-        if ((max >= FullTextChars ? (string.IsNullOrWhiteSpace(text) ? null : text) : Blank(text)) is not string t)
+        if (string.IsNullOrWhiteSpace(text) || AfterBlankLines(text) is not string t)
         {
             return null;
         }
@@ -94,6 +95,22 @@ internal static partial class TicketViews
     /// <summary>The text cut to <paramref name="max"/> characters with an ellipsis, for a title in a row.</summary>
     public static string? Short(string? text, int max) =>
         Blank(text) is not string t ? null : t.Length <= max ? t : t[..Cut(t, max)].TrimEnd() + "…";
+
+    /// <summary>The text from its first line with something on it: blank lines before it say nothing, while that line's
+    /// indentation may (code, YAML), so it stays.</summary>
+    private static string AfterBlankLines(string text)
+    {
+        int start = 0;
+        for (int i = 0; i < text.Length && char.IsWhiteSpace(text[i]); i++)
+        {
+            if (text[i] == '\n')
+            {
+                start = i + 1;
+            }
+        }
+
+        return text[start..];
+    }
 
     /// <summary>Where to cut a text at most <paramref name="max"/> characters long without splitting a surrogate pair (an emoji, say).</summary>
     private static int Cut(string text, int max) => max > 0 && char.IsHighSurrogate(text[max - 1]) ? max - 1 : max;
@@ -122,7 +139,8 @@ internal static partial class TicketViews
     /// </summary>
     public static string? Reply(string? text, int max)
     {
-        if (Blank(text) is not string t)
+        // Kept as written, like any text that fits: only the quoted part, if any, is cut.
+        if (string.IsNullOrWhiteSpace(text) || AfterBlankLines(text) is not string t)
         {
             return null;
         }
@@ -350,6 +368,43 @@ internal static partial class TicketViews
 
     // ---- Writes -----------------------------------------------------------------------------------------------------
 
+    /// <summary>
+    /// The title, requestor, assignee, priority and expected date a write set, as the returned ticket shows them, so one
+    /// the API ignored or overrode isn't reported as made; the warning names each that differs from what was asked. A
+    /// field the answer doesn't carry is shown as asked.
+    /// </summary>
+    public static (Dictionary<string, object?> Changed, string? Warning) Confirm(Ticket? returned, TicketWrite write)
+    {
+        var changed = new Dictionary<string, object?>();
+        var differs = new List<string>();
+
+        void Field(string name, string? asked, string? shown, bool same)
+        {
+            if (asked is null)
+            {
+                return;
+            }
+
+            changed[name] = shown ?? asked;
+            if (shown is not null && !same)
+            {
+                differs.Add($"{name} is {shown}, not {asked}");
+            }
+        }
+
+        Field("title", write.Title, Blank(returned?.Title), string.Equals(Blank(returned?.Title), write.Title?.Trim(), StringComparison.Ordinal));
+        Field("requestor", Person(write.Requestor), Person(returned?.Requestor), TicketPeople.Same(returned?.Requestor, write.Requestor));
+        Field("assignee", Person(write.Assignee), Person(returned?.Assignee), TicketPeople.Same(returned?.Assignee, write.Assignee));
+        Field("priority", Priority(write.Priority), Priority(returned?.Priority),
+            string.Equals(Priority(returned?.Priority), Priority(write.Priority), StringComparison.OrdinalIgnoreCase));
+        string? date = Blank(returned?.ExpectedDate) is string d && d.Length >= 10 ? d[..10] : Blank(returned?.ExpectedDate);
+        Field("expectedDate", write.ExpectedDate, date, string.Equals(date, write.ExpectedDate, StringComparison.Ordinal));
+
+        return (changed, differs.Count == 0
+            ? null
+            : $"The ticket the API returned doesn't show everything asked for: {string.Join("; ", differs)}. Check it with get_ticket_brief.");
+    }
+
     /// <summary>The acknowledgement every write returns: which ticket, what changed, and who it was recorded as.</summary>
     public static WriteAck Ack(Ticket? ticket, ActingUser actor, Dictionary<string, object?>? changed = null, string? activityId = null, string? warning = null) =>
         new(true, ticket?.TicketNo, ticket?.TicketNo is null ? ticket?.Id : null, NonNull(changed), activityId,
@@ -429,10 +484,11 @@ internal static partial class TicketViews
     }
 
     /// <summary>
-    /// Tags being written, by text, with the category kept only for a text that is in the list more than once (in two
-    /// categories), which would otherwise show as two identical entries.
+    /// Tags being written, by text, with the category kept for a text that is in the list more than once (in two
+    /// categories), which would otherwise show as two identical entries, or for every tag with <paramref name="categories"/>
+    /// (a bulk preview, where the same text in another category is a different tag to approve).
     /// </summary>
-    public static JsonArray? TagList(IEnumerable<TicketTag>? tags)
+    public static JsonArray? TagList(IEnumerable<TicketTag>? tags, bool categories = false)
     {
         if (tags is null)
         {
@@ -443,7 +499,7 @@ internal static partial class TicketViews
         var shown = new JsonArray();
         foreach (TicketTag tag in list)
         {
-            bool repeated = list.Count(t => string.Equals(t.Text.Trim(), tag.Text.Trim(), StringComparison.OrdinalIgnoreCase)) > 1;
+            bool repeated = categories || list.Count(t => string.Equals(t.Text.Trim(), tag.Text.Trim(), StringComparison.OrdinalIgnoreCase)) > 1;
             shown.Add(repeated ? new JsonObject { ["text"] = tag.Text, ["tagCategoryId"] = tag.TagCategoryId } : JsonValue.Create(tag.Text));
         }
 
@@ -527,13 +583,16 @@ internal static partial class TicketViews
     [GeneratedRegex(@"^\d+_")]
     private static partial Regex NumberPrefix();
 
-    // Where the quoted part of an emailed reply starts: a mail header block (a "From:" line, then within a few lines a
-    // Sent or Date header and after it a Subject header, as Outlook's replies and forwarded messages have, where a note
-    // such as "From: 10.1.1.1 / Sent: 500 requests" has no Subject; with the underscore separator above it if there is
-    // one), its original-message
-    // banner, or Gmail's "On ... wrote:" when it names a date or time and then an address, or quoted lines follow it ("On
-    // startup the logger wrote:" in a pasted log, or "On login user@example.com wrote:" in a note, does neither). A "From:" line or a "--" line on its own is ordinary text, so it is kept.
+    // Where the quoted part of an emailed reply starts. Each form needs the evidence a reply header has, so diagnostic text
+    // that happens to look similar is kept:
+    // - a mail header block: a "From:" line, then within a few lines a Sent or Date header with a date or time in it, and
+    //   after that a Subject header, as Outlook's replies and forwarded messages have (with the underscore separator above
+    //   it if there is one). "From: 10.1.1.1 / Sent: 500 requests / Subject: API health check" has no date, so it stays;
+    // - the original-message banner;
+    // - "On ... wrote:" naming a date or time and then an address (Gmail, Apple Mail), or followed by quoted lines. "On
+    //   startup the logger wrote:" in a pasted log, or "On login user@example.com wrote:" in a note, is neither.
+    // A "From:" line or a "--" line on its own is ordinary text, so it is kept.
     // Email text often ends lines with CRLF, and a multiline $ matches before the \n only, so each $ allows the \r.
-    [GeneratedRegex(@"^(?:-{2,}[ \t]*Original Message[ \t]*-{2,}[ \t]*\r?$|On [^\r\n]{0,200}?(?:\b(?:19|20)[0-9]{2}\b|\b[0-9]{1,2}:[0-9]{2}\b)[^\r\n]{0,200}@[^\r\n]{0,200} wrote:[ \t]*\r?$|On [^\r\n]{4,200} wrote:[ \t]*\r?\n(?:[ \t]*\r?\n)?>|(?:_{10,}[ \t]*\r?\n)?From:[ \t][^\r\n]+\r?\n(?:[^\r\n]*\r?\n){0,3}?(?:Sent|Date):[^\r\n]*\r?\n(?:[^\r\n]*\r?\n){0,4}?Subject:)", RegexOptions.Multiline | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 200)]
+    [GeneratedRegex(@"^(?:-{2,}[ \t]*Original Message[ \t]*-{2,}[ \t]*\r?$|On [^\r\n]{0,200}?(?:\b(?:19|20)[0-9]{2}\b|\b[0-9]{1,2}:[0-9]{2}\b)[^\r\n]{0,200}@[^\r\n]{0,200} wrote:[ \t]*\r?$|On [^\r\n]{4,200} wrote:[ \t]*\r?\n(?:[ \t]*\r?\n)?>|(?:_{10,}[ \t]*\r?\n)?From:[ \t][^\r\n]+\r?\n(?:[^\r\n]*\r?\n){0,3}?(?:Sent|Date):[^\r\n]*?(?:\b(?:19|20)[0-9]{2}\b|\b[0-9]{1,2}:[0-9]{2}\b)[^\r\n]*\r?\n(?:[^\r\n]*\r?\n){0,4}?Subject:)", RegexOptions.Multiline | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 200)]
     private static partial Regex QuoteStart();
 }

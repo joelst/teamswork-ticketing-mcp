@@ -283,8 +283,8 @@ internal sealed partial class TicketRefs
             return null;
         }
 
-        // A row with a usable ID wins over one without, wherever it appears.
-        return rows.FirstOrDefault(t => Guid.TryParse(t.Id, out _)) is Ticket usable
+        // A row with a usable ID (a UUID, not the all-zero one) wins over one without, wherever it appears.
+        return rows.FirstOrDefault(t => Guid.TryParse(t.Id, out Guid id) && id != Guid.Empty) is Ticket usable
             ? new NumberLookup(usable.Id, true)
             : throw new McpException($"Ticket number {number} exists, but the Ticketing API returned no usable ID for it. Try list_tickets with a search for it.");
     }

@@ -76,30 +76,38 @@ internal sealed partial class InstanceLookup
     /// <summary>
     /// The tags a ticket has now, each with its category, for adding or removing one while keeping the rest (see
     /// <see cref="TagEdits"/>). Read once more if one isn't found, in case it was added since the cache was filled.
+    /// Deleted categories count too: a ticket keeps a tag from one, and a text that a deleted category and an active one
+    /// both have is refused as ambiguous rather than read as the active one's.
     /// </summary>
     public async Task<List<TicketTag>> CurrentTagsAsync(JsonElement? ticketTags)
     {
-        IReadOnlyList<TagCategory> categories = await _cache.GetTagCategoriesAsync(_client, refresh: false, _cancellationToken);
+        IReadOnlyList<TagCategory> categories = await _cache.GetTagCategoriesAsync(_client, refresh: false, _cancellationToken, includeDeleted: true);
         try
         {
             return TagEdits.Current(ticketTags, categories);
         }
         catch (McpException ex) when (IsMiss(ex))
         {
-            categories = await _cache.GetTagCategoriesAsync(_client, refresh: true, _cancellationToken);
+            categories = await _cache.GetTagCategoriesAsync(_client, refresh: true, _cancellationToken, includeDeleted: true);
             return TagEdits.Current(ticketTags, categories);
         }
     }
 
     /// <summary>
     /// The instance's tag categories (cached), for resolving the categories <paramref name="remove"/> names. Read once more
-    /// if one of them isn't found, in case it was added or renamed since the cache was filled, as with added tags.
+    /// if one of them isn't found, in case it was added or renamed since the cache was filled, as with added tags. Deleted
+    /// categories are included, after the active ones, since a ticket can still have a tag from one.
     /// </summary>
     public async Task<IReadOnlyList<TagCategory>> TagCategoriesAsync(IReadOnlyList<TagRef> remove)
     {
-        IReadOnlyList<TagCategory> categories = await _cache.GetTagCategoriesAsync(_client, refresh: false, _cancellationToken);
+        IReadOnlyList<TagCategory> categories = await _cache.GetTagCategoriesAsync(_client, refresh: false, _cancellationToken, includeDeleted: true);
         bool missing = remove.Any(r => !string.IsNullOrWhiteSpace(r.TagCategoryId) && TagEdits.FindCategory(r.TagCategoryId.Trim(), categories) is null);
-        return missing ? await _cache.GetTagCategoriesAsync(_client, refresh: true, _cancellationToken) : categories;
+        if (missing)
+        {
+            categories = await _cache.GetTagCategoriesAsync(_client, refresh: true, _cancellationToken, includeDeleted: true);
+        }
+
+        return categories.OrderBy(c => c.Deleted == true).ToList();
     }
 
     internal static McpException TagMiss(string message) => Miss(message);

@@ -82,11 +82,17 @@ internal sealed class TicketPeople
 
     /// <summary>
     /// An author that isn't a person: a configured system account (by address or by the part before the @), or one with
-    /// neither an email nor an Entra object ID, as automation rules write. People do appear with an object ID and no
-    /// email (a reply from Teams, say), so those count as people.
+    /// neither an email nor an Entra object ID, as automation rules write ({"id":"automation", ...}). People do appear
+    /// with an object ID and no email (a reply from Teams, say), so those count as people. An author the activity doesn't
+    /// name at all (<see cref="IsUnnamed"/>) isn't known to be either.
     /// </summary>
     public bool IsSystem(TicketUser? user)
     {
+        if (IsUnnamed(user))
+        {
+            return false;
+        }
+
         string? email = string.IsNullOrWhiteSpace(user?.Email) ? null : user.Email.Trim().ToLowerInvariant();
         if (email is null)
         {
@@ -96,6 +102,10 @@ internal sealed class TicketPeople
         int at = email.LastIndexOf('@');
         return _system.Contains(email) || (at > 0 && _system.Contains(email[..at]));
     }
+
+    /// <summary>No author, or one with no ID, email or name: it may be a person's or not.</summary>
+    public static bool IsUnnamed(TicketUser? user) =>
+        user is null || (string.IsNullOrWhiteSpace(user.Id) && string.IsNullOrWhiteSpace(user.Email) && string.IsNullOrWhiteSpace(user.Name));
 
     /// <summary>
     /// Whether a ticket's person is the one with <paramref name="personId"/> and <paramref name="personEmail"/>. The object
@@ -181,7 +191,10 @@ internal static partial class Waiting
             : complete && created is DateTimeOffset c ? Days(c, now)
             : null;
 
-        Activity? lastReply = history.FirstOrDefault(a => IsByPerson(a, people) && a.IsPrivate != true && !string.IsNullOrWhiteSpace(a.Comment));
+        // A public comment whose author isn't named may be a person's reply, so it is one, by someone unplaced: who the ticket
+        // waits on is then unknown rather than decided by an older reply.
+        Activity? lastReply = history.FirstOrDefault(a => (IsByPerson(a, people) || (!a.IsAutomation && TicketPeople.IsUnnamed(a.Author))) &&
+            a.IsPrivate != true && !string.IsNullOrWhiteSpace(a.Comment));
         Reply? reply = lastReply is null ? null : new Reply(Side(lastReply.Author, t, people), Parse(lastReply.When), lastReply.Comment);
 
         // Unsaid, a default workflow's state still tells (Resolved and Closed are resolved, the others aren't), by the
@@ -249,7 +262,8 @@ internal static partial class Waiting
         : people.IsAgent(author) || TicketPeople.Same(author, t.Assignee) ? "agent"
         : "other";
 
-    private static bool IsByPerson(Activity a, TicketPeople people) => !a.IsAutomation && !people.IsSystem(a.Author);
+    // By someone named who isn't a system account. An unnamed author doesn't count, so it can't make a ticket look handled.
+    private static bool IsByPerson(Activity a, TicketPeople people) => !a.IsAutomation && !TicketPeople.IsUnnamed(a.Author) && !people.IsSystem(a.Author);
 
     private static int IndexOf(IReadOnlyList<Activity> history, Activity a)
     {

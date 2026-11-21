@@ -139,8 +139,18 @@ public sealed class InstanceCache
         }
     }
 
-    /// <summary>Tag categories that haven't been deleted. <paramref name="refresh"/> works as for the instance.</summary>
-    public Task<IReadOnlyList<TagCategory>> GetTagCategoriesAsync(TicketingClient client, bool refresh, CancellationToken cancellationToken)
+    /// <summary>
+    /// Tag categories that haven't been deleted, or every one with <paramref name="includeDeleted"/>: a ticket can still
+    /// have a tag from a deleted category, and reading it as another category's would rewrite it. <paramref name="refresh"/>
+    /// works as for the instance.
+    /// </summary>
+    public async Task<IReadOnlyList<TagCategory>> GetTagCategoriesAsync(TicketingClient client, bool refresh, CancellationToken cancellationToken, bool includeDeleted = false)
+    {
+        IReadOnlyList<TagCategory> all = await AllTagCategoriesAsync(client, refresh, cancellationToken);
+        return includeDeleted ? all : all.Where(c => c.Deleted != true).ToList();
+    }
+
+    private Task<IReadOnlyList<TagCategory>> AllTagCategoriesAsync(TicketingClient client, bool refresh, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return GetAsync(
@@ -155,7 +165,7 @@ public sealed class InstanceCache
             async () =>
             {
                 ListResponse<TagCategory> r = await client.ListTagCategoriesAsync(CancellationToken.None, shared: true);
-                return (IReadOnlyList<TagCategory>)(r.Items ?? []).Where(c => c.Deleted != true).ToList();
+                return (IReadOnlyList<TagCategory>)(r.Items ?? []).ToList();
             },
             (categories, honoured, generation) =>
             {
