@@ -95,6 +95,35 @@ function Ensure-ServicePrincipal {
     return $sp
 }
 
+# Sends a JSON body to Graph from a temporary file, which keeps it off the command line.
+function Invoke-GraphWrite([string] $Method, [string] $Uri, $Body) {
+    $tmp = New-TemporaryFile
+    try {
+        [IO.File]::WriteAllText($tmp.FullName, ($Body | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
+        Invoke-Az @('rest', '--method', $Method, '--uri', $Uri, '--headers', 'Content-Type=application/json', '--body', "@$tmp") | Out-Null
+    }
+    finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+}
+
+# Tenant-wide consent (what "Grant admin consent" does) for the client to call a resource with these delegated
+# scopes, written as an oauth2PermissionGrant. `az ad app permission admin-consent` goes through an older portal API
+# that fails for a service principal created moments before ("has been removed or is configured to use an incorrect
+# application identifier"). As in Complete-CoworkSetup.ps1.
+function Grant-DelegatedConsent([string] $ClientSpId, [string] $ResourceSpId, [string[]] $Scopes) {
+    # No query string: az is a .cmd on Windows, and cmd.exe splits an unquoted URI at &.
+    $grants = @(Invoke-Az @('rest', '--method', 'GET', '--uri', "https://graph.microsoft.com/v1.0/servicePrincipals/$ClientSpId/oauth2PermissionGrants", '--query', 'value', '-o', 'json') | ConvertFrom-Json)
+    $grant = @($grants | Where-Object { $_.resourceId -eq $ResourceSpId -and $_.consentType -eq 'AllPrincipals' })[0]
+    if (-not $grant) {
+        Invoke-GraphWrite 'POST' 'https://graph.microsoft.com/v1.0/oauth2PermissionGrants' @{
+            clientId = $ClientSpId; consentType = 'AllPrincipals'; resourceId = $ResourceSpId; scope = ($Scopes -join ' ')
+        }
+        return
+    }
+    $have = @(([string] $grant.scope) -split ' ' | Where-Object { $_ })
+    $missing = @($Scopes | Where-Object { $_ -notin $have })
+    if ($missing) { Invoke-GraphWrite 'PATCH' "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($grant.id)" @{ scope = (($have + $missing) -join ' ') } }
+}
+
 # PATCHes an application. Graph refuses to pre-authorize a client for a scope that the same request creates ("a
 # Permission Id that cannot be found in the AppPermissions sets"), so a patch with api.preAuthorizedApplications is
 # sent twice: first without them, which creates the scopes, then in full.
@@ -244,16 +273,22 @@ if (-not $SkipConnectorApp) {
         Write-Host "Configured $ConnectorAppName."
     }
 
-    Ensure-ServicePrincipal -AppId $connectorAppId -AssignmentRequired $false | Out-Null
+    $connectorSp = Ensure-ServicePrincipal -AppId $connectorAppId -AssignmentRequired $false
 
     # Grant admin consent for the connector -> server delegated permission.
     if ($PSCmdlet.ShouldProcess($ConnectorAppName, 'Grant admin consent for server scope')) {
-        try {
-            Invoke-Az @('ad', 'app', 'permission', 'admin-consent', '--id', $connectorAppId) | Out-Null
-            Write-Host 'Granted admin consent for the connector app.'
-        }
-        catch {
-            Write-Warning "Admin consent could not be granted automatically ($_). Grant it in Entra admin center > App registrations > $ConnectorAppName > API permissions."
+        # A service principal created moments ago can take a little while to reach every Graph replica.
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                Grant-DelegatedConsent -ClientSpId $connectorSp.id -ResourceSpId $serverSp.id -Scopes @($ScopeName)
+                Write-Host 'Granted admin consent for the connector app.'
+                break
+            }
+            catch {
+                if ($attempt -lt 6) { Start-Sleep -Seconds 10; continue }
+                Write-Warning "Admin consent could not be granted automatically ($_). Grant it in Entra admin center > App registrations > $ConnectorAppName > API permissions."
+                break
+            }
         }
     }
 }
