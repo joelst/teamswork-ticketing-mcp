@@ -112,7 +112,8 @@ function Invoke-GraphWrite([string] $Method, [string] $Uri, $Body) {
 function Grant-DelegatedConsent([string] $ClientSpId, [string] $ResourceSpId, [string[]] $Scopes) {
     # No query string: az is a .cmd on Windows, and cmd.exe splits an unquoted URI at &.
     $grants = @(Invoke-Az @('rest', '--method', 'GET', '--uri', "https://graph.microsoft.com/v1.0/servicePrincipals/$ClientSpId/oauth2PermissionGrants", '--query', 'value', '-o', 'json') | ConvertFrom-Json)
-    $grant = @($grants | Where-Object { $_.resourceId -eq $ResourceSpId -and $_.consentType -eq 'AllPrincipals' })[0]
+    # ForEach-Object unrolls the list, which Windows PowerShell 5.1's ConvertFrom-Json emits as one object.
+    $grant = @($grants | ForEach-Object { $_ } | Where-Object { $_.resourceId -eq $ResourceSpId -and $_.consentType -eq 'AllPrincipals' })[0]
     if (-not $grant) {
         Invoke-GraphWrite 'POST' 'https://graph.microsoft.com/v1.0/oauth2PermissionGrants' @{
             clientId = $ClientSpId; consentType = 'AllPrincipals'; resourceId = $ResourceSpId; scope = ($Scopes -join ' ')
