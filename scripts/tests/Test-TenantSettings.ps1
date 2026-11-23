@@ -101,6 +101,10 @@ param([string] $Location, [ValidateSet('US', 'EU')] [string] $Region = 'US', [sw
     $path = Write-Settings '{ "Deploy-TestInstance": { "Location": "westus", "ExternalEmailDomains": "contoso.com", "TicketingRegion": "Mars" } }'
     Check 'a value from the file is validated as the parameter would be' ((Error-Of { & $deploy -SettingsPath $path }) -match 'Mars')
 
+    # One replica at most: the server keeps its rate limits in memory.
+    $path = Write-Settings '{ "Deploy-TestInstance": { "Location": "westus", "ExternalEmailDomains": "contoso.com", "MinReplicas": 2 } }'
+    Check 'the deploy refuses more than one warm replica from the file' ((Error-Of { & $deploy -SettingsPath $path }) -match 'MinReplicas')
+
     # -WhatIf previews with the file's values: Set-Variable honours -WhatIf, which would skip them.
     $path = Write-Settings '{ "Deploy-TestInstance": { "Location": "westus", "ExternalEmailDomains": "," } }'
     Check 'with -WhatIf the deploy still reads the file' ((Error-Of { & $deploy -SettingsPath $path -WhatIf }) -match 'names no domain')

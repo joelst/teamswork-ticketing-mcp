@@ -313,6 +313,10 @@ read any parameter you don't pass from there, and one you pass still wins:
 }
 ```
 
+The test instance scales to zero when idle, and the first request after that waits about 20 seconds for it to start,
+which a client such as Cowork may give up on; `"MinReplicas": 1` (or `-MinReplicas 1`) keeps one replica running, at
+the cost of an idle replica around the clock.
+
 A name the script has no parameter for stops the run, so a misspelt setting can't be left out unnoticed. So do the
 switches for one run (`SetApiKey`, `SkipImage`, `CreateSecret`, `Install`, `OpenPortal`), which go on the command
 line. The API key never goes in the file.
