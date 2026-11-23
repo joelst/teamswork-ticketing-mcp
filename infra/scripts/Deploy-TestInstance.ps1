@@ -26,6 +26,10 @@
     this setting accepted * refuses to start with it, so with -SkipImage (which deploys the newest image already in
     the registry) or when rolling back to such an image, give real domains instead.
 
+    The app scales to zero by default, and the first request after an idle spell waits for it to start (about 20
+    seconds), which a client such as Cowork may give up on. -MinReplicas 1 keeps one replica running, at the cost of an
+    idle replica around the clock.
+
     Each run deploys every setting, so one left out goes back to its default (the region to US, the service account
     to none). To keep a tenant's values without repeating them, put them under "Deploy-TestInstance" in
     infra/tenant.local.json (git-ignored; see Read-TenantSettings.ps1): any parameter not passed is read from there,
@@ -58,6 +62,7 @@ param(
     [string] $ServiceAccountName = '',
     [string] $ServiceAccountEmail = '',
     [ValidateNotNullOrEmpty()] [string] $ExternalEmailDomains,   # required, from here or the settings file
+    [ValidateRange(0, 1)] [int] $MinReplicas = 0,
     [switch] $SetApiKey,
     [switch] $SkipImage,
     [string] $SettingsPath
@@ -209,12 +214,13 @@ $app = Invoke-Az @('deployment', 'group', 'create', '-g', $ResourceGroup, '-n', 
     "defaultTimeZoneId=$DefaultTimeZoneId",
     "serviceAccountId=$ServiceAccountId", "serviceAccountName=$ServiceAccountName", "serviceAccountEmail=$ServiceAccountEmail",
     "externalEmailDomains=$ExternalEmailDomains",
+    "minReplicas=$MinReplicas",
     '--query', 'properties.outputs', '-o', 'json') | ConvertFrom-Json
 $base = "https://$($app.containerAppFqdn.value)"
 
 # ------------------------------------------------------------------------------------------------------------------
 Step 'Smoke test'
-# The app scales to zero, so the first request can take a while.
+# The app may scale to zero, so the first request can take a while.
 $healthy = $false
 for ($i = 0; $i -lt 30 -and -not $healthy; $i++) {
     try { $healthy = (Invoke-WebRequest -UseBasicParsing "$base/healthz" -TimeoutSec 30).StatusCode -eq 200 } catch { Start-Sleep -Seconds 5 }

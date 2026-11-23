@@ -452,8 +452,9 @@ static void AddTools(IMcpServerBuilder mcp) =>
         .WithTools<AttachmentTools>()
         .WithTools<InstanceTools>()
         .WithInstanceStates()
-        // A ticket number sent as a JSON number (2213, not "2213") is taken as the string it stands for.
-        .WithRequestFilters(filters => filters.AddCallToolFilter(TicketArguments.Filter));
+        // A ticket number sent as a JSON number (2213, not "2213") is taken as the string it stands for, and a call
+        // missing a required argument is told which, rather than failing to bind with a generic error.
+        .WithRequestFilters(filters => filters.AddCallToolFilter(TicketArguments.Filter).AddCallToolFilter(RequiredArguments.Filter));
 
 static void ConfigureServerOptions(ModelContextProtocol.Server.McpServerOptions options)
 {

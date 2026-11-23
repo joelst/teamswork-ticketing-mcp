@@ -318,6 +318,36 @@ public sealed class AuthIntegrationTests : IClassFixture<McpServerFactory>
     }
 
     [Fact]
+    public async Task A_missing_required_argument_is_named_in_a_tool_error()
+    {
+        await using McpClient client = await ConnectAsync(McpServerFactory.UserToken());
+
+        // As a Cowork model once sent it: the ticket under another name, so 'ticket' was missing.
+        CallToolResult result = await client.CallToolAsync("get_ticket_brief", new Dictionary<string, object?> { ["ticketId"] = "1070" }, cancellationToken: Ct);
+        CallToolResult none = await client.CallToolAsync("get_ticket_brief", new Dictionary<string, object?> { ["ticket"] = null }, cancellationToken: Ct);
+
+        Assert.True(result.IsError);
+        string text = string.Join(" ", result.Content.OfType<TextContentBlock>().Select(c => c.Text));
+        Assert.StartsWith("get_ticket_brief needs 'ticket' (", text, StringComparison.Ordinal);
+        Assert.Contains("The call sent ticketId. Call it again with 'ticket'.", text, StringComparison.Ordinal);
+        Assert.True(none.IsError);
+        Assert.Contains("needs 'ticket'", string.Join(" ", none.Content.OfType<TextContentBlock>().Select(c => c.Text)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_tool_without_required_arguments_runs_without_any()
+    {
+        await using McpClient client = await ConnectAsync(McpServerFactory.UserToken());
+
+        CallToolResult result = await client.CallToolAsync("list_tickets", cancellationToken: Ct);
+
+        // Past the check: the call got as far as the API, unreachable here.
+        string text = string.Join(" ", result.Content.OfType<TextContentBlock>().Select(c => c.Text));
+        Assert.Contains("Ticketing API", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs '", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task No_tool_schema_points_elsewhere_with_a_ref()
     {
         await using McpClient client = await ConnectAsync(McpServerFactory.UserToken());
