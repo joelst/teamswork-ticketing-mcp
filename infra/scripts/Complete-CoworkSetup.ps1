@@ -25,6 +25,10 @@
     users (Application Administrator, as for New-EntraAppRegistrations.ps1). Assigning a group needs Entra ID P1 or
     P2. -WhatIf shows the Entra changes without making them.
 
+    To keep a tenant's values without repeating them, put them under "Complete-CoworkSetup" in infra/tenant.local.json
+    (git-ignored; see Read-TenantSettings.ps1): any parameter not passed is read from there, except -CreateSecret,
+    -Install and -OpenPortal, which are for one run. -SettingsPath reads another file.
+
 .EXAMPLE
     ./Complete-CoworkSetup.ps1 -ResourceGroup rg-taasmcp-test -AssignGroup 'Help desk agents' -CreateSecret
     Sets up the client, assigns the group, copies a new secret to the clipboard, and prints the developer portal values.
@@ -54,10 +58,14 @@ param(
     [string] $TermsUrl,
     [string] $AppId,
     [switch] $Install,
-    [switch] $OpenPortal
+    [switch] $OpenPortal,
+    [string] $SettingsPath
 )
 
 $ErrorActionPreference = 'Stop'
+# -CreateSecret from the file would add a client secret on every run.
+$fromFile = & (Join-Path $PSScriptRoot 'Read-TenantSettings.ps1') -Command $MyInvocation.MyCommand -Bound $PSBoundParameters -Path $SettingsPath -CommandLineOnly CreateSecret, Install, OpenPortal
+foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $GraphAppId = '00000003-0000-0000-c000-000000000000'   # Microsoft Graph
 $RedirectUri = 'https://teams.microsoft.com/api/platform/v1.0/oAuthRedirect'

@@ -7,17 +7,24 @@
     -FromEnvironment is used, e.g. in a pipeline), then writes it to the Key Vault secret the container app reads.
     The caller needs the "Key Vault Secrets Officer" role on the vault.
 
+    The vault's name can be kept under "Set-TicketingApiKey" in infra/tenant.local.json (git-ignored; see
+    Read-TenantSettings.ps1), as can any other parameter. The key itself never goes in that file.
+
 .EXAMPLE
     ./Set-TicketingApiKey.ps1 -KeyVaultName taasmcp-prod-kv-abc123
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)] [string] $KeyVaultName,
+    [string] $KeyVaultName,   # required, from here or the settings file
     [string] $SecretName = 'Ticketing--ApiKey',
-    [switch] $FromEnvironment
+    [switch] $FromEnvironment,
+    [string] $SettingsPath
 )
 
 $ErrorActionPreference = 'Stop'
+$fromFile = & (Join-Path $PSScriptRoot 'Read-TenantSettings.ps1') -Command $MyInvocation.MyCommand -Bound $PSBoundParameters -Path $SettingsPath
+foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] }
+if ([string]::IsNullOrWhiteSpace($KeyVaultName)) { throw 'Missing -KeyVaultName. Pass it, or set it under "Set-TicketingApiKey" in infra/tenant.local.json.' }
 
 if ($FromEnvironment) {
     $plain = $env:TICKETING_API_KEY

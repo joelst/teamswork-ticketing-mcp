@@ -25,25 +25,38 @@
     Requires Azure CLI 2.60+ and a signed-in account with Application Administrator (or Global Administrator)
     rights in the tenant. Nothing secret is written to disk or printed.
 
+    To keep a tenant's values without repeating them, put them under "New-EntraAppRegistrations" in
+    infra/tenant.local.json (git-ignored; see Read-TenantSettings.ps1): any parameter not passed is read from there,
+    so "PreAuthorizeAzureCli": true there keeps a test tenant's pre-authorization on every run. -SettingsPath reads
+    another file.
+
 .EXAMPLE
     ./New-EntraAppRegistrations.ps1 -TenantId 00000000-0000-0000-0000-000000000000
 
 .EXAMPLE
     ./New-EntraAppRegistrations.ps1 -TenantId 00000000-0000-0000-0000-000000000000 -PreAuthorizeAzureCli
     For a test tenant: also lets `az account get-access-token` get a token for the server, to call it by hand.
+
+.EXAMPLE
+    ./New-EntraAppRegistrations.ps1
+    Runs with the values under "New-EntraAppRegistrations" in infra/tenant.local.json.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory)] [string] $TenantId,
+    [string] $TenantId,   # required, from here or the settings file
     [string] $ServerAppName = 'taas-mcp-server',
     [string] $ConnectorAppName = 'taas-mcp-copilot-connector',
     [string] $ScopeName = 'access_as_user',
     [string] $AppRoleName = 'Ticketing.ReadWrite',
     [switch] $SkipConnectorApp,
-    [switch] $PreAuthorizeAzureCli
+    [switch] $PreAuthorizeAzureCli,
+    [string] $SettingsPath
 )
 
 $ErrorActionPreference = 'Stop'
+$fromFile = & (Join-Path $PSScriptRoot 'Read-TenantSettings.ps1') -Command $MyInvocation.MyCommand -Bound $PSBoundParameters -Path $SettingsPath
+foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] }
+if ([string]::IsNullOrWhiteSpace($TenantId)) { throw 'Missing -TenantId. Pass it, or set it under "New-EntraAppRegistrations" in infra/tenant.local.json.' }
 $AzureCliClientId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'          # Microsoft Azure CLI
 $AzureApiConnectionsClientId = 'fe053c5f-3692-4f14-aef2-ee34fc081cae' # Azure API Connections (Power Platform / Copilot Studio OBO)
 
