@@ -26,6 +26,11 @@
     this setting accepted * refuses to start with it, so with -SkipImage (which deploys the newest image already in
     the registry) or when rolling back to such an image, give real domains instead.
 
+    Each run deploys every setting, so one left out goes back to its default (the region to US, the service account
+    to none). To keep a tenant's values without repeating them, put them under "Deploy-TestInstance" in
+    infra/tenant.local.json (git-ignored; see Read-TenantSettings.ps1): any parameter not passed is read from there,
+    except -SetApiKey and -SkipImage, which are for one run. -SettingsPath reads another file.
+
 .EXAMPLE
     ./Deploy-TestInstance.ps1 -Location <region> -ExternalEmailDomains contoso.com
     Deploys to rg-taasmcp-test, finding the taas-mcp-server app registration by name.
@@ -33,10 +38,15 @@
 .EXAMPLE
     ./Deploy-TestInstance.ps1 -Location <region> -ExternalEmailDomains contoso.com -TicketingRegion EU
     For a help desk on the vendor's EU endpoint.
+
+.EXAMPLE
+    ./Deploy-TestInstance.ps1
+    Deploys with the values under "Deploy-TestInstance" in infra/tenant.local.json.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory)] [string] $Location,
+    # Required, from here or the settings file.
+    [string] $Location,
     [string] $ResourceGroup = 'rg-taasmcp-test',
     [ValidatePattern('^[a-z0-9]{3,12}$')] [string] $NamePrefix = 'taasmcp',
     [ValidatePattern('^[a-z0-9]{2,8}$')] [string] $EnvironmentName = 'test',
@@ -47,12 +57,17 @@ param(
     [string] $ServiceAccountId = '',
     [string] $ServiceAccountName = '',
     [string] $ServiceAccountEmail = '',
-    [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ExternalEmailDomains,
+    [ValidateNotNullOrEmpty()] [string] $ExternalEmailDomains,   # required, from here or the settings file
     [switch] $SetApiKey,
-    [switch] $SkipImage
+    [switch] $SkipImage,
+    [string] $SettingsPath
 )
 
 $ErrorActionPreference = 'Stop'
+$fromFile = & (Join-Path $PSScriptRoot 'Read-TenantSettings.ps1') -Command $MyInvocation.MyCommand -Bound $PSBoundParameters -Path $SettingsPath -CommandLineOnly SetApiKey, SkipImage
+foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] -WhatIf:$false -Confirm:$false }   # local, so -WhatIf mustn't skip it
+$missing = @('Location', 'ExternalEmailDomains' | Where-Object { [string]::IsNullOrWhiteSpace((Get-Variable -Name $_ -ValueOnly)) })
+if ($missing) { throw "Missing -$($missing -join ', -'). Pass it, or set it under ""Deploy-TestInstance"" in infra/tenant.local.json." }
 # Before anything is deployed: a value the server would refuse at startup (",", "@ ;") is refused here instead.
 & (Join-Path $PSScriptRoot 'Test-ExternalEmailDomains.ps1') -Value $ExternalEmailDomains
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -149,7 +164,8 @@ if ($hasKey -and -not $SetApiKey) {
     Write-Host '    already stored (run with -SetApiKey to replace it)'
 }
 else {
-    & (Join-Path $PSScriptRoot 'Set-TicketingApiKey.ps1') -KeyVaultName $vault
+    # The name core.bicep's secret URI points at, passed so a SecretName in the settings file can't move the key.
+    & (Join-Path $PSScriptRoot 'Set-TicketingApiKey.ps1') -KeyVaultName $vault -SecretName 'Ticketing--ApiKey' -SettingsPath $SettingsPath
 }
 
 # ------------------------------------------------------------------------------------------------------------------

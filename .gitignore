@@ -498,6 +498,8 @@ docs/openapi/
 plugin/cowork/app-id.txt
 # Each organization's own Cowork build values (app ID, endpoint, publisher), from Build-CoworkPackage.ps1 -SaveSettings
 plugin/cowork/cowork.local.json
+# Each organization's deployment script values (tenant, region, email domains), read by infra/scripts/Read-TenantSettings.ps1
+infra/tenant.local.json
 
 
 # Local publish output (see README)

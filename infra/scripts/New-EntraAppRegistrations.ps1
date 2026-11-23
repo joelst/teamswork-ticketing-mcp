@@ -25,25 +25,38 @@
     Requires Azure CLI 2.60+ and a signed-in account with Application Administrator (or Global Administrator)
     rights in the tenant. Nothing secret is written to disk or printed.
 
+    To keep a tenant's values without repeating them, put them under "New-EntraAppRegistrations" in
+    infra/tenant.local.json (git-ignored; see Read-TenantSettings.ps1): any parameter not passed is read from there,
+    so "PreAuthorizeAzureCli": true there keeps a test tenant's pre-authorization on every run. -SettingsPath reads
+    another file.
+
 .EXAMPLE
     ./New-EntraAppRegistrations.ps1 -TenantId 00000000-0000-0000-0000-000000000000
 
 .EXAMPLE
     ./New-EntraAppRegistrations.ps1 -TenantId 00000000-0000-0000-0000-000000000000 -PreAuthorizeAzureCli
     For a test tenant: also lets `az account get-access-token` get a token for the server, to call it by hand.
+
+.EXAMPLE
+    ./New-EntraAppRegistrations.ps1
+    Runs with the values under "New-EntraAppRegistrations" in infra/tenant.local.json.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory)] [string] $TenantId,
+    [string] $TenantId,   # required, from here or the settings file
     [string] $ServerAppName = 'taas-mcp-server',
     [string] $ConnectorAppName = 'taas-mcp-copilot-connector',
     [string] $ScopeName = 'access_as_user',
     [string] $AppRoleName = 'Ticketing.ReadWrite',
     [switch] $SkipConnectorApp,
-    [switch] $PreAuthorizeAzureCli
+    [switch] $PreAuthorizeAzureCli,
+    [string] $SettingsPath
 )
 
 $ErrorActionPreference = 'Stop'
+$fromFile = & (Join-Path $PSScriptRoot 'Read-TenantSettings.ps1') -Command $MyInvocation.MyCommand -Bound $PSBoundParameters -Path $SettingsPath
+foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] -WhatIf:$false -Confirm:$false }   # local, so -WhatIf mustn't skip it
+if ([string]::IsNullOrWhiteSpace($TenantId)) { throw 'Missing -TenantId. Pass it, or set it under "New-EntraAppRegistrations" in infra/tenant.local.json.' }
 $AzureCliClientId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'          # Microsoft Azure CLI
 $AzureApiConnectionsClientId = 'fe053c5f-3692-4f14-aef2-ee34fc081cae' # Azure API Connections (Power Platform / Copilot Studio OBO)
 
@@ -80,6 +93,36 @@ function Ensure-ServicePrincipal {
         Write-Host "Set appRoleAssignmentRequired=true on $($sp.displayName)."
     }
     return $sp
+}
+
+# Sends a JSON body to Graph from a temporary file, which keeps it off the command line.
+function Invoke-GraphWrite([string] $Method, [string] $Uri, $Body) {
+    $tmp = New-TemporaryFile
+    try {
+        [IO.File]::WriteAllText($tmp.FullName, ($Body | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
+        Invoke-Az @('rest', '--method', $Method, '--uri', $Uri, '--headers', 'Content-Type=application/json', '--body', "@$tmp") | Out-Null
+    }
+    finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+}
+
+# Tenant-wide consent (what "Grant admin consent" does) for the client to call a resource with these delegated
+# scopes, written as an oauth2PermissionGrant. `az ad app permission admin-consent` goes through an older portal API
+# that fails for a service principal created moments before ("has been removed or is configured to use an incorrect
+# application identifier"). As in Complete-CoworkSetup.ps1.
+function Grant-DelegatedConsent([string] $ClientSpId, [string] $ResourceSpId, [string[]] $Scopes) {
+    # No query string: az is a .cmd on Windows, and cmd.exe splits an unquoted URI at &.
+    $grants = @(Invoke-Az @('rest', '--method', 'GET', '--uri', "https://graph.microsoft.com/v1.0/servicePrincipals/$ClientSpId/oauth2PermissionGrants", '--query', 'value', '-o', 'json') | ConvertFrom-Json)
+    # ForEach-Object unrolls the list, which Windows PowerShell 5.1's ConvertFrom-Json emits as one object.
+    $grant = @($grants | ForEach-Object { $_ } | Where-Object { $_.resourceId -eq $ResourceSpId -and $_.consentType -eq 'AllPrincipals' })[0]
+    if (-not $grant) {
+        Invoke-GraphWrite 'POST' 'https://graph.microsoft.com/v1.0/oauth2PermissionGrants' @{
+            clientId = $ClientSpId; consentType = 'AllPrincipals'; resourceId = $ResourceSpId; scope = ($Scopes -join ' ')
+        }
+        return
+    }
+    $have = @(([string] $grant.scope) -split ' ' | Where-Object { $_ })
+    $missing = @($Scopes | Where-Object { $_ -notin $have })
+    if ($missing) { Invoke-GraphWrite 'PATCH' "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($grant.id)" @{ scope = (($have + $missing) -join ' ') } }
 }
 
 # PATCHes an application. Graph refuses to pre-authorize a client for a scope that the same request creates ("a
@@ -231,16 +274,22 @@ if (-not $SkipConnectorApp) {
         Write-Host "Configured $ConnectorAppName."
     }
 
-    Ensure-ServicePrincipal -AppId $connectorAppId -AssignmentRequired $false | Out-Null
+    $connectorSp = Ensure-ServicePrincipal -AppId $connectorAppId -AssignmentRequired $false
 
     # Grant admin consent for the connector -> server delegated permission.
     if ($PSCmdlet.ShouldProcess($ConnectorAppName, 'Grant admin consent for server scope')) {
-        try {
-            Invoke-Az @('ad', 'app', 'permission', 'admin-consent', '--id', $connectorAppId) | Out-Null
-            Write-Host 'Granted admin consent for the connector app.'
-        }
-        catch {
-            Write-Warning "Admin consent could not be granted automatically ($_). Grant it in Entra admin center > App registrations > $ConnectorAppName > API permissions."
+        # A service principal created moments ago can take a little while to reach every Graph replica.
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                Grant-DelegatedConsent -ClientSpId $connectorSp.id -ResourceSpId $serverSp.id -Scopes @($ScopeName)
+                Write-Host 'Granted admin consent for the connector app.'
+                break
+            }
+            catch {
+                if ($attempt -lt 6) { Start-Sleep -Seconds 10; continue }
+                Write-Warning "Admin consent could not be granted automatically ($_). Grant it in Entra admin center > App registrations > $ConnectorAppName > API permissions."
+                break
+            }
         }
     }
 }

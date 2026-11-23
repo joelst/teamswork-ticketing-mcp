@@ -301,6 +301,23 @@ steps with your own Azure CLI sign-in, in its own resource group (`rg-taasmcp-te
 `New-EntraAppRegistrations.ps1` first; the deploy script finds the server's app registration by name. To use the
 endpoint from Microsoft 365 Copilot Cowork, see [docs/cowork.md](docs/cowork.md).
 
+Each deploy sets every value, so one left out goes back to its default. To keep your tenant's values out of the
+repository and off the command line, put them in `infra/tenant.local.json` (git-ignored), under each script's name.
+`New-EntraAppRegistrations.ps1`, `Deploy-TestInstance.ps1`, `Set-TicketingApiKey.ps1` and `Complete-CoworkSetup.ps1`
+read any parameter you don't pass from there, and one you pass still wins:
+
+```json
+{
+  "New-EntraAppRegistrations": { "TenantId": "<tenantId>" },
+  "Deploy-TestInstance": { "Location": "<region>", "ExternalEmailDomains": "contoso.com" }
+}
+```
+
+A name the script has no parameter for stops the run, so a misspelt setting can't be left out unnoticed. So do the
+switches for one run (`SetApiKey`, `SkipImage`, `CreateSecret`, `Install`, `OpenPortal`), which go on the command
+line. The API key never goes in the file.
+`-SettingsPath` reads another file.
+
 The pipeline creates a workspace-based Application Insights resource in the Log Analytics workspace and exports
 low-cardinality application metrics. Configure `acceptedClientApplicationIds` and `blockedClientApplicationIds` in
 the production variable group to restrict which Entra client apps can call the MCP endpoint. See

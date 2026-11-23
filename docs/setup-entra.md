@@ -24,6 +24,10 @@ a failure and it carries on from the apps that already exist. It prints a summar
 (client) ID**: it is the `entraClientId` pipeline variable and the `Entra:ClientId` setting;
 `Deploy-TestInstance.ps1` finds it by the app's name.
 
+With `"New-EntraAppRegistrations": { "TenantId": "<tenantId>" }` in `infra/tenant.local.json` (git-ignored), the
+script runs with no arguments. Parameters you set there, such as `"PreAuthorizeAzureCli": true` for a test tenant,
+apply on every run, so a re-run doesn't undo them; see [Deploy](../README.md#deploy).
+
 What it configures on the server app:
 
 - Identifier URI `api://<clientId>`, v2 access tokens.
