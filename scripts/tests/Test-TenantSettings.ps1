@@ -101,6 +101,17 @@ param([string] $Location, [ValidateSet('US', 'EU')] [string] $Region = 'US', [sw
     $path = Write-Settings '{ "Deploy-TestInstance": { "Location": "westus", "ExternalEmailDomains": "contoso.com", "TicketingRegion": "Mars" } }'
     Check 'a value from the file is validated as the parameter would be' ((Error-Of { & $deploy -SettingsPath $path }) -match 'Mars')
 
+    # -WhatIf previews with the file's values: Set-Variable honours -WhatIf, which would skip them.
+    $path = Write-Settings '{ "Deploy-TestInstance": { "Location": "westus", "ExternalEmailDomains": "," } }'
+    Check 'with -WhatIf the deploy still reads the file' ((Error-Of { & $deploy -SettingsPath $path -WhatIf }) -match 'names no domain')
+    # (New-EntraAppRegistrations has no check that fails on a value, and with one that passes it would go on to az.)
+    $path = Write-Settings '{ "Complete-CoworkSetup": { "SecretMonths": 99 } }'
+    Check 'with -WhatIf the Cowork setup still reads the file' ((Error-Of { & (Join-Path $scripts 'Complete-CoworkSetup.ps1') -SettingsPath $path -WhatIf }) -match '99')
+
+    # The deploy stores the key under the name the app reads, whatever the settings file gives Set-TicketingApiKey.
+    $deployText = Get-Content -Raw $deploy
+    Check 'the deploy fixes the API key''s secret name' ($deployText -match "Set-TicketingApiKey\.ps1'\)[^\r\n]*-SecretName 'Ticketing--ApiKey'")
+
     $path = Write-Settings '{ "New-EntraAppRegistrations": { "ServerAppName": "taas-mcp-server" } }'
     Check 'the Entra script names a missing tenant ID' ((Error-Of { & $entra -SettingsPath $path }) -match 'Missing -TenantId')
     $path = Write-Settings '{ "New-EntraAppRegistrations": { "TenantID": "x", "PreAuthorizeCli": true } }'

@@ -20,7 +20,7 @@
 
 .EXAMPLE
     $fromFile = & (Join-Path $PSScriptRoot 'Read-TenantSettings.ps1') -Command $MyInvocation.MyCommand -Bound $PSBoundParameters -Path $SettingsPath
-    foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] }
+    foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] -WhatIf:$false -Confirm:$false }   # local, so -WhatIf mustn't skip it
 #>
 param(
     [Parameter(Mandatory)] [System.Management.Automation.CommandInfo] $Command,

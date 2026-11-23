@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $fromFile = & (Join-Path $PSScriptRoot 'Read-TenantSettings.ps1') -Command $MyInvocation.MyCommand -Bound $PSBoundParameters -Path $SettingsPath
-foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] }
+foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] -WhatIf:$false -Confirm:$false }   # local, so -WhatIf mustn't skip it
 if ([string]::IsNullOrWhiteSpace($TenantId)) { throw 'Missing -TenantId. Pass it, or set it under "New-EntraAppRegistrations" in infra/tenant.local.json.' }
 $AzureCliClientId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'          # Microsoft Azure CLI
 $AzureApiConnectionsClientId = 'fe053c5f-3692-4f14-aef2-ee34fc081cae' # Azure API Connections (Power Platform / Copilot Studio OBO)

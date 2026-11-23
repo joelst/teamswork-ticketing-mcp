@@ -23,7 +23,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $fromFile = & (Join-Path $PSScriptRoot 'Read-TenantSettings.ps1') -Command $MyInvocation.MyCommand -Bound $PSBoundParameters -Path $SettingsPath
-foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] }
+foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] -WhatIf:$false -Confirm:$false }   # local, so -WhatIf mustn't skip it
 if ([string]::IsNullOrWhiteSpace($KeyVaultName)) { throw 'Missing -KeyVaultName. Pass it, or set it under "Set-TicketingApiKey" in infra/tenant.local.json.' }
 
 if ($FromEnvironment) {

@@ -65,7 +65,7 @@ param(
 $ErrorActionPreference = 'Stop'
 # -CreateSecret from the file would add a client secret on every run.
 $fromFile = & (Join-Path $PSScriptRoot 'Read-TenantSettings.ps1') -Command $MyInvocation.MyCommand -Bound $PSBoundParameters -Path $SettingsPath -CommandLineOnly CreateSecret, Install, OpenPortal
-foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] }
+foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] -WhatIf:$false -Confirm:$false }   # local, so -WhatIf mustn't skip it
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $GraphAppId = '00000003-0000-0000-c000-000000000000'   # Microsoft Graph
 $RedirectUri = 'https://teams.microsoft.com/api/platform/v1.0/oAuthRedirect'

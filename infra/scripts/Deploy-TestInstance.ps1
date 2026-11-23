@@ -65,7 +65,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $fromFile = & (Join-Path $PSScriptRoot 'Read-TenantSettings.ps1') -Command $MyInvocation.MyCommand -Bound $PSBoundParameters -Path $SettingsPath -CommandLineOnly SetApiKey, SkipImage
-foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] }
+foreach ($name in $fromFile.Keys) { Set-Variable -Name $name -Value $fromFile[$name] -WhatIf:$false -Confirm:$false }   # local, so -WhatIf mustn't skip it
 $missing = @('Location', 'ExternalEmailDomains' | Where-Object { [string]::IsNullOrWhiteSpace((Get-Variable -Name $_ -ValueOnly)) })
 if ($missing) { throw "Missing -$($missing -join ', -'). Pass it, or set it under ""Deploy-TestInstance"" in infra/tenant.local.json." }
 # Before anything is deployed: a value the server would refuse at startup (",", "@ ;") is refused here instead.
@@ -164,7 +164,8 @@ if ($hasKey -and -not $SetApiKey) {
     Write-Host '    already stored (run with -SetApiKey to replace it)'
 }
 else {
-    & (Join-Path $PSScriptRoot 'Set-TicketingApiKey.ps1') -KeyVaultName $vault -SettingsPath $SettingsPath
+    # The name core.bicep's secret URI points at, passed so a SecretName in the settings file can't move the key.
+    & (Join-Path $PSScriptRoot 'Set-TicketingApiKey.ps1') -KeyVaultName $vault -SecretName 'Ticketing--ApiKey' -SettingsPath $SettingsPath
 }
 
 # ------------------------------------------------------------------------------------------------------------------
